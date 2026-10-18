@@ -3,17 +3,10 @@
 import pytest
 
 from app.models import PhysiologicalSample
-from app.store.physiological import LatestPhysiologicalStore, latest_physiological_store
+from app.store.physiological import LatestPhysiologicalStore
 
 T0 = "2026-10-15T12:00:00Z"
 T1 = "2026-10-15T12:00:01Z"
-
-
-@pytest.fixture(autouse=True)
-def clean_store():
-    latest_physiological_store.clear()
-    yield
-    latest_physiological_store.clear()
 
 
 def make_sample(athlete_id="ath-1", timestamp=T0, hr=120):

@@ -19,9 +19,11 @@ app/
   api/router.py      # aggregates routers under /api/v1
   api/health.py      # GET  /api/v1/health
   api/athletes.py    # POST /api/v1/athletes/validate
+                     # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status
   models/            # provider-agnostic Pydantic models (units documented in each file)
+  store/             # in-memory latest-sample-per-athlete stores (no database yet)
 tests/
 ```
 
@@ -37,8 +39,11 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 | `TrackingSample`      | Position (m), speed (m/s), accel (m/s²)   |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
 
-The ingest endpoints currently validate the payload and echo it back; nothing
-is stored yet.
+The ingest endpoints validate the payload and echo it back. Physiological and
+tracking samples are also kept in separate in-memory stores holding the newest
+sample per athlete (by timestamp; ties go to the most recently received), which
+the `/athletes/{id}/.../latest` endpoints read. Nothing is persisted across
+restarts yet.
 
 ## Run locally
 

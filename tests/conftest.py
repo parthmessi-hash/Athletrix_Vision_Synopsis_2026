@@ -2,8 +2,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.store.physiological import latest_physiological_store
+from app.store.tracking import latest_tracking_store
 
 TS = "2026-10-15T12:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def clean_stores():
+    """Every test starts and ends with empty in-memory stores."""
+    latest_physiological_store.clear()
+    latest_tracking_store.clear()
+    yield
+    latest_physiological_store.clear()
+    latest_tracking_store.clear()
 
 
 @pytest.fixture(scope="session")
