@@ -70,12 +70,19 @@ With the backend running, send 60 seconds of fictional heart-rate data for
 `athlete-1` (one sample per second) to the physiological endpoint:
 
 ```bash
-python scripts/simulate_athlete.py
+python scripts/simulate_athlete.py                  # heart rate only
+python scripts/simulate_athlete.py --with-tracking  # heart rate + straight-line movement
 ```
 
-Optional flags: `--seconds 10` to run shorter, `--url http://host:port` for a
-different backend. While it runs, the latest sample is visible at
-http://127.0.0.1:8000/api/v1/athletes/athlete-1/physiological/latest
+All simulator output is fictional demo data. Optional flags: `--seconds 10`
+to run shorter, `--url http://host:port` for a different backend. With
+`--with-tracking`, each second also sends a `TrackingSample` with the same
+timestamp: speed rises and falls, `x_position` accumulates accordingly,
+`y_position` stays at 0, and `acceleration_mps2` goes negative while slowing.
+While it runs, the latest samples are visible at:
+
+- http://127.0.0.1:8000/api/v1/athletes/athlete-1/physiological/latest
+- http://127.0.0.1:8000/api/v1/athletes/athlete-1/tracking/latest
 
 ## Running with the Athletrix_Web frontend
 
