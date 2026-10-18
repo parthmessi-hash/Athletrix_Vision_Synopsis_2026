@@ -42,8 +42,11 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 The ingest endpoints validate the payload and echo it back. Physiological and
 tracking samples are also kept in separate in-memory stores holding the newest
 sample per athlete (by timestamp; ties go to the most recently received), which
-the `/athletes/{id}/.../latest` endpoints read. Nothing is persisted across
-restarts yet.
+the `/athletes/{id}/.../latest` endpoints read. A sample whose timestamp is
+more than 5 seconds ahead of the backend's UTC clock is rejected with 422 and
+the stores are left unchanged (`MAX_FUTURE_TIMESTAMP_SKEW` in
+`app/core/clock.py`, an initial clock-skew allowance). Nothing is persisted
+across restarts yet.
 
 ## Run locally
 
