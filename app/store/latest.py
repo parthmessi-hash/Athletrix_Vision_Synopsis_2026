@@ -1,39 +1,42 @@
-"""Generic in-memory store of the latest sample per athlete.
+"""Generic in-memory store of the latest timestamped record per key.
 
 Not persistent and not shared across processes. This is a placeholder until a
 real database is introduced.
 """
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 
-class _AthleteSample(Protocol):
-    athlete_id: str
+class _Timestamped(Protocol):
     timestamp: datetime
 
 
-S = TypeVar("S", bound=_AthleteSample)
+S = TypeVar("S", bound=_Timestamped)
 
 
 class LatestSampleStore(Generic[S]):
-    def __init__(self) -> None:
+    def __init__(self, key: Callable[[S], str]) -> None:
+        """`key` extracts the identifier records are grouped by (e.g. athlete_id, device_id)."""
+        self._key = key
         self._latest: dict[str, S] = {}
 
     def upsert(self, sample: S) -> S:
-        """Keep the sample with the newest timestamp for the athlete.
+        """Keep the record with the newest timestamp for its key.
 
-        On an equal timestamp the most recently received sample wins.
-        Returns whichever sample is now stored for that athlete.
+        On an equal timestamp the most recently received record wins.
+        Returns whichever record is now stored for that key.
         """
-        current = self._latest.get(sample.athlete_id)
+        k = self._key(sample)
+        current = self._latest.get(k)
         if current is None or sample.timestamp >= current.timestamp:
-            self._latest[sample.athlete_id] = sample
+            self._latest[k] = sample
             return sample
         return current
 
-    def get(self, athlete_id: str) -> S | None:
-        return self._latest.get(athlete_id)
+    def get(self, key: str) -> S | None:
+        return self._latest.get(key)
 
     def clear(self) -> None:
         self._latest.clear()

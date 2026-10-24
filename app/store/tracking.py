@@ -3,6 +3,9 @@
 from app.models import TrackingSample
 from app.store.latest import LatestSampleStore
 
-LatestTrackingStore = LatestSampleStore[TrackingSample]
 
-latest_tracking_store: LatestTrackingStore = LatestTrackingStore()
+def LatestTrackingStore() -> LatestSampleStore[TrackingSample]:
+    return LatestSampleStore(key=lambda s: s.athlete_id)
+
+
+latest_tracking_store = LatestTrackingStore()
