@@ -21,7 +21,7 @@ app/
   api/athletes.py    # POST /api/v1/athletes (register), GET /api/v1/athletes, GET /api/v1/athletes/{id}
                      # POST /api/v1/athletes/validate
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
-                     # GET  /api/v1/athletes/{id}/physiological/history?limit=60
+                     # GET  /api/v1/athletes/{id}/physiological/history?limit=60, /tracking/history?limit=60
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -54,12 +54,13 @@ per device (by timestamp; ties go to the most recently received; older records
 are accepted but do not replace newer ones). The `/athletes/{id}/.../latest`
 and `/devices/{id}/status/latest` endpoints read these.
 
-Physiological samples are also appended to a per-athlete history, served by
-`GET /api/v1/athletes/{id}/physiological/history?limit=60` (limit 1 to 300,
+Physiological and tracking samples are also appended to separate per-athlete
+histories, served by `GET /api/v1/athletes/{id}/physiological/history?limit=60`
+and `GET /api/v1/athletes/{id}/tracking/history?limit=60` (limit 1 to 300,
 newest samples returned oldest-to-newest, empty list if none). History is
 kept sorted by timestamp, accepts out-of-order arrivals, and replaces an
 equal-timestamp entry with the latest arrival. Each athlete keeps only the
-newest `MAX_HISTORY_SAMPLES` (300, in `app/store/history.py`). This is
+newest `MAX_HISTORY_SAMPLES` (300, in `app/store/history.py`) per stream. This is
 temporary process memory, and 300 samples is a count, not a time window: at
 one sample per second it covers about five minutes, at a higher rate less. A sample whose timestamp is
 more than 5 seconds ahead of the backend's UTC clock is rejected with 422 and

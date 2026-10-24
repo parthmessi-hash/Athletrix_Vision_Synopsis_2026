@@ -4,7 +4,7 @@ from app.models import Athlete, PhysiologicalSample, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
-from app.store.tracking import latest_tracking_store
+from app.store.tracking import latest_tracking_store, tracking_history_store
 
 router = APIRouter(prefix="/athletes", tags=["athletes"])
 
@@ -67,3 +67,12 @@ def get_latest_tracking(athlete_id: str) -> TrackingSample:
     if sample is None:
         raise HTTPException(status_code=404, detail=f"No tracking sample for athlete '{athlete_id}'")
     return sample
+
+
+@router.get("/{athlete_id}/tracking/history", response_model=list[TrackingSample])
+def get_tracking_history(
+    athlete_id: str,
+    limit: int = Query(60, ge=1, le=MAX_HISTORY_SAMPLES, description="Newest samples to return"),
+) -> list[TrackingSample]:
+    """The newest `limit` tracking samples for an athlete, oldest to newest. Empty list if none."""
+    return tracking_history_store.recent(athlete_id, limit)
