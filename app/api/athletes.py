@@ -3,7 +3,8 @@ from datetime import timedelta
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.core import clock
-from app.models import Athlete, AthleteWindow, PhysiologicalSample, TrackingSample
+from app.core.summary import summarize_window
+from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
@@ -84,15 +85,15 @@ def get_tracking_history(
     return tracking_history_store.recent(athlete_id, limit)
 
 
-@router.get("/{athlete_id}/window", response_model=AthleteWindow)
-def get_athlete_window(
-    athlete_id: str,
-    seconds: int = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at backend time now"),
-) -> AthleteWindow:
-    """Physiological and tracking samples recorded in the last `seconds`, both cut at the same instant.
+WINDOW_SECONDS = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at backend time now")
+
+
+def select_window(athlete_id: str, seconds: int) -> AthleteWindow:
+    """Both streams recorded in the last `seconds`, cut at one captured backend instant.
 
     Backend time is read once; samples timestamped after it are excluded even if
-    ingestion accepted them within the clock-skew tolerance.
+    ingestion accepted them within the clock-skew tolerance. Reads the stores
+    directly.
     """
     window_end = clock.utc_now()
     window_start = window_end - timedelta(seconds=seconds)
@@ -103,3 +104,15 @@ def get_athlete_window(
         physiological_samples=physiological_history_store.between(athlete_id, window_start, window_end),
         tracking_samples=tracking_history_store.between(athlete_id, window_start, window_end),
     )
+
+
+@router.get("/{athlete_id}/window", response_model=AthleteWindow)
+def get_athlete_window(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteWindow:
+    """Physiological and tracking samples recorded in the last `seconds`, oldest to newest."""
+    return select_window(athlete_id, seconds)
+
+
+@router.get("/{athlete_id}/summary", response_model=AthleteSummary)
+def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteSummary:
+    """Descriptive counts, heart-rate mean/peak, peak speed and first/last timestamps for the last `seconds`."""
+    return summarize_window(select_window(athlete_id, seconds))

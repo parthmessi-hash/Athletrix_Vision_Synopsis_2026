@@ -22,7 +22,7 @@ app/
                      # POST /api/v1/athletes/validate
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
                      # GET  /api/v1/athletes/{id}/physiological/history?limit=60, /tracking/history?limit=60
-                     # GET  /api/v1/athletes/{id}/window?seconds=60
+                     # GET  /api/v1/athletes/{id}/window?seconds=60, /summary?seconds=60
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -42,6 +42,7 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 | `TrackingSample`      | Position (m), speed (m/s), accel (m/s²)   |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
 | `AthleteWindow`       | Both streams for one athlete, last N secs |
+| `AthleteSummary`      | Counts, HR mean/peak, peak speed, times   |
 
 `POST /api/v1/athletes` registers an athlete in an in-memory registry (201;
 409 if the id exists, keeping the original). `GET /api/v1/athletes` lists
@@ -74,7 +75,19 @@ to newest. Samples timestamped after `window_end` are excluded even though
 ingestion accepts up to 5 s of clock skew. Because each history keeps at most
 300 samples, a window can return less than its full span. The window groups
 samples by recorded time only: it does not correct device clock differences
-or account for the lag between effort and physiological response. A sample whose timestamp is
+or account for the lag between effort and physiological response.
+
+`GET /api/v1/athletes/{id}/summary?seconds=60` uses the same window selection
+(same `seconds` validation, one captured `window_end`, stores read directly)
+and returns descriptive metrics instead of the samples: per stream the sample
+count and first/last sample timestamps, plus for physiological the count of
+non-null heart rates with their mean and peak, and for tracking the peak
+`speed_mps`. Null heart rates are ignored; with no measurements the metrics
+and timestamps are null and counts are 0. A peak speed of 0.0 is a real value.
+The heart-rate mean is an arithmetic average of the measurements received,
+not a time-weighted average. All of these describe the samples available in
+memory: transmission gaps and the 300-sample history caps can limit coverage.
+No condition scores, baselines or recovery claims are derived. A sample whose timestamp is
 more than 5 seconds ahead of the backend's UTC clock is rejected with 422 and
 the stores are left unchanged (`MAX_FUTURE_TIMESTAMP_SKEW` in
 `app/core/clock.py`, an initial clock-skew allowance). Nothing is persisted
