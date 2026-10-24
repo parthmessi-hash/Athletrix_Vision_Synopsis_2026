@@ -18,12 +18,13 @@ app/
   core/config.py     # settings (env vars / .env)
   api/router.py      # aggregates routers under /api/v1
   api/health.py      # GET  /api/v1/health
-  api/athletes.py    # POST /api/v1/athletes/validate
+  api/athletes.py    # POST /api/v1/athletes (register), GET /api/v1/athletes, GET /api/v1/athletes/{id}
+                     # POST /api/v1/athletes/validate
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
-  store/             # in-memory latest-record stores: samples per athlete, status per device
+  store/             # in-memory stores: athlete registry, latest samples per athlete, status per device
 tests/
 ```
 
@@ -38,6 +39,12 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 | `PhysiologicalSample` | HR, breathing, HRV, SpO2, temp, posture   |
 | `TrackingSample`      | Position (m), speed (m/s), accel (m/s²)   |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
+
+`POST /api/v1/athletes` registers an athlete in an in-memory registry (201;
+409 if the id exists, keeping the original). `GET /api/v1/athletes` lists
+them sorted by id and `GET /api/v1/athletes/{id}` fetches one (404 if not
+registered). Registration is not yet required for sample ingestion, so the
+simulator works without it.
 
 The ingest endpoints validate the payload and echo it back. Physiological and
 tracking samples are kept in separate in-memory stores holding the newest

@@ -1,17 +1,45 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 
 from app.models import Athlete, PhysiologicalSample, TrackingSample
+from app.store.athletes import athlete_registry
 from app.store.physiological import latest_physiological_store
 from app.store.tracking import latest_tracking_store
 
 router = APIRouter(prefix="/athletes", tags=["athletes"])
 
 
-@router.post("/validate", response_model=Athlete)
-def validate_athlete(athlete: Athlete) -> Athlete:
-    """Validate an athlete payload and echo it back. No persistence yet."""
+# ---- registry --------------------------------------------------------------
+
+@router.post("", response_model=Athlete, status_code=status.HTTP_201_CREATED)
+def register_athlete(athlete: Athlete) -> Athlete:
+    """Register an athlete. 409 if the id is already registered (existing record is kept)."""
+    if not athlete_registry.add(athlete):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Athlete '{athlete.id}' is already registered")
     return athlete
 
+
+@router.get("", response_model=list[Athlete])
+def list_athletes() -> list[Athlete]:
+    """All registered athletes sorted by id; empty list if none."""
+    return athlete_registry.list()
+
+
+@router.post("/validate", response_model=Athlete)
+def validate_athlete(athlete: Athlete) -> Athlete:
+    """Validate an athlete payload and echo it back without registering it."""
+    return athlete
+
+
+@router.get("/{athlete_id}", response_model=Athlete)
+def get_athlete(athlete_id: str) -> Athlete:
+    """Return a registered athlete, or 404."""
+    athlete = athlete_registry.get(athlete_id)
+    if athlete is None:
+        raise HTTPException(status_code=404, detail=f"Athlete '{athlete_id}' is not registered")
+    return athlete
+
+
+# ---- latest samples (registration not required) ----------------------------
 
 @router.get("/{athlete_id}/physiological/latest", response_model=PhysiologicalSample)
 def get_latest_physiological(athlete_id: str) -> PhysiologicalSample:
