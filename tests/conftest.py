@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.store.athletes import athlete_registry
 from app.store.device import latest_device_status_store
-from app.store.physiological import latest_physiological_store
+from app.store.physiological import latest_physiological_store, physiological_history_store
 from app.store.tracking import latest_tracking_store
 
 TS = "2026-10-15T12:00:00Z"
@@ -13,10 +13,10 @@ TS = "2026-10-15T12:00:00Z"
 @pytest.fixture(autouse=True)
 def clean_stores():
     """Every test starts and ends with empty in-memory stores."""
-    for store in (latest_physiological_store, latest_tracking_store, latest_device_status_store, athlete_registry):
+    for store in (latest_physiological_store, physiological_history_store, latest_tracking_store, latest_device_status_store, athlete_registry):
         store.clear()
     yield
-    for store in (latest_physiological_store, latest_tracking_store, latest_device_status_store, athlete_registry):
+    for store in (latest_physiological_store, physiological_history_store, latest_tracking_store, latest_device_status_store, athlete_registry):
         store.clear()
 
 

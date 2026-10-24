@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.models import Athlete, PhysiologicalSample, TrackingSample
 from app.store.athletes import athlete_registry
-from app.store.physiological import latest_physiological_store
+from app.store.history import MAX_HISTORY_SAMPLES
+from app.store.physiological import latest_physiological_store, physiological_history_store
 from app.store.tracking import latest_tracking_store
 
 router = APIRouter(prefix="/athletes", tags=["athletes"])
@@ -48,6 +49,15 @@ def get_latest_physiological(athlete_id: str) -> PhysiologicalSample:
     if sample is None:
         raise HTTPException(status_code=404, detail=f"No physiological sample for athlete '{athlete_id}'")
     return sample
+
+
+@router.get("/{athlete_id}/physiological/history", response_model=list[PhysiologicalSample])
+def get_physiological_history(
+    athlete_id: str,
+    limit: int = Query(60, ge=1, le=MAX_HISTORY_SAMPLES, description="Newest samples to return"),
+) -> list[PhysiologicalSample]:
+    """The newest `limit` physiological samples for an athlete, oldest to newest. Empty list if none."""
+    return physiological_history_store.recent(athlete_id, limit)
 
 
 @router.get("/{athlete_id}/tracking/latest", response_model=TrackingSample)
