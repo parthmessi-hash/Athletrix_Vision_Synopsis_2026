@@ -80,9 +80,15 @@ or account for the lag between effort and physiological response.
 `GET /api/v1/athletes/{id}/summary?seconds=60` uses the same window selection
 (same `seconds` validation, one captured `window_end`, stores read directly)
 and returns descriptive metrics instead of the samples: per stream the sample
-count and first/last sample timestamps, plus for physiological the count of
-non-null heart rates with their mean and peak, and for tracking the peak
-`speed_mps`. Null heart rates are ignored; with no measurements the metrics
+count, first/last sample timestamps, `latest_sample_age_seconds`
+(`window_end` minus the newest sample timestamp; null if no samples) and
+`max_inter_sample_gap_seconds` (largest gap between consecutive sample
+timestamps; null with fewer than two samples), plus for physiological the
+count of non-null heart rates with their mean and peak, and for tracking the
+peak `speed_mps`. The age and gap values describe recorded sample timestamps
+only: the maximum gap covers consecutive samples that were available and does
+not prove the requested window was fully covered, and no interpolation,
+thresholds or labels are applied. Null heart rates are ignored; with no measurements the metrics
 and timestamps are null and counts are 0. A peak speed of 0.0 is a real value.
 The heart-rate mean is an arithmetic average of the measurements received,
 not a time-weighted average. All of these describe the samples available in

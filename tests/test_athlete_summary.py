@@ -59,9 +59,11 @@ def test_empty_window_gives_null_metrics_and_zero_counts():
     assert s.physiological.model_dump() == {
         "sample_count": 0, "heart_rate_count": 0, "heart_rate_mean_bpm": None, "heart_rate_peak_bpm": None,
         "first_sample_at": None, "last_sample_at": None,
+        "latest_sample_age_seconds": None, "max_inter_sample_gap_seconds": None,
     }
     assert s.tracking.model_dump() == {
         "sample_count": 0, "speed_peak_mps": None, "first_sample_at": None, "last_sample_at": None,
+        "latest_sample_age_seconds": None, "max_inter_sample_gap_seconds": None,
     }
     assert s.window_start == at(-60) and s.window_end == at(0)
 
