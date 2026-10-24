@@ -6,7 +6,7 @@ samples by timestamp. That is a sample count, not a time window: at one
 sample per second it is five minutes, at ten per second it is thirty seconds.
 """
 
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
@@ -42,6 +42,13 @@ class SampleHistoryStore(Generic[S]):
         """The newest `limit` samples for the athlete, oldest to newest. Empty if none."""
         entries = self._by_athlete.get(athlete_id, [])
         return entries[-limit:] if limit < len(entries) else list(entries)
+
+    def between(self, athlete_id: str, start: datetime, end: datetime) -> list[S]:
+        """Samples with start <= timestamp <= end, oldest to newest. Empty if none."""
+        entries = self._by_athlete.get(athlete_id, [])
+        lo = bisect_left(entries, start, key=lambda s: s.timestamp)
+        hi = bisect_right(entries, end, key=lambda s: s.timestamp)
+        return entries[lo:hi]
 
     def count(self, athlete_id: str) -> int:
         return len(self._by_athlete.get(athlete_id, []))

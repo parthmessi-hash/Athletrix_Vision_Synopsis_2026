@@ -10,9 +10,11 @@ from app.models.common import Posture, SampleSource
 from app.models.device import DeviceStatus
 from app.models.physiological import PhysiologicalSample
 from app.models.tracking import TrackingSample
+from app.models.window import AthleteWindow
 
 __all__ = [
     "Athlete",
+    "AthleteWindow",
     "DeviceStatus",
     "PhysiologicalSample",
     "Posture",

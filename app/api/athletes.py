@@ -1,12 +1,18 @@
+from datetime import timedelta
+
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.models import Athlete, PhysiologicalSample, TrackingSample
+from app.core import clock
+from app.models import Athlete, AthleteWindow, PhysiologicalSample, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
 from app.store.tracking import latest_tracking_store, tracking_history_store
 
 router = APIRouter(prefix="/athletes", tags=["athletes"])
+
+# Longest window that may be requested, in seconds. Matches the history cap at one sample per second.
+MAX_WINDOW_SECONDS = 300
 
 
 # ---- registry --------------------------------------------------------------
@@ -76,3 +82,24 @@ def get_tracking_history(
 ) -> list[TrackingSample]:
     """The newest `limit` tracking samples for an athlete, oldest to newest. Empty list if none."""
     return tracking_history_store.recent(athlete_id, limit)
+
+
+@router.get("/{athlete_id}/window", response_model=AthleteWindow)
+def get_athlete_window(
+    athlete_id: str,
+    seconds: int = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at backend time now"),
+) -> AthleteWindow:
+    """Physiological and tracking samples recorded in the last `seconds`, both cut at the same instant.
+
+    Backend time is read once; samples timestamped after it are excluded even if
+    ingestion accepted them within the clock-skew tolerance.
+    """
+    window_end = clock.utc_now()
+    window_start = window_end - timedelta(seconds=seconds)
+    return AthleteWindow(
+        athlete_id=athlete_id,
+        window_start=window_start,
+        window_end=window_end,
+        physiological_samples=physiological_history_store.between(athlete_id, window_start, window_end),
+        tracking_samples=tracking_history_store.between(athlete_id, window_start, window_end),
+    )

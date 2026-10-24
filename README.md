@@ -22,6 +22,7 @@ app/
                      # POST /api/v1/athletes/validate
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
                      # GET  /api/v1/athletes/{id}/physiological/history?limit=60, /tracking/history?limit=60
+                     # GET  /api/v1/athletes/{id}/window?seconds=60
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -40,6 +41,7 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 | `PhysiologicalSample` | HR, breathing, HRV, SpO2, temp, posture   |
 | `TrackingSample`      | Position (m), speed (m/s), accel (m/s²)   |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
+| `AthleteWindow`       | Both streams for one athlete, last N secs |
 
 `POST /api/v1/athletes` registers an athlete in an in-memory registry (201;
 409 if the id exists, keeping the original). `GET /api/v1/athletes` lists
@@ -62,7 +64,17 @@ kept sorted by timestamp, accepts out-of-order arrivals, and replaces an
 equal-timestamp entry with the latest arrival. Each athlete keeps only the
 newest `MAX_HISTORY_SAMPLES` (300, in `app/store/history.py`) per stream. This is
 temporary process memory, and 300 samples is a count, not a time window: at
-one sample per second it covers about five minutes, at a higher rate less. A sample whose timestamp is
+one sample per second it covers about five minutes, at a higher rate less.
+
+`GET /api/v1/athletes/{id}/window?seconds=60` (1 to 300) returns both streams
+for the last `seconds`, read from those histories. Backend UTC time is
+captured once as `window_end`; `window_start` is derived from it, and
+samples are included when `window_start <= timestamp <= window_end`, oldest
+to newest. Samples timestamped after `window_end` are excluded even though
+ingestion accepts up to 5 s of clock skew. Because each history keeps at most
+300 samples, a window can return less than its full span. The window groups
+samples by recorded time only: it does not correct device clock differences
+or account for the lag between effort and physiological response. A sample whose timestamp is
 more than 5 seconds ahead of the backend's UTC clock is rejected with 422 and
 the stores are left unchanged (`MAX_FUTURE_TIMESTAMP_SKEW` in
 `app/core/clock.py`, an initial clock-skew allowance). Nothing is persisted
