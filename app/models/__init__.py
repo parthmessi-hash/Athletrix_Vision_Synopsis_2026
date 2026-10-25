@@ -8,6 +8,7 @@ Adapters for specific hardware will map vendor payloads onto these models.
 from app.models.athlete import Athlete
 from app.models.common import Posture, SampleSource
 from app.models.device import DeviceStatus
+from app.models.effort import EffortReview, EffortRules, HeartRatePeriod, HeartRatePeriods
 from app.models.physiological import PhysiologicalSample
 from app.models.retained import RetainedData, StreamRetention
 from app.models.sources import SourceBreakdown, WindowSources
@@ -21,7 +22,11 @@ __all__ = [
     "AthleteWindow",
     "DistanceEstimate",
     "DistanceRules",
+    "EffortReview",
+    "EffortRules",
     "HighSpeedEstimate",
+    "HeartRatePeriod",
+    "HeartRatePeriods",
     "DeviceStatus",
     "PhysiologicalSample",
     "PhysiologicalSummary",

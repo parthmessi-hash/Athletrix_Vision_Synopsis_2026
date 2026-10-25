@@ -5,8 +5,9 @@ from pydantic import AwareDatetime
 
 from app.core import clock
 from app.core.config import get_settings
+from app.core.effort import BEFORE_SECONDS, AFTER_SECONDS, EffortRequestError, parse_effort_timestamp, review_effort
 from app.core.summary import summarize_window
-from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
+from app.models import Athlete, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
@@ -179,3 +180,34 @@ def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS, end: Awa
         distance_min_confidence=settings.distance_min_confidence,
         high_speed_threshold_mps=settings.high_speed_threshold_mps,
     )
+
+
+# ---- manually selected effort review ----------------------------------------
+
+EFFORT_START = Query(None, description="Selected effort start: ISO 8601 with an explicit timezone, e.g. 2026-10-20T10:00:00Z (encode '+' as %2B). Numeric epochs and naive values are rejected.")
+EFFORT_END = Query(None, description="Selected effort end, same format. Must be after effort_start by 1 to 120 seconds and not after backend time.")
+
+
+@router.get("/{athlete_id}/effort-review", response_model=EffortReview)
+def get_effort_review(athlete_id: str, effort_start: str | None = EFFORT_START, effort_end: str | None = EFFORT_END) -> EffortReview:
+    """Descriptive review of a manually selected effort: movement over [effort_start, effort_end] and heart rate before, during and after it.
+
+    The caller chooses the effort; nothing is detected or classified. Backend time is read once and caps the after period.
+    Movement reuses the summary endpoint's rules. Heart-rate periods are before [start-10 s, start), during [start, end] and
+    after (end, end+30 s]; null heart rates stay missing, nothing is interpolated, and only retained samples are reviewed.
+    """
+    try:
+        start = parse_effort_timestamp("effort_start", effort_start)
+        end = parse_effort_timestamp("effort_end", effort_end)
+        now = clock.utc_now()  # read exactly once per request
+        settings = get_settings()
+        physiological = physiological_history_store.between(athlete_id, start - timedelta(seconds=BEFORE_SECONDS), end + timedelta(seconds=AFTER_SECONDS))
+        tracking = tracking_history_store.between(athlete_id, start, end)
+        return review_effort(
+            athlete_id, start, end, now, physiological, tracking,
+            distance_max_gap_seconds=settings.distance_max_gap_seconds,
+            distance_min_confidence=settings.distance_min_confidence,
+            high_speed_threshold_mps=settings.high_speed_threshold_mps,
+        )
+    except EffortRequestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

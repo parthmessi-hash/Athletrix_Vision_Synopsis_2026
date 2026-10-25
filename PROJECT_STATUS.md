@@ -36,6 +36,7 @@ Terms used throughout:
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
+| Effort review | `GET /athletes/{id}/effort-review?effort_start&effort_end`: a manually selected 1-120 s period described by the tracking summary during it and heart-rate figures before [start-10 s, start), during [start, end] and after (end, end+30 s] (capped at backend time). Not sprint detection, not an effort classification. |
 | Retained data | `GET /athletes/{id}/retained-data`: per stream, the count of rows currently stored and the UTC recorded timestamps of the oldest and newest, plus the 300 cap. Describes retained rows only, not coverage, sessions or an archive; the dashboard's Find retained data / Review latest retained buttons use it. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
@@ -107,6 +108,10 @@ curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60&end=2026
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/retained-data"
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=<latest_timestamp from the previous call>"
 
+# 3e. describe a manually selected effort: movement during it, heart rate 10 s before, during, and up to 30 s after
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/effort-review?effort_start=2026-10-20T10:00:01Z&effort_end=2026-10-20T10:00:04Z"
+#    both bounds ISO 8601 with timezone (no epochs, no naive values); 1 s <= duration <= 120 s; end not after backend time
+
 # 4. frontend, from the Athletrix_Web folder
 python3 -m http.server 3000
 ```
@@ -129,6 +134,7 @@ Timestamps must be ISO 8601 with a timezone.
 | `SourceBreakdown` | `reported` (count per source category that occurs), `not_reported`; always adds up to the stream's sample count. Also on `PhysiologicalSummary.sources` and `TrackingSummary.sources` |
 | `TrackingRules` | `min_confidence` (0-1): the applied `DISTANCE_MIN_CONFIDENCE` |
 | `AthleteSummary` | `athlete_id`, window bounds, `physiological` (`PhysiologicalSummary`), `tracking` (`TrackingSummary` incl. distance, high-speed and `distance_rules`) |
+| `EffortReview` | `athlete_id`, `effort_start`, `effort_end`, `effort_duration_seconds`, `captured_at`, `follow_up_elapsed`, `rules` (`EffortRules`: before 10 s, after 30 s, effort 1-120 s), `movement` (`TrackingSummary` over the effort), `heart_rate.before/during/after` (`HeartRatePeriod`: applied bounds with inclusivity flags, sample and heart-rate counts, mean, peak, first/last, max gap, `sources`) |
 | `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (300) |
 
 Endpoints, all under `/api/v1`:
@@ -145,6 +151,7 @@ Endpoints, all under `/api/v1`:
 | `GET /athletes/{id}/physiological/history?limit=60`, `.../tracking/history?limit=60` | Newest `limit` (1-300) samples, oldest to newest |
 | `GET /athletes/{id}/window?seconds=60[&end=...]` | Both streams in the `seconds` (1-300) before `end`, plus `tracking_rules`. Without `end`: live, one captured backend `window_end`. With `end` (ISO 8601 with timezone, not after backend time, `+` encoded as `%2B`): recorded review ending at that exact instant. Invalid, naive or future `end` is a 422. |
 | `GET /athletes/{id}/summary?seconds=60[&end=...]` | Descriptive metrics over the same window selection; ages are relative to `window_end` (in a review: seconds before the selected end) |
+| `GET /athletes/{id}/effort-review?effort_start=...&effort_end=...` | Descriptive review of a manually selected effort (ISO timestamps with timezone, 1-120 s, end not in the future; 422 otherwise). Movement = tracking summary over the effort; heart rate for three non-overlapping periods; `follow_up_elapsed` says only whether 30 s have passed. No interpolation, extrapolation, recovery or fatigue inference. |
 | `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and the cap. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):
@@ -272,6 +279,16 @@ All of these are descriptive and cover only the samples available in the window
   card labels from these counts and from each latest sample's own `source`
   ("Reported source: wearable", "Mixed sources: ...", "Source not
   reported"); it never says "real" or "verified".
+- **Effort review (`app/core/effort.py`).** For a caller-selected effort:
+  the tracking summary above over `[effort_start, effort_end]` (same rules,
+  fraction relative to the effort length) and, for the heart-rate periods
+  before `[start-10 s, start)`, during `[start, end]` and after
+  `(end, end+30 s]` capped at the captured backend time: sample count,
+  non-null heart-rate count, arithmetic mean, peak, first/last timestamps,
+  largest gap and source breakdown. Half-open boundaries where periods meet,
+  so no sample is counted twice. Null heart rates stay missing; nothing is
+  interpolated; recorded timestamps are used without clock correction or
+  lag estimation. 10 s and 30 s are named engineering defaults.
 - **Simulator profiles.** `sine`: one rise-and-fall of heart rate (110 to 150 bpm)
   and straight-line speed (peak 8 m/s), confidence 1.0. `effort-rest`: repeating
   40 s cycle (accelerate 10 s to 6 m/s, hold 10 s, slow 10 s, stand 10 s), position
@@ -299,6 +316,13 @@ Implemented today is listed above; the following are **not** implemented:
   sensor accuracy. Tracking rows stored before the fields existed (and any
   sender that omits them) read as "not reported", never as camera, wearable
   or simulated. No live hardware integration exists.
+- The effort review describes a period the caller chose. It does not detect
+  sprints or efforts, does not validate the selection beyond its length and
+  timing, and produces no recovery rate, baseline comparison, fatigue label
+  or recommendation; a heart-rate difference between its periods is not
+  evidence of recovery or of a change in condition. Its 10 s / 30 s periods
+  are engineering defaults, `follow_up_elapsed` only reports elapsed time,
+  and the 300-sample cap can leave any period partial or empty.
 - Recorded clocks are not synchronized or corrected. A heart-rate file and a
   tracking file replayed for the same athlete line up on the dashboard only
   as far as their recorded timestamps already agree; the fictional fixtures
@@ -340,7 +364,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (432 tests as of this handoff)
+# engine: full suite, isolated temporary databases (479 tests as of this handoff)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -366,6 +390,9 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/window?seconds=60&end=2
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60&end=2026-10-20T10:00:04Z"  # expect tracking: peak 6.0, 10.5 m over 2.0 s, 2 excluded, high speed 1.5 s / 8.25 m
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60"                            # expect 0 samples in both streams (historical)
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/retained-data"                                 # expect 5 + 5 rows, both ranges 10:00:00Z..10:00:04Z, cap 300
+curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_start=2026-10-20T10:00:01Z&effort_end=2026-10-20T10:00:04Z"
+#    expect movement 4 samples, peak 6.0, 10.5 m over 2.0 s (1 excluded), high speed 1.5 s / 8.25 m; heart rate before 1 sample (112),
+#    during 4 samples / 3 measurements mean 117.833 peak 120.5, after 0 samples; follow_up_elapsed true
 # dashboard against that backend (serve a copy of index.html with apiBase pointed at :8010): Recorded -> Find retained data ->
 # expect both streams "5 retained · 2026-10-20T10:00:00Z → 2026-10-20T10:00:04Z UTC"; Review latest retained -> the review above
 
@@ -381,12 +408,21 @@ open "http://localhost:3000/?engine=0#demo"
 
 ## 10. Recommended next milestone
 
-**Optional physiological fields in the heart-rate adapter.** With both CSV
-adapters, the replay, recorded review, the retained-data lookup and
-source-derived card labels (all done 2026-10-25), a converted session can be
-found and reviewed end to end on the dashboard without the simulator, and
-every engine-connected card says where its samples were reported to come
-from. The remaining gap in the data path is
+**Effort review on the dashboard.** The effort-review endpoint (done
+2026-10-25) is backend only. A Recorded-mode control that lets a coach pick
+an effort start and end (for example by clicking two points on the
+timeline), calls the endpoint and shows the three heart-rate periods and the
+movement figures with the same descriptive wording and source labels would
+make it usable without curl. Keep the dashboard to what the response says:
+counts, means, peaks, gaps and bounds, with the follow-up flag explained as
+elapsed time only, and no recovery or fatigue language.
+
+Still worthwhile afterwards: **optional physiological fields in the
+heart-rate adapter.** With both CSV adapters, the replay, recorded review,
+the retained-data lookup and source-derived card labels (all done
+2026-10-25), a converted session can be found and reviewed end to end on
+the dashboard without the simulator, and every engine-connected card says
+where its samples were reported to come from. The remaining gap in the data path is
 that the heart-rate adapter maps one column only, while `PhysiologicalSample`
 already accepts optional `signal_quality`, `posture`, `activity_level` and
 the other documented fields. Extending the adapter with explicit, optional

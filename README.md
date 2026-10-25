@@ -29,6 +29,7 @@ app/
                      # GET  /api/v1/athletes/{id}/physiological/history?limit=60, /tracking/history?limit=60
                      # GET  /api/v1/athletes/{id}/window?seconds=60, /summary?seconds=60
                      # GET  /api/v1/athletes/{id}/retained-data (per-stream count and UTC range of retained rows)
+                     # GET  /api/v1/athletes/{id}/effort-review?effort_start=..&effort_end=.. (manually selected effort)
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -582,6 +583,76 @@ What the numbers mean, and what they do not:
 The dashboard's Recorded mode uses this endpoint behind its **Find retained
 data** and **Review latest retained** buttons (see the `Athletrix_Web`
 README). Nothing about ingestion, retention or the stored timestamps changes.
+
+### Reviewing a manually selected effort (`effort-review` endpoint)
+
+`GET /api/v1/athletes/{id}/effort-review?effort_start=<ISO>&effort_end=<ISO>`
+describes one effort period that **you** select: the movement recorded during
+it and the heart rate recorded before, during and after it. Nothing is
+detected or classified: the bounds are yours, the periods are fixed
+engineering defaults, and every figure is a description of retained samples.
+
+```bash
+# the 10:00:01Z .. 10:00:04Z part of the fictional CSV fixtures (encode '+' as %2B in offsets)
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/effort-review?effort_start=2026-10-20T10:00:01Z&effort_end=2026-10-20T10:00:04Z"
+```
+
+Request rules (each failure is a 422 with the reason):
+
+- `effort_start` and `effort_end` are required ISO 8601 timestamps with an
+  explicit timezone (`2026-10-20T10:00:01Z`, `2026-10-20T12:00:01+02:00`).
+  Numeric epochs and timezone-naive values are rejected; equivalent instants
+  in different offsets select the same samples and are echoed as sent.
+- `effort_start` must precede `effort_end`; the duration must be between
+  1 and 120 seconds inclusive; `effort_end` must not be after backend time,
+  which is read once per request and returned as `captured_at`.
+
+Response (`EffortReview`):
+
+- `movement`: the existing tracking summary over `[effort_start, effort_end]`
+  (sample count, peak speed, first/last timestamps, largest gap, eligible
+  distance, included duration and fraction of the effort, excluded
+  intervals, high-speed time and distance, the applied `distance_rules`, and
+  the `sources` breakdown). The same gap and confidence rules as the summary
+  endpoint apply; excluded intervals are never bridged and nothing is
+  extrapolated.
+- `heart_rate.before`, `.during`, `.after`: for each period its applied
+  bounds with `start_inclusive`/`end_inclusive`, the physiological sample
+  count and non-null heart-rate count, arithmetic mean and peak, first/last
+  sample timestamps, largest inter-sample gap and `sources` breakdown.
+  Periods never overlap:
+
+  | Period | Bounds |
+  |--------|--------|
+  | before | `[effort_start − 10 s, effort_start)` |
+  | during | `[effort_start, effort_end]` |
+  | after  | `(effort_end, effort_end + 30 s]`, capped at `captured_at` |
+
+- `follow_up_elapsed`: whether `effort_end + 30 s` is at or before
+  `captured_at`. **Elapsed time does not establish that samples for the
+  period were received, retained or complete**; read the counts.
+- `rules`: the applied lengths and limits (`before_seconds` 10,
+  `after_seconds` 30, `min_effort_seconds` 1, `max_effort_seconds` 120).
+  They are named engineering defaults for a readable review, not
+  physiological standards or validated recovery intervals.
+
+What the response does and does not say:
+
+- Null heart rates stay missing (counted as samples, not as measurements,
+  never replaced by 0). Empty periods report zero counts and null
+  measurements. Heart rate is never interpolated. The mean is the arithmetic
+  average of the measurements present, not time-weighted.
+- Recorded timestamps are used as stored: there is no device-clock
+  correction between the heart-rate and tracking streams and no automatic
+  estimate of the lag between physical effort and heart-rate response. Where
+  the two devices' clocks disagreed, the periods are offset by that much.
+- Only retained samples (newest 300 per athlete per stream) are reviewed, so
+  any period, including the effort itself, can be partially populated or
+  empty without that being an error.
+- No recovery rate, baseline comparison, fatigue label, diagnosis or
+  recommendation is produced, and none should be read into the numbers: a
+  heart-rate difference between periods on its own does not show recovery or
+  any change in condition.
 
 ### Historical timestamps stay historical
 
