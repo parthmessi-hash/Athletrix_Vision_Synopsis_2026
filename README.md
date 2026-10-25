@@ -32,7 +32,8 @@ app/
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
   scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers),
-                     # replay_samples.py (recorded JSONL replay) + examples/fictional_replay.jsonl
+                     # replay_samples.py (recorded JSONL replay), convert_heart_rate_csv.py (CSV adapter),
+                     # examples/fictional_replay.jsonl, examples/fictional_heart_rate.csv
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
   store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status
 tests/
@@ -287,7 +288,8 @@ http://127.0.0.1:8000/api/v1/athletes/athlete-2/summary?seconds=60.
 a running backend, exactly as recorded. This is the first non-simulator data
 path. It reads **Athletrix's normalized interchange format**: it does not
 parse arbitrary vendor CSV exports and does not connect to wearable or camera
-hardware; mapping a vendor export onto this format is a separate step.
+hardware; mapping an export onto this format is a separate step (see
+"Converting a heart-rate CSV" below for the one adapter that exists).
 
 ### File format (JSON Lines)
 
@@ -344,6 +346,59 @@ valid dry run; 1 invalid or unreadable file; 2 the replay stopped on a failure.
   bypassed. For a timeout the backend's answer was not received, so that one
   sample may or may not have been stored. Rerunning the file is safe: the
   backend replaces the stored sample for an equal timestamp.
+
+### Converting a heart-rate CSV (`scripts/convert_heart_rate_csv.py`)
+
+A documented, provider-agnostic **CSV adapter** that turns a heart-rate CSV
+into the interchange format above, one `physiological` record per row. It is
+not support for any particular vendor's export: real exports may need a
+different column mapping (`--timestamp-column`, `--heart-rate-column`), a
+different timestamp form, or another adapter. It makes no network requests
+and does not connect to any hardware.
+
+```bash
+# describe and validate without writing anything
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_heart_rate.csv /tmp/hr.jsonl \
+    --athlete-id athlete-1 --device-id fictional-hr-csv-1 --source simulated --dry-run
+# convert (the output file must not already exist)
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_heart_rate.csv /tmp/hr.jsonl \
+    --athlete-id athlete-1 --device-id fictional-hr-csv-1 --source simulated
+# replay it, then review the 60 s ending at its last timestamp
+python scripts/replay_samples.py /tmp/hr.jsonl --dry-run
+python scripts/replay_samples.py /tmp/hr.jsonl
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:04Z"
+```
+
+Rules of this first version:
+
+- The CSV needs a header row. The timestamp and heart-rate columns are named
+  explicitly (defaults `timestamp` and `heart_rate_bpm`) and each must appear
+  exactly once; a missing or duplicated column is an error. Other columns
+  are ignored.
+- **Heart rate must already be in bpm.** No unit conversion is done. A blank
+  cell becomes `null` (not reported), never `0`; a non-numeric, non-finite or
+  out-of-range value (the `PhysiologicalSample` limits, 20 to 260) is an error.
+- Timestamps must be ISO 8601 with a `T` separator and an explicit timezone
+  (`2026-10-20T10:00:00Z`, `2026-10-20T12:00:00+02:00`). Naive timestamps,
+  numeric epochs, invalid dates and other layouts are rejected; nothing is
+  guessed. The timestamp text, offset included, is copied into the output.
+- `--athlete-id`, `--device-id` and `--source` are required and apply to
+  every row; `--source` must be one of `wearable`, `camera`, `manual`,
+  `simulated` and is never inferred from the file. No other measurement is
+  invented.
+- The whole file is validated with the API's own model before anything is
+  written. Errors are listed with their CSV row number (header = row 1) and
+  field, and then nothing is written. The output is written through a
+  temporary file in the same folder and an existing output file is never
+  overwritten, so a failure leaves no partial output. Rows keep their CSV
+  order; the replay orders them by timestamp when sending.
+
+`scripts/examples/fictional_heart_rate.csv` is a tiny fictional example with
+`+02:00` and `-05:00` offsets, a blank heart rate and an out-of-order row; its
+documented conversion uses `--source simulated`. Everything said under
+"Historical timestamps stay historical" applies to converted files too: the
+recorded times are preserved, so they stay out of the live window and are
+subject to the newest-timestamp and 300-sample retention rules.
 
 ### Reviewing a recorded window (`end` parameter)
 

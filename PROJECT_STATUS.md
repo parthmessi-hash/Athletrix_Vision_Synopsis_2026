@@ -33,6 +33,7 @@ Terms used throughout:
 | History | The newest 300 samples per athlete per stream (a count, not a time span). |
 | Window | Both streams for one athlete between `window_start` and one captured backend instant `window_end`. |
 | Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
+| CSV adapter | `scripts/convert_heart_rate_csv.py`: a documented, provider-agnostic converter from a heart-rate CSV (bpm, ISO timestamps with timezone, explicit column names) into the interchange format. Not support for any vendor's export; no hardware, no network. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
@@ -76,6 +77,15 @@ python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --dry-r
 python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl                # replay at recorded pace
 python scripts/replay_samples.py recording.jsonl --url http://127.0.0.1:8010 --speed 4  # other backend, 4x pacing
 #    flags: --url URL --speed POSITIVE_FINITE (default 1) --dry-run; exit 0 ok, 1 invalid file, 2 stopped on a failure
+
+# 3b'. convert a heart-rate CSV (bpm, ISO timestamps with timezone) into that format, then replay it
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_heart_rate.csv /tmp/hr.jsonl \
+    --athlete-id athlete-1 --device-id fictional-hr-csv-1 --source simulated --dry-run   # validate + describe only
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_heart_rate.csv /tmp/hr.jsonl \
+    --athlete-id athlete-1 --device-id fictional-hr-csv-1 --source simulated             # output must not exist yet
+python scripts/replay_samples.py /tmp/hr.jsonl
+#    flags: --timestamp-column NAME --heart-rate-column NAME (defaults timestamp, heart_rate_bpm); --source is one of
+#    wearable|camera|manual|simulated and is never inferred; exit 0 ok, 1 invalid CSV / output exists, 2 bad arguments
 
 # 3c. review the 60 s ending at a recorded instant (same endpoints, optional end=; encode '+' as %2B)
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:02Z"
@@ -216,6 +226,15 @@ All of these are descriptive and cover only the samples available in the window
   Preserves timestamps, sources, ids, nulls, zeros and confidences; never
   rebases to the current time, so old recordings stay out of the rolling
   60 s window and are subject to the newest-timestamp and 300-sample rules.
+- **Heart-rate CSV conversion (`scripts/convert_heart_rate_csv.py`).** One
+  `physiological` record per CSV row with the given athlete, device and
+  source; heart rate taken as bpm as written (blank = null, never 0);
+  timestamps must be ISO 8601 with an explicit timezone and are copied as
+  written (naive values, numeric epochs and invalid dates are rejected);
+  every row validated with `PhysiologicalSample` before anything is written;
+  errors carry CSV row numbers and field names; existing output is never
+  overwritten and a failure leaves no partial file. No other measurement is
+  produced and nothing is inferred from the file name.
 - **Simulator profiles.** `sine`: one rise-and-fall of heart rate (110 to 150 bpm)
   and straight-line speed (peak 8 m/s), confidence 1.0. `effort-rest`: repeating
   40 s cycle (accelerate 10 s to 6 m/s, hold 10 s, slow 10 s, stand 10 s), position
@@ -226,10 +245,14 @@ All of these are descriptive and cover only the samples available in the window
 
 Implemented today is listed above; the following are **not** implemented:
 
-- No real device or camera adapters. Data comes from the simulator, manual
-  POSTs, or recorded files in Athletrix's own JSON Lines interchange format
-  (`scripts/replay_samples.py`). Parsing vendor CSV/JSON exports into that
-  format, and live hardware connections, are **planned**.
+- No live device or camera connections. Data comes from the simulator, manual
+  POSTs, recorded files in Athletrix's own JSON Lines interchange format
+  (`scripts/replay_samples.py`), or a heart-rate CSV converted by
+  `scripts/convert_heart_rate_csv.py`. That converter is a generic adapter,
+  not vendor support: it handles one heart-rate column already in bpm plus
+  ISO timestamps with a timezone, so a real export may need its columns
+  named explicitly, a timestamp reformatting step, or another adapter.
+  Tracking CSVs, other measurements and live hardware are **planned**.
 - The replay script posts one request at a time with no retries and no resume
   point; after a failure, rerunning the whole file is the supported recovery
   (equal-timestamp samples are replaced, so it is safe). Only the file's own
@@ -261,7 +284,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (362 tests as of this handoff)
+# engine: full suite, isolated temporary databases (382 tests as of this handoff)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -275,6 +298,11 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-1/tracking/history?limit=
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:02Z"  # expect 2 phys (mean 113.5), 3 tracking, 2.5 m
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-2/summary?seconds=60&end=2026-10-20T10:00:02Z"  # expect 1 of 2 heart rates (98), 1 tracking, distance null
 
+# engine: CSV adapter round trip into the same isolated backend
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_heart_rate.csv /tmp/hr.jsonl --athlete-id athlete-3 --device-id fictional-hr-csv-1 --source simulated
+python scripts/replay_samples.py /tmp/hr.jsonl --url http://127.0.0.1:8010
+curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60&end=2026-10-20T10:00:04Z"  # expect 5 samples, 4 heart rates, mean 116.375, peak 120.5
+
 # frontend: open http://localhost:3000/tests/timeline_confidence.test.html (expect all tests passing), then on the
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
@@ -287,13 +315,15 @@ open "http://localhost:3000/?engine=0#demo"
 
 ## 10. Recommended next milestone
 
-**First vendor export converter.** The replay path now exists for Athletrix's
-own JSON Lines format (done 2026-10-25). The next step is one small,
-well-documented converter script that turns a real export format (for example
-a generic heart-rate CSV with per-row timestamps, or a tracking CSV with
-position and speed columns) into that interchange format, with explicit column
-mapping, unit conversion and timezone handling declared on the command line
-and recorded in the output file's device ids. Keep it a separate script so the
-replay stays format-agnostic, and add a fixture export plus round-trip tests.
-This exercises the models against non-simulated data shapes while leaving the
-descriptive-language constraints and persistence design untouched.
+**Tracking CSV adapter.** The heart-rate CSV adapter (done 2026-10-25) covers
+the physiological stream only. The matching step for the tracking stream is a
+converter from a position/speed CSV (explicit columns for timestamp, x, y,
+speed, acceleration and confidence; metres and m/s as written, ISO timestamps
+with timezone, no unit guessing) into `tracking` records of the same
+interchange format, with the same whole-file validation, row-numbered errors,
+atomic output and no-overwrite rules. With both adapters, a recorded session
+can be reviewed end to end on the dashboard (heart rate and movement on one
+time axis) without the simulator, which also exercises the distance and
+high-speed estimates on non-simulated data shapes. Keep it a separate script
+so the replay stays format-agnostic, and add a fictional fixture plus
+round-trip tests.
