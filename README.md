@@ -26,6 +26,7 @@ app/
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
+  scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers)
   store/             # in-memory stores: athlete registry, latest samples, bounded history, device status
 tests/
 ```
@@ -118,6 +119,21 @@ Then open:
 Copy `.env.example` to `.env` to override defaults. `CORS_ORIGINS` must include the
 origin the `Athletrix_Web` dev server runs on (e.g. `http://localhost:3000`).
 
+## Demo roster
+
+Register the two fictional demo athletes (`athlete-1` Alex Example, football;
+`athlete-2` Sam Sample, basketball) through the athlete API so the frontend's
+athlete selector has something to show:
+
+```bash
+python scripts/register_demo_roster.py          # or --url http://host:port
+```
+
+It is safe to rerun: identical existing athletes are left alone, and an
+athlete that exists with different details is reported as a conflict and
+never overwritten (exit status 1). The registry is in memory, so run it again
+after every backend restart. Sample ingestion does not require registration.
+
 ## Demo simulator
 
 With the backend running, send 60 seconds of fictional heart-rate data for
@@ -159,15 +175,22 @@ http://127.0.0.1:8000/api/v1/athletes/athlete-2/summary?seconds=60.
 ## Running with the Athletrix_Web frontend
 
 The frontend is a separate static site in the `Athletrix_Web` repository. Its
-dashboard polls this backend for `athlete-1`'s latest sample. With this backend
-running, from the `Athletrix_Web` folder:
+dashboard loads the athlete roster from this backend and polls the selected
+athlete's latest samples and 60-second summary. Full local demo, each line in
+its own terminal from this folder unless noted (activate `.venv` first):
 
 ```bash
-python3 -m http.server 3000
+uvicorn app.main:app --reload                                   # 1. backend
+python scripts/register_demo_roster.py                          # 2. roster (rerun after any backend restart)
+python scripts/simulate_athlete.py --athlete-id athlete-1 --device-id simulator-1 --with-tracking   # 3a
+python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-2 --with-tracking   # 3b
+python3 -m http.server 3000                                     # 4. frontend, from the Athletrix_Web folder
 ```
 
-Then open http://localhost:3000, click **Open the Live Demo**, and run the
-simulator above to see live values. See `Athletrix_Web/README.md` for details.
+Then open http://localhost:3000, click **Live Demo** in the top navigation,
+and use the **Athlete** selector above the cards to switch between the two
+athletes. Everything here is in process memory: the registry and all readings
+clear when the backend restarts. See `Athletrix_Web/README.md` for details.
 
 ## Tests
 
