@@ -7,7 +7,7 @@ import pytest
 from app.api.athletes import MAX_WINDOW_SECONDS
 from app.core import clock
 from app.core.summary import summarize_window
-from app.models import AthleteWindow, PhysiologicalSample, TrackingSample
+from app.models import AthleteWindow, PhysiologicalSample, TrackingRules, TrackingSample
 
 NOW = datetime(2026, 10, 24, 12, 0, 0, tzinfo=UTC)
 PHYS = "/api/v1/samples/physiological"
@@ -34,7 +34,7 @@ def track(seconds, speed, athlete_id="ath-1"):
 
 def window(p=(), t=(), athlete_id="ath-1", start=-60, end=0):
     return AthleteWindow(athlete_id=athlete_id, window_start=at(start), window_end=at(end),
-                         physiological_samples=list(p), tracking_samples=list(t))
+                         physiological_samples=list(p), tracking_samples=list(t), tracking_rules=TrackingRules(min_confidence=0.5))
 
 
 @pytest.fixture(autouse=True)

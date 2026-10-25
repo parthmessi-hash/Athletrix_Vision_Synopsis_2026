@@ -6,7 +6,7 @@ import pytest
 
 from app.core import clock
 from app.core.summary import latest_sample_age_seconds, max_inter_sample_gap_seconds, summarize_window
-from app.models import AthleteWindow, PhysiologicalSample, TrackingSample
+from app.models import AthleteWindow, PhysiologicalSample, TrackingRules, TrackingSample
 
 NOW = datetime(2026, 10, 24, 12, 0, 0, tzinfo=UTC)
 PHYS = "/api/v1/samples/physiological"
@@ -28,7 +28,7 @@ def track(seconds, speed=1.0):
 
 def window(p=(), t=(), end=0):
     return AthleteWindow(athlete_id="ath-1", window_start=at(end - 60), window_end=at(end),
-                         physiological_samples=list(p), tracking_samples=list(t))
+                         physiological_samples=list(p), tracking_samples=list(t), tracking_rules=TrackingRules(min_confidence=0.5))
 
 
 # ---- helper functions ----------------------------------------------------

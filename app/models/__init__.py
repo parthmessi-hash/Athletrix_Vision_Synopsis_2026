@@ -11,7 +11,7 @@ from app.models.device import DeviceStatus
 from app.models.physiological import PhysiologicalSample
 from app.models.summary import AthleteSummary, DistanceEstimate, DistanceRules, HighSpeedEstimate, PhysiologicalSummary, TrackingSummary
 from app.models.tracking import TrackingSample
-from app.models.window import AthleteWindow
+from app.models.window import AthleteWindow, TrackingRules
 
 __all__ = [
     "Athlete",
@@ -25,6 +25,7 @@ __all__ = [
     "PhysiologicalSummary",
     "Posture",
     "SampleSource",
+    "TrackingRules",
     "TrackingSample",
     "TrackingSummary",
 ]

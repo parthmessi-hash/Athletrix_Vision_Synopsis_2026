@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from app.core import clock
 from app.core.config import get_settings
 from app.core.summary import summarize_window
-from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, TrackingSample
+from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, TrackingRules, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
@@ -89,12 +89,13 @@ def get_tracking_history(
 WINDOW_SECONDS = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at backend time now")
 
 
-def select_window(athlete_id: str, seconds: int) -> AthleteWindow:
+def select_window(athlete_id: str, seconds: int, min_confidence: float) -> AthleteWindow:
     """Both streams recorded in the last `seconds`, cut at one captured backend instant.
 
     Backend time is read once; samples timestamped after it are excluded even if
     ingestion accepted them within the clock-skew tolerance. Reads the stores
-    directly.
+    directly. `min_confidence` is the configured DISTANCE_MIN_CONFIDENCE, echoed
+    in `tracking_rules` so the response is self-contained.
     """
     window_end = clock.utc_now()
     window_start = window_end - timedelta(seconds=seconds)
@@ -104,13 +105,14 @@ def select_window(athlete_id: str, seconds: int) -> AthleteWindow:
         window_end=window_end,
         physiological_samples=physiological_history_store.between(athlete_id, window_start, window_end),
         tracking_samples=tracking_history_store.between(athlete_id, window_start, window_end),
+        tracking_rules=TrackingRules(min_confidence=min_confidence),
     )
 
 
 @router.get("/{athlete_id}/window", response_model=AthleteWindow)
 def get_athlete_window(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteWindow:
-    """Physiological and tracking samples recorded in the last `seconds`, oldest to newest."""
-    return select_window(athlete_id, seconds)
+    """Physiological and tracking samples recorded in the last `seconds`, oldest to newest, with the applied tracking rules."""
+    return select_window(athlete_id, seconds, get_settings().distance_min_confidence)
 
 
 @router.get("/{athlete_id}/summary", response_model=AthleteSummary)
@@ -118,7 +120,7 @@ def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS) -> Athle
     """Descriptive counts, heart-rate mean/peak, peak speed, gap-aware distance and high-speed estimates, and timestamps for the last `seconds`."""
     settings = get_settings()
     return summarize_window(
-        select_window(athlete_id, seconds),
+        select_window(athlete_id, seconds, settings.distance_min_confidence),
         distance_max_gap_seconds=settings.distance_max_gap_seconds,
         distance_min_confidence=settings.distance_min_confidence,
         high_speed_threshold_mps=settings.high_speed_threshold_mps,

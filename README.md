@@ -3,6 +3,10 @@
 Backend/engine for the Athletrix real-time multi-sport athlete monitoring platform.
 The frontend lives in the separate `Athletrix_Web` repository and talks to this service over HTTP.
 
+New to the project or starting a fresh session? Read [PROJECT_STATUS.md](PROJECT_STATUS.md)
+first: it is the concise handoff (purpose, repositories, exact commands, endpoints,
+calculations, limitations and the next milestone).
+
 ## Stack
 
 - Python 3.11+
@@ -44,7 +48,8 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 | `PhysiologicalSample` | HR, breathing, HRV, SpO2, temp, posture   |
 | `TrackingSample`      | Position (m), speed (m/s), accel (m/s²)   |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
-| `AthleteWindow`       | Both streams for one athlete, last N secs |
+| `AthleteWindow`       | Both streams for one athlete, last N secs, plus `tracking_rules` |
+| `TrackingRules`       | Applied `min_confidence` (= `DISTANCE_MIN_CONFIDENCE`) |
 | `AthleteSummary`      | Counts, HR mean/peak, peak speed, times   |
 
 `POST /api/v1/athletes` registers an athlete (201; 409 if the id exists,
@@ -83,6 +88,17 @@ ingestion accepts up to 5 s of clock skew. Because each history keeps at most
 300 samples, a window can return less than its full span. The window groups
 samples by recorded time only: it does not correct device clock differences
 or account for the lag between effort and physiological response.
+
+The window response is self-contained: it also carries a small
+`tracking_rules` block, `{"min_confidence": 0.5}` by default, echoing the
+`DISTANCE_MIN_CONFIDENCE` setting that the distance and high-speed estimates
+apply (there is no second confidence default). A consumer can therefore
+classify the tracking samples of a response from that response alone,
+without waiting for the summary endpoint. Samples below the rule are still
+returned unchanged; nothing is filtered server-side. Comparing a sample's
+`tracking_confidence` with this rule only reflects the confidence the
+tracking source reported: it does not validate the accuracy of the
+underlying speed or position measurement.
 
 `GET /api/v1/athletes/{id}/summary?seconds=60` uses the same window selection
 (same `seconds` validation, one captured `window_end`, stores read directly)
@@ -288,3 +304,8 @@ per stream survive backend restarts (see Storage). See
 ```bash
 pytest
 ```
+
+Every test runs against its own temporary SQLite file (see `tests/conftest.py`);
+the development database under `data/` is never read or written by the suite.
+The frontend's timeline behaviour tests are a static page in the `Athletrix_Web`
+repository (`tests/timeline_confidence.test.html`, see its README).

@@ -9,7 +9,7 @@ from app.core import clock
 from app.core.config import Settings
 from app.core.distance import Interval, eligible_intervals, estimate_distance, estimate_high_speed, high_speed_portion
 from app.core.summary import summarize_window
-from app.models import AthleteWindow, TrackingSample
+from app.models import AthleteWindow, TrackingRules, TrackingSample
 
 NOW = datetime(2026, 10, 25, 12, 0, 0, tzinfo=UTC)
 TRACK = "/api/v1/samples/tracking"
@@ -153,7 +153,7 @@ def test_existing_distance_results_unchanged():
 
 def test_summary_includes_high_speed_and_keeps_other_metrics():
     track = [t(-3, 2.0), t(0, 8.0)]  # one 3 s interval, exactly at the gap limit
-    w = AthleteWindow(athlete_id="ath-1", window_start=at(-60), window_end=at(0), physiological_samples=[], tracking_samples=track)
+    w = AthleteWindow(athlete_id="ath-1", window_start=at(-60), window_end=at(0), physiological_samples=[], tracking_samples=track, tracking_rules=TrackingRules(min_confidence=0.5))
     s = summarize_window(w)
     assert s.tracking.estimated_distance_m == pytest.approx(15.0) and s.tracking.included_duration_seconds == 3.0
     assert s.tracking.high_speed_duration_seconds == pytest.approx(1.5)

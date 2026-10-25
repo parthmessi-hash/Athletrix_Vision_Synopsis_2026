@@ -9,7 +9,9 @@ from app.core import clock
 from app.core.config import Settings
 from app.core.distance import estimate_distance
 from app.core.summary import summarize_window
-from app.models import AthleteWindow, PhysiologicalSample, TrackingSample
+from app.models import AthleteWindow, PhysiologicalSample, TrackingRules, TrackingSample
+
+RULES = TrackingRules(min_confidence=0.5)
 
 NOW = datetime(2026, 10, 25, 12, 0, 0, tzinfo=UTC)
 TRACK = "/api/v1/samples/tracking"
@@ -149,7 +151,7 @@ def test_settings_validate_distance_rules(monkeypatch):
 def test_summary_carries_distance_and_keeps_existing_metrics():
     phys = [PhysiologicalSample(athlete_id="ath-1", timestamp=at(-5), source="simulated", device_id="d", heart_rate_bpm=120)]
     track = [t(-4, 0.0), t(-2, 4.0), t(-1.5, 6.0), t(0, 0.0)]
-    w = AthleteWindow(athlete_id="ath-1", window_start=at(-60), window_end=at(0), physiological_samples=phys, tracking_samples=track)
+    w = AthleteWindow(athlete_id="ath-1", window_start=at(-60), window_end=at(0), physiological_samples=phys, tracking_samples=track, tracking_rules=RULES)
     s = summarize_window(w)
     assert s.physiological.heart_rate_mean_bpm == 120 and s.physiological.sample_count == 1
     assert s.tracking.sample_count == 4 and s.tracking.speed_peak_mps == 6.0
@@ -161,7 +163,7 @@ def test_summary_carries_distance_and_keeps_existing_metrics():
 
 def test_summary_custom_rules_change_eligibility():
     track = [t(-5, 2.0), t(0, 2.0)]  # 5 s apart
-    w = AthleteWindow(athlete_id="ath-1", window_start=at(-60), window_end=at(0), physiological_samples=[], tracking_samples=track)
+    w = AthleteWindow(athlete_id="ath-1", window_start=at(-60), window_end=at(0), physiological_samples=[], tracking_samples=track, tracking_rules=RULES)
     assert summarize_window(w).tracking.estimated_distance_m is None
     s = summarize_window(w, distance_max_gap_seconds=5.0)
     assert s.tracking.estimated_distance_m == pytest.approx(10.0)
