@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,11 @@ class Settings(BaseSettings):
     # Local SQLite file holding athletes, device status and bounded sample histories.
     # Relative paths are resolved from the working directory the backend is started in.
     database_path: str = "data/athletrix.db"
+    # Distance estimate rules (adjustable engineering defaults, not validated sport-specific standards):
+    # consecutive tracking samples further apart than this are not bridged, and both ends of an interval
+    # must reach this tracking_confidence for it to count.
+    distance_max_gap_seconds: float = Field(3.0, gt=0, le=60)
+    distance_min_confidence: float = Field(0.5, ge=0, le=1)
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -98,9 +98,28 @@ not prove the requested window was fully covered, and no interpolation,
 thresholds or labels are applied. Null heart rates are ignored; with no measurements the metrics
 and timestamps are null and counts are 0. A peak speed of 0.0 is a real value.
 The heart-rate mean is an arithmetic average of the measurements received,
-not a time-weighted average. All of these describe the samples available in
-memory: transmission gaps and the 300-sample history caps can limit coverage.
-No condition scores, baselines or recovery claims are derived. A sample whose timestamp is
+not a time-weighted average.
+
+The tracking summary also carries a gap-aware distance estimate:
+`estimated_distance_m`, `included_duration_seconds`,
+`included_window_fraction`, `excluded_interval_count` and the applied
+`distance_rules`. Consecutive tracking samples in the window form
+intervals; an interval counts only when its elapsed time is positive and at
+most `DISTANCE_MAX_GAP_SECONDS` (default 3 s) and both endpoint
+`tracking_confidence` values are at least `DISTANCE_MIN_CONFIDENCE` (default
+0.5). Each counted interval adds `(v_prev + v_cur) / 2 * elapsed` metres (the
+trapezoidal rule, which assumes speed changes linearly between the two
+samples). Rejected intervals are counted once and contribute nothing: bad
+samples are not dropped and bridged across, and nothing is extrapolated
+before the first sample, after the last, or over an excluded interval. The
+estimate is null when no interval was eligible and a real 0.0 when the
+eligible intervals were stationary; the fraction is included duration over
+the requested window length. Both rules are adjustable engineering defaults
+set in `.env`, not validated sport-specific standards, and the estimate
+covers only the eligible part of the window, bounded by the 300-sample
+history cap. All of these describe the samples available: transmission gaps
+and the history caps can limit coverage. No condition scores, baselines or
+recovery claims are derived. A sample whose timestamp is
 more than 5 seconds ahead of the backend's UTC clock is rejected with 422 and
 the stores are left unchanged (`MAX_FUTURE_TIMESTAMP_SKEW` in
 `app/core/clock.py`, an initial clock-skew allowance). Nothing is persisted

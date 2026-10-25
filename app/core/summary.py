@@ -3,7 +3,8 @@
 from collections.abc import Sequence
 from datetime import datetime
 
-from app.models import AthleteSummary, AthleteWindow, PhysiologicalSummary, TrackingSummary
+from app.core.distance import DEFAULT_MAX_GAP_SECONDS, DEFAULT_MIN_CONFIDENCE, estimate_distance
+from app.models import AthleteSummary, AthleteWindow, DistanceRules, PhysiologicalSummary, TrackingSummary
 
 
 def latest_sample_age_seconds(timestamps: Sequence[datetime], window_end: datetime) -> float | None:
@@ -18,7 +19,12 @@ def max_inter_sample_gap_seconds(timestamps: Sequence[datetime]) -> float | None
     return max((b - a).total_seconds() for a, b in zip(timestamps, timestamps[1:]))
 
 
-def summarize_window(window: AthleteWindow) -> AthleteSummary:
+def summarize_window(
+    window: AthleteWindow,
+    *,
+    distance_max_gap_seconds: float = DEFAULT_MAX_GAP_SECONDS,
+    distance_min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+) -> AthleteSummary:
     phys = window.physiological_samples
     track = window.tracking_samples
 
@@ -37,6 +43,8 @@ def summarize_window(window: AthleteWindow) -> AthleteSummary:
 
     track_ts = [s.timestamp for s in track]
     speeds = [s.speed_mps for s in track]
+    window_seconds = (window.window_end - window.window_start).total_seconds()
+    dist = estimate_distance(track, window_seconds, distance_max_gap_seconds, distance_min_confidence)
     tracking = TrackingSummary(
         sample_count=len(track),
         speed_peak_mps=max(speeds) if speeds else None,  # max() of zeros is 0.0, kept as a real value
@@ -44,6 +52,11 @@ def summarize_window(window: AthleteWindow) -> AthleteSummary:
         last_sample_at=track[-1].timestamp if track else None,
         latest_sample_age_seconds=latest_sample_age_seconds(track_ts, window.window_end),
         max_inter_sample_gap_seconds=max_inter_sample_gap_seconds(track_ts),
+        estimated_distance_m=dist.estimated_distance_m,
+        included_duration_seconds=dist.included_duration_seconds,
+        included_window_fraction=dist.included_window_fraction,
+        excluded_interval_count=dist.excluded_interval_count,
+        distance_rules=DistanceRules(max_gap_seconds=dist.max_gap_seconds, min_confidence=dist.min_confidence),
     )
 
     return AthleteSummary(

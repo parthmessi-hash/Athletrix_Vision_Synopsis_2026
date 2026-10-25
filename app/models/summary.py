@@ -29,6 +29,34 @@ class PhysiologicalSummary(AthletrixModel):
     )
 
 
+class DistanceRules(AthletrixModel):
+    """Settings applied to the distance estimate (adjustable engineering defaults, not sport standards)."""
+
+    max_gap_seconds: float = Field(..., gt=0, description="Longest consecutive-sample interval included, seconds.")
+    min_confidence: float = Field(..., ge=0, le=1, description="Minimum tracking_confidence required at both ends of an interval.")
+
+
+class DistanceEstimate(AthletrixModel):
+    """Gap-aware distance estimate over eligible consecutive tracking intervals.
+
+    An interval between two consecutive samples is eligible when its elapsed time is positive and at
+    most `max_gap_seconds` and both endpoint confidences are at least `min_confidence`. Each eligible
+    interval contributes (v_prev + v_cur) / 2 * elapsed, which assumes speed changes linearly between
+    samples. Excluded intervals contribute nothing and are never bridged; nothing is extrapolated
+    outside the samples. This is an estimate over the eligible part of the window, not a guaranteed
+    full-window distance.
+
+    Units: metres, seconds; the fraction is included duration divided by the requested window length.
+    """
+
+    estimated_distance_m: float | None = Field(None, ge=0, description="Sum over eligible intervals, metres; null if no interval was eligible; 0.0 when eligible intervals were stationary.")
+    included_duration_seconds: float = Field(..., ge=0, description="Total elapsed time of eligible intervals, seconds (0 if none).")
+    included_window_fraction: float = Field(..., ge=0, le=1, description="included_duration_seconds divided by the requested window length (0 if none).")
+    excluded_interval_count: int = Field(..., ge=0, description="Consecutive-sample intervals rejected by the gap or confidence rule, each counted once.")
+    max_gap_seconds: float = Field(..., gt=0, description="Applied rule: longest interval included, seconds.")
+    min_confidence: float = Field(..., ge=0, le=1, description="Applied rule: minimum tracking_confidence at both ends of an interval.")
+
+
 class TrackingSummary(AthletrixModel):
     """Descriptive statistics over the tracking samples in a window.
 
@@ -49,6 +77,11 @@ class TrackingSummary(AthletrixModel):
     max_inter_sample_gap_seconds: float | None = Field(
         None, ge=0, description="Largest gap between consecutive sample timestamps, seconds; null if fewer than two samples."
     )
+    estimated_distance_m: float | None = Field(None, ge=0, description="See DistanceEstimate.estimated_distance_m.")
+    included_duration_seconds: float = Field(0.0, ge=0, description="See DistanceEstimate.included_duration_seconds.")
+    included_window_fraction: float = Field(0.0, ge=0, le=1, description="See DistanceEstimate.included_window_fraction.")
+    excluded_interval_count: int = Field(0, ge=0, description="See DistanceEstimate.excluded_interval_count.")
+    distance_rules: DistanceRules | None = Field(None, description="The gap and confidence rules applied to the distance estimate.")
 
 
 class AthleteSummary(AthletrixModel):

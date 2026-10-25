@@ -3,6 +3,7 @@ from datetime import timedelta
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.core import clock
+from app.core.config import get_settings
 from app.core.summary import summarize_window
 from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, TrackingSample
 from app.store.athletes import athlete_registry
@@ -114,5 +115,10 @@ def get_athlete_window(athlete_id: str, seconds: int = WINDOW_SECONDS) -> Athlet
 
 @router.get("/{athlete_id}/summary", response_model=AthleteSummary)
 def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteSummary:
-    """Descriptive counts, heart-rate mean/peak, peak speed and first/last timestamps for the last `seconds`."""
-    return summarize_window(select_window(athlete_id, seconds))
+    """Descriptive counts, heart-rate mean/peak, peak speed, gap-aware distance estimate and timestamps for the last `seconds`."""
+    settings = get_settings()
+    return summarize_window(
+        select_window(athlete_id, seconds),
+        distance_max_gap_seconds=settings.distance_max_gap_seconds,
+        distance_min_confidence=settings.distance_min_confidence,
+    )
