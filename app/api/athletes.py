@@ -1,6 +1,7 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import AwareDatetime
 
 from app.core import clock
 from app.core.config import get_settings
@@ -86,18 +87,48 @@ def get_tracking_history(
     return tracking_history_store.recent(athlete_id, limit)
 
 
-WINDOW_SECONDS = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at backend time now")
+WINDOW_SECONDS = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at `end`, or at backend time now when `end` is omitted")
+WINDOW_END = Query(
+    None,
+    description=(
+        "Recorded review: the exact window end as an ISO 8601 timestamp with timezone, e.g. 2026-10-20T10:00:02Z "
+        "(encode '+' as %2B). Must not be after backend time. Omitted: live mode, backend time now."
+    ),
+)
 
 
-def select_window(athlete_id: str, seconds: int, min_confidence: float) -> AthleteWindow:
-    """Both streams recorded in the last `seconds`, cut at one captured backend instant.
+def resolve_window_end(end: datetime | None) -> datetime:
+    """The window end for one request: backend time now (live), or the requested recorded instant.
 
-    Backend time is read once; samples timestamped after it are excluded even if
-    ingestion accepted them within the clock-skew tolerance. Reads the stores
-    directly. `min_confidence` is the configured DISTANCE_MIN_CONFIDENCE, echoed
-    in `tracking_rules` so the response is self-contained.
+    Backend time is read exactly once either way. A recorded end after backend
+    time is rejected, so a review never includes samples that could still
+    arrive within the ingestion clock-skew allowance.
     """
-    window_end = clock.utc_now()
+    now = clock.utc_now()
+    if end is None:
+        return now
+    if end > now:
+        raise HTTPException(
+            status_code=422,
+            detail=f"end {end.isoformat()} is after backend time {now.isoformat()}; a recorded review cannot end in the future",
+        )
+    return end
+
+
+def select_window(athlete_id: str, seconds: int, min_confidence: float, end: datetime | None = None) -> AthleteWindow:
+    """Both streams recorded in the last `seconds` before one window end.
+
+    Live (`end` is None): the end is backend time, read once; samples timestamped
+    after it are excluded even if ingestion accepted them within the clock-skew
+    tolerance. Recorded review (`end` given, timezone-aware, not in the future):
+    that exact instant is the end and the start is `seconds` before it. The
+    selection, inclusive boundaries, ordering and `tracking_rules` are the same in
+    both cases; only the retained samples (newest 300 per athlete per stream) can
+    be reviewed. Reads the stores directly. `min_confidence` is the configured
+    DISTANCE_MIN_CONFIDENCE, echoed in `tracking_rules` so the response is
+    self-contained.
+    """
+    window_end = resolve_window_end(end)
     window_start = window_end - timedelta(seconds=seconds)
     return AthleteWindow(
         athlete_id=athlete_id,
@@ -110,17 +141,20 @@ def select_window(athlete_id: str, seconds: int, min_confidence: float) -> Athle
 
 
 @router.get("/{athlete_id}/window", response_model=AthleteWindow)
-def get_athlete_window(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteWindow:
-    """Physiological and tracking samples recorded in the last `seconds`, oldest to newest, with the applied tracking rules."""
-    return select_window(athlete_id, seconds, get_settings().distance_min_confidence)
+def get_athlete_window(athlete_id: str, seconds: int = WINDOW_SECONDS, end: AwareDatetime | None = WINDOW_END) -> AthleteWindow:
+    """Physiological and tracking samples recorded in the `seconds` before `end` (default: now), oldest to newest, with the applied tracking rules."""
+    return select_window(athlete_id, seconds, get_settings().distance_min_confidence, end)
 
 
 @router.get("/{athlete_id}/summary", response_model=AthleteSummary)
-def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteSummary:
-    """Descriptive counts, heart-rate mean/peak, peak speed, gap-aware distance and high-speed estimates, and timestamps for the last `seconds`."""
+def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS, end: AwareDatetime | None = WINDOW_END) -> AthleteSummary:
+    """Descriptive counts, heart-rate mean/peak, peak speed, gap-aware distance and high-speed estimates, and timestamps for the `seconds` before `end` (default: now).
+
+    Sample ages are always relative to `window_end`: in a recorded review they mean seconds before the selected end, not age relative to the present.
+    """
     settings = get_settings()
     return summarize_window(
-        select_window(athlete_id, seconds, settings.distance_min_confidence),
+        select_window(athlete_id, seconds, settings.distance_min_confidence, end),
         distance_max_gap_seconds=settings.distance_max_gap_seconds,
         distance_min_confidence=settings.distance_min_confidence,
         high_speed_threshold_mps=settings.high_speed_threshold_mps,

@@ -82,7 +82,9 @@ rate), and this is not match or season storage.
 
 `GET /api/v1/athletes/{id}/window?seconds=60` (1 to 300) returns both streams
 for the last `seconds`, read from those histories. Backend UTC time is
-captured once as `window_end`; `window_start` is derived from it, and
+captured once as `window_end` (or, with the optional `end=` parameter, the
+requested recorded instant is used instead; see "Reviewing a recorded
+window" below); `window_start` is derived from it, and
 samples are included when `window_start <= timestamp <= window_end`, oldest
 to newest. Samples timestamped after `window_end` are excluded even though
 ingestion accepts up to 5 s of clock skew. Because each history keeps at most
@@ -343,14 +345,51 @@ valid dry run; 1 invalid or unreadable file; 2 the replay stopped on a failure.
   sample may or may not have been stored. Rerunning the file is safe: the
   backend replaces the stored sample for an equal timestamp.
 
+### Reviewing a recorded window (`end` parameter)
+
+Both `GET /api/v1/athletes/{id}/window` and `GET /api/v1/athletes/{id}/summary`
+accept an optional `end` query parameter: an ISO 8601 timestamp **with a
+timezone**. When it is given, that exact instant is `window_end` and
+`window_start` is `seconds` before it; when it is omitted the live behaviour is
+unchanged (backend time now). Selection, inclusive boundaries, ordering,
+`tracking_rules` and every calculation are shared between the two modes.
+
+```bash
+# the 60 s ending at the end of the fictional replay example (encode '+' as %2B in offsets)
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60&end=2026-10-20T10:00:02Z"
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:02Z"
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-2/summary?seconds=60&end=2026-10-20T12:00:02%2B02:00"   # same instant
+```
+
+Rules:
+
+- `end` must parse as a timezone-aware timestamp; an invalid or naive value is
+  a 422 from validation (`query.end: Input should have timezone info`).
+- `end` must not be after backend time (read once per request); a future end
+  is a 422 with the message `... is after backend time ...; a recorded review
+  cannot end in the future`. Exactly "now" is allowed.
+- Equivalent instants in different offsets select the same samples; the
+  response echoes `window_end` in the offset you sent.
+- Summary ages (`latest_sample_age_seconds`) are always relative to
+  `window_end`. In a recorded review they mean **seconds before the selected
+  window end**, not age relative to the present.
+
+**This is a review of retained samples, not a recording archive.** The
+backend keeps only the newest 300 samples per athlete per stream, so a window
+can only show what is still in SQLite: older records may already have been
+removed, and a window may come back empty or partial for that reason. Nothing
+is rebased, ingestion is unchanged and retention is not expanded.
+
 ### Historical timestamps stay historical
 
 Because timestamps are preserved, a replayed recording is stored at its
 recorded times. Consequences, by design:
 
-- The dashboard's rolling 60-second window and summary look at the last 60 s
-  of backend time, so an old recording will not appear there; use the
-  `history` and `latest` endpoints (or a window covering that time) to read it.
+- The dashboard's **Live** mode and the default window/summary look at the
+  last 60 s of backend time, so an old recording will not appear there. Read it
+  with the `history` and `latest` endpoints, with `end=` on the window and
+  summary endpoints (previous section), or with the dashboard's **Recorded**
+  review mode (see the `Athletrix_Web` README).
 - The newest-timestamp rules still apply: a replayed sample becomes the
   "latest" only if it is newer than what is already stored, and the newest
   300 samples per athlete per stream are kept, so a long recording is trimmed

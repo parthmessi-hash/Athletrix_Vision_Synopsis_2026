@@ -33,6 +33,7 @@ Terms used throughout:
 | History | The newest 300 samples per athlete per stream (a count, not a time span). |
 | Window | Both streams for one athlete between `window_start` and one captured backend instant `window_end`. |
 | Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
+| Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
@@ -76,6 +77,11 @@ python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl        
 python scripts/replay_samples.py recording.jsonl --url http://127.0.0.1:8010 --speed 4  # other backend, 4x pacing
 #    flags: --url URL --speed POSITIVE_FINITE (default 1) --dry-run; exit 0 ok, 1 invalid file, 2 stopped on a failure
 
+# 3c. review the 60 s ending at a recorded instant (same endpoints, optional end=; encode '+' as %2B)
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:02Z"
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60&end=2026-10-20T10:00:02Z"
+#    or in the dashboard: Review bar -> Recorded -> enter 2026-10-20T10:00:02Z -> Review
+
 # 4. frontend, from the Athletrix_Web folder
 python3 -m http.server 3000
 ```
@@ -110,8 +116,8 @@ Endpoints, all under `/api/v1`:
 | `POST /devices/status`, `GET /devices/{id}/status/latest` | Device status ingest (newest per device kept) and read |
 | `GET /athletes/{id}/physiological/latest`, `.../tracking/latest` | Newest persisted sample (404 if none) |
 | `GET /athletes/{id}/physiological/history?limit=60`, `.../tracking/history?limit=60` | Newest `limit` (1-300) samples, oldest to newest |
-| `GET /athletes/{id}/window?seconds=60` | Both streams in the last `seconds` (1-300), one captured `window_end`, plus `tracking_rules` |
-| `GET /athletes/{id}/summary?seconds=60` | Descriptive metrics over the same window selection |
+| `GET /athletes/{id}/window?seconds=60[&end=...]` | Both streams in the `seconds` (1-300) before `end`, plus `tracking_rules`. Without `end`: live, one captured backend `window_end`. With `end` (ISO 8601 with timezone, not after backend time, `+` encoded as `%2B`): recorded review ending at that exact instant. Invalid, naive or future `end` is a 422. |
+| `GET /athletes/{id}/summary?seconds=60[&end=...]` | Descriptive metrics over the same window selection; ages are relative to `window_end` (in a review: seconds before the selected end) |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):
 
@@ -150,7 +156,7 @@ The page resolves a mode on load (`resolveEngineMode` in `index.html`):
 
 | Mode | When | Behaviour |
 |------|------|-----------|
-| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). |
+| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". |
 | `public` | any other hostname (the published site), or `?engine=0`, or `engineMode: "public"` | Shows an explanation card with the local startup steps. **No request is made to the engine.** |
 
 Polling: live cards every 1 s, summary and timeline every 5 s, only while the
@@ -164,10 +170,14 @@ banner, and is never substituted for engine data.
 All of these are descriptive and cover only the samples available in the window
 (bounded by transmission gaps and the 300-sample history cap).
 
-- **Window selection.** Backend UTC time is read once as `window_end`;
-  `window_start = window_end - seconds`; samples included when
-  `window_start <= timestamp <= window_end`. Groups by recorded time only: no
-  device-clock correction, no effort-to-response lag modelling.
+- **Window selection.** `window_end` is backend UTC time read once (live) or
+  the `end` query parameter (recorded review; timezone-aware, not after backend
+  time, which is still read once for that check); `window_start = window_end -
+  seconds`; samples included when `window_start <= timestamp <= window_end`.
+  Both modes share the same code path, boundaries, ordering, `tracking_rules`
+  and calculations. Groups by recorded time only: no device-clock correction,
+  no effort-to-response lag modelling. Summary ages are relative to
+  `window_end`, so in a review they are seconds before the selected end.
 - **Heart rate mean and peak.** Arithmetic mean and max of non-null
   `heart_rate_bpm`; not time-weighted. Nulls ignored, counts reported.
 - **Peak speed.** Max `speed_mps`; `0.0` is a real value.
@@ -227,7 +237,13 @@ Implemented today is listed above; the following are **not** implemented:
 - No authentication, authorisation or multi-user handling; the engine is meant to
   run on a local sideline machine behind CORS only.
 - Single-process SQLite only; multiple backend processes on one file are unsupported.
-- Retention is 300 samples per stream; no match/season storage, no export or replay.
+- Retention is 300 samples per athlete per stream; no match/season storage and
+  no export. Recorded review (`end=` and the dashboard's Recorded mode) can
+  therefore show only what is still retained: it is a review of retained
+  samples, not a recording archive, and older records may already be gone.
+- Recorded review uses a fixed 60 s duration in the dashboard (the API accepts
+  1-300 s), one window at a time, with a typed timestamp; there is no
+  recording index, scrubber or list of available time ranges.
 - Devices are not linked to athletes in the data model (a sample names its
   `device_id`, but device status is independent of the athlete registry).
 - Athlete registration is not required for ingestion, so unregistered ids can
@@ -245,7 +261,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (332 tests as of this handoff)
+# engine: full suite, isolated temporary databases (362 tests as of this handoff)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -256,6 +272,11 @@ DATABASE_PATH=/tmp/athletrix-replay-check.db uvicorn app.main:app --port 8010   
 python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --dry-run --url http://127.0.0.1:8010
 python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --url http://127.0.0.1:8010 --speed 4
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-1/tracking/history?limit=10"  # expect 3 samples at 2026-10-20T10:00:00Z..02Z
+curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:02Z"  # expect 2 phys (mean 113.5), 3 tracking, 2.5 m
+curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-2/summary?seconds=60&end=2026-10-20T10:00:02Z"  # expect 1 of 2 heart rates (98), 1 tracking, distance null
+
+# frontend: open http://localhost:3000/tests/timeline_confidence.test.html (expect all tests passing), then on the
+# dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
 open http://localhost:3000/tests/timeline_confidence.test.html      # expect "15 tests, 15 passed"
