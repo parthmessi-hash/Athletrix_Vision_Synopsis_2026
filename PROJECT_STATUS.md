@@ -32,6 +32,7 @@ Terms used throughout:
 | Latest | The newest persisted sample of a stream for an athlete. |
 | History | The newest 300 samples per athlete per stream (a count, not a time span). |
 | Window | Both streams for one athlete between `window_start` and one captured backend instant `window_end`. |
+| Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
 | Summary | Descriptive metrics over a window. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
@@ -68,6 +69,12 @@ python scripts/simulate_athlete.py --athlete-id athlete-1 --device-id simulator-
 python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-2 --with-tracking
 python scripts/simulate_athlete.py --profile effort-rest --with-tracking --seconds 120   # repeating 40 s effort/rest cycle
 #    flags: --seconds N (default 60) --url URL --athlete-id ID --device-id ID --with-tracking --profile sine|effort-rest
+
+# 3b. replay a recorded JSON Lines file exactly as recorded (fictional example included)
+python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --dry-run      # validate + describe, send nothing
+python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl                # replay at recorded pace
+python scripts/replay_samples.py recording.jsonl --url http://127.0.0.1:8010 --speed 4  # other backend, 4x pacing
+#    flags: --url URL --speed POSITIVE_FINITE (default 1) --dry-run; exit 0 ok, 1 invalid file, 2 stopped on a failure
 
 # 4. frontend, from the Athletrix_Web folder
 python3 -m http.server 3000
@@ -189,6 +196,16 @@ All of these are descriptive and cover only the samples available in the window
   if the rule is missing or invalid, every speed point is a dashed grey
   unclassified marker and no line is drawn. Lines join consecutive usable points
   only when <= 3 s apart (a display rule). Nothing is interpolated.
+- **Recorded replay (`scripts/replay_samples.py`).** Validates every line of
+  a JSON Lines file with the API's own models before sending anything (errors
+  reported per line and field); posts records in chronological order of
+  recorded timestamp, input order for equal timestamps, each to its existing
+  sample endpoint; paces requests by recorded gaps divided by `--speed` on a
+  monotonic clock without altering the timestamps sent; stops at the first
+  HTTP or connection failure and reports submitted / failed / not sent counts.
+  Preserves timestamps, sources, ids, nulls, zeros and confidences; never
+  rebases to the current time, so old recordings stay out of the rolling
+  60 s window and are subject to the newest-timestamp and 300-sample rules.
 - **Simulator profiles.** `sine`: one rise-and-fall of heart rate (110 to 150 bpm)
   and straight-line speed (peak 8 m/s), confidence 1.0. `effort-rest`: repeating
   40 s cycle (accelerate 10 s to 6 m/s, hold 10 s, slow 10 s, stand 10 s), position
@@ -199,8 +216,14 @@ All of these are descriptive and cover only the samples available in the window
 
 Implemented today is listed above; the following are **not** implemented:
 
-- No real device or camera adapters: all data so far comes from the simulator or
-  manual POSTs. Vendor payload mapping onto the generic models is **planned**.
+- No real device or camera adapters. Data comes from the simulator, manual
+  POSTs, or recorded files in Athletrix's own JSON Lines interchange format
+  (`scripts/replay_samples.py`). Parsing vendor CSV/JSON exports into that
+  format, and live hardware connections, are **planned**.
+- The replay script posts one request at a time with no retries and no resume
+  point; after a failure, rerunning the whole file is the supported recovery
+  (equal-timestamp samples are replaced, so it is safe). Only the file's own
+  samples are sent: it does not register athletes or report device status.
 - No authentication, authorisation or multi-user handling; the engine is meant to
   run on a local sideline machine behind CORS only.
 - Single-process SQLite only; multiple backend processes on one file are unsupported.
@@ -222,11 +245,17 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (308 tests as of this handoff)
+# engine: full suite, isolated temporary databases (332 tests as of this handoff)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
 curl -s "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60" | python3 -m json.tool | grep -A2 tracking_rules
+
+# engine: replay the fictional example into an isolated backend (own database, own port), then read it back
+DATABASE_PATH=/tmp/athletrix-replay-check.db uvicorn app.main:app --port 8010      # separate terminal
+python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --dry-run --url http://127.0.0.1:8010
+python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --url http://127.0.0.1:8010 --speed 4
+curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-1/tracking/history?limit=10"  # expect 3 samples at 2026-10-20T10:00:00Z..02Z
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
 open http://localhost:3000/tests/timeline_confidence.test.html      # expect "15 tests, 15 passed"
@@ -237,11 +266,13 @@ open "http://localhost:3000/?engine=0#demo"
 
 ## 10. Recommended next milestone
 
-**First real-data path: a file replay adapter.** Add a provider-agnostic
-"replay" script or endpoint that reads an exported wearable or tracking file
-(CSV/JSON), maps it onto `PhysiologicalSample` / `TrackingSample` with explicit
-unit and timezone handling, and feeds it through the existing ingestion with
-the clock-skew check. This exercises the models against non-simulated data,
-surfaces the device-to-athlete linkage gap, and gives the dashboard something
-other than the simulator to show, without touching the descriptive-language
-constraints or persistence design.
+**First vendor export converter.** The replay path now exists for Athletrix's
+own JSON Lines format (done 2026-10-25). The next step is one small,
+well-documented converter script that turns a real export format (for example
+a generic heart-rate CSV with per-row timestamps, or a tracking CSV with
+position and speed columns) into that interchange format, with explicit column
+mapping, unit conversion and timezone handling declared on the command line
+and recorded in the output file's device ids. Keep it a separate script so the
+replay stays format-agnostic, and add a fixture export plus round-trip tests.
+This exercises the models against non-simulated data shapes while leaving the
+descriptive-language constraints and persistence design untouched.

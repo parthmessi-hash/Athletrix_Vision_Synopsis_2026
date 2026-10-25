@@ -1,0 +1,8 @@
+{"type": "physiological", "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:00Z", "source": "simulated", "device_id": "fictional-recorder-1", "heart_rate_bpm": 112}}
+{"type": "tracking", "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:00Z", "x_position": 10.0, "y_position": 5.0, "speed_mps": 0.0, "acceleration_mps2": 0.0, "tracking_confidence": 0.9}}
+{"type": "physiological", "sample": {"athlete_id": "athlete-2", "timestamp": "2026-10-20T10:00:00Z", "source": "simulated", "device_id": "fictional-recorder-2", "heart_rate_bpm": null, "signal_quality": 0.2}}
+{"type": "tracking", "sample": {"athlete_id": "athlete-2", "timestamp": "2026-10-20T12:00:01+02:00", "x_position": 40.0, "y_position": 20.0, "speed_mps": 3.2, "acceleration_mps2": 0.5, "tracking_confidence": 0.4}}
+{"type": "physiological", "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:02Z", "source": "simulated", "device_id": "fictional-recorder-1", "heart_rate_bpm": 115, "posture": "walking"}}
+{"type": "tracking", "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:01Z", "x_position": 10.8, "y_position": 5.0, "speed_mps": 1.5, "acceleration_mps2": 1.5, "tracking_confidence": 0.95}}
+{"type": "physiological", "sample": {"athlete_id": "athlete-2", "timestamp": "2026-10-20T10:00:02Z", "source": "simulated", "device_id": "fictional-recorder-2", "heart_rate_bpm": 98}}
+{"type": "tracking", "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:02Z", "x_position": 12.5, "y_position": 5.0, "speed_mps": 2.0, "acceleration_mps2": 0.5, "tracking_confidence": 1.0}}

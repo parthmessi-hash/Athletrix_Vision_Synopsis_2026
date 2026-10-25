@@ -31,7 +31,8 @@ app/
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
-  scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers)
+  scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers),
+                     # replay_samples.py (recorded JSONL replay) + examples/fictional_replay.jsonl
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
   store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status
 tests/
@@ -277,6 +278,87 @@ python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-
 Then compare, for example,
 http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60 with
 http://127.0.0.1:8000/api/v1/athletes/athlete-2/summary?seconds=60.
+
+## Replaying recorded samples
+
+`scripts/replay_samples.py` sends previously recorded samples from a file into
+a running backend, exactly as recorded. This is the first non-simulator data
+path. It reads **Athletrix's normalized interchange format**: it does not
+parse arbitrary vendor CSV exports and does not connect to wearable or camera
+hardware; mapping a vendor export onto this format is a separate step.
+
+### File format (JSON Lines)
+
+One JSON object per line, UTF-8, with exactly the keys `type` and `sample`:
+
+```
+{"type": "physiological", "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:00Z", "source": "simulated", "device_id": "fictional-recorder-1", "heart_rate_bpm": 112}}
+{"type": "tracking",      "sample": {"athlete_id": "athlete-1", "timestamp": "2026-10-20T10:00:00Z", "x_position": 10.0, "y_position": 5.0, "speed_mps": 0.0, "acceleration_mps2": 0.0, "tracking_confidence": 0.9}}
+```
+
+`sample` is validated with the same Pydantic models as the API
+(`PhysiologicalSample`, `TrackingSample`): same required fields and ranges,
+timestamps must carry a timezone, unknown fields are rejected. Blank lines are
+ignored. Records may be in any order. Recorded timestamps, `source`,
+`athlete_id`/`device_id`, null measurements, real zeros and the supplied
+`tracking_confidence` are all preserved and sent as written; nothing is
+invented, defaulted or shifted to the current time.
+`scripts/examples/fictional_replay.jsonl` is a tiny fictional example: two
+athletes, both streams, a null heart rate, a zero speed, a `+02:00` offset
+and one out-of-order record.
+
+### Commands
+
+```bash
+python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --dry-run     # validate + describe, send nothing
+python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl               # replay at recorded pace
+python scripts/replay_samples.py recording.jsonl --url http://127.0.0.1:8010 --speed 4 # another backend, 4x faster
+```
+
+Flags: `--url` (default `http://127.0.0.1:8000`), `--speed` (positive, finite
+playback multiplier, default 1), `--dry-run`. Exit codes: 0 all submitted or
+valid dry run; 1 invalid or unreadable file; 2 the replay stopped on a failure.
+
+### Playback behaviour
+
+- The **whole file is validated first**; if any line is invalid, every error
+  is listed with its line number and field (e.g. `line 3: sample.timestamp:
+  Input should have timezone info`) and **no request is sent**.
+- Records are posted one at a time in **chronological order** of recorded
+  timestamp (compared as instants, so `12:00:01+02:00` equals `10:00:01Z`);
+  records with equal timestamps keep their input order. Each goes to its own
+  endpoint (`/api/v1/samples/physiological` or `/api/v1/samples/tracking`).
+- Pacing uses the recorded timestamp differences divided by `--speed`, on a
+  monotonic clock. Speed changes only the pacing, never the timestamps sent.
+  If a request takes longer than the next gap, the next one is sent at once.
+- The output starts with a `RECORDED DATA REPLAY` header, the athlete ids and
+  per-stream counts, the recorded time range and the scheduled playback
+  duration, then one line per request, then
+  `Result: N submitted, N failed, N not sent`.
+- On the first HTTP error (for example the backend's own 422 for a timestamp
+  more than 5 s in the future) or connection failure the replay **stops** and
+  reports exactly which line failed and how many records were never posted.
+  Nothing is retried or skipped silently, and backend validation is never
+  bypassed. For a timeout the backend's answer was not received, so that one
+  sample may or may not have been stored. Rerunning the file is safe: the
+  backend replaces the stored sample for an equal timestamp.
+
+### Historical timestamps stay historical
+
+Because timestamps are preserved, a replayed recording is stored at its
+recorded times. Consequences, by design:
+
+- The dashboard's rolling 60-second window and summary look at the last 60 s
+  of backend time, so an old recording will not appear there; use the
+  `history` and `latest` endpoints (or a window covering that time) to read it.
+- The newest-timestamp rules still apply: a replayed sample becomes the
+  "latest" only if it is newer than what is already stored, and the newest
+  300 samples per athlete per stream are kept, so a long recording is trimmed
+  to its newest 300 samples per stream.
+- The script does **not** rebase recordings onto the current time. Shifting
+  timestamps would make recorded data look live and break the "recorded time
+  only" guarantee of the window and summary; if a demo needs live-looking
+  data, use the simulator.
 
 ## Running with the Athletrix_Web frontend
 
