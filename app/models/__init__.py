@@ -9,6 +9,7 @@ from app.models.athlete import Athlete
 from app.models.common import Posture, SampleSource
 from app.models.device import DeviceStatus
 from app.models.physiological import PhysiologicalSample
+from app.models.retained import RetainedData, StreamRetention
 from app.models.summary import AthleteSummary, DistanceEstimate, DistanceRules, HighSpeedEstimate, PhysiologicalSummary, TrackingSummary
 from app.models.tracking import TrackingSample
 from app.models.window import AthleteWindow, TrackingRules
@@ -24,7 +25,9 @@ __all__ = [
     "PhysiologicalSample",
     "PhysiologicalSummary",
     "Posture",
+    "RetainedData",
     "SampleSource",
+    "StreamRetention",
     "TrackingRules",
     "TrackingSample",
     "TrackingSummary",

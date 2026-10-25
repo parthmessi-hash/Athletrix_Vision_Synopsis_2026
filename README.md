@@ -28,6 +28,7 @@ app/
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
                      # GET  /api/v1/athletes/{id}/physiological/history?limit=60, /tracking/history?limit=60
                      # GET  /api/v1/athletes/{id}/window?seconds=60, /summary?seconds=60
+                     # GET  /api/v1/athletes/{id}/retained-data (per-stream count and UTC range of retained rows)
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -506,6 +507,44 @@ backend keeps only the newest 300 samples per athlete per stream, so a window
 can only show what is still in SQLite: older records may already have been
 removed, and a window may come back empty or partial for that reason. Nothing
 is rebased, ingestion is unchanged and retention is not expanded.
+
+### Finding retained data (`retained-data` endpoint)
+
+`GET /api/v1/athletes/{id}/retained-data` reports, per stream, how many
+samples the engine currently retains for an athlete and the recorded
+timestamps of the oldest and newest retained rows, in UTC, plus the retention
+cap. It reads the persisted rows as they are at that moment and needs no
+registration: an unknown athlete id simply reports empty streams.
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/retained-data"
+# {"athlete_id":"athlete-1",
+#  "physiological":{"sample_count":5,"earliest_timestamp":"2026-10-20T10:00:00Z","latest_timestamp":"2026-10-20T10:00:04Z"},
+#  "tracking":{"sample_count":5,"earliest_timestamp":"2026-10-20T10:00:00Z","latest_timestamp":"2026-10-20T10:00:04Z"},
+#  "max_samples_per_stream":300}
+# then review the 60 s ending at the newest retained timestamp:
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:04Z"
+```
+
+What the numbers mean, and what they do not:
+
+- `sample_count` is the number of rows still stored (never more than
+  `max_samples_per_stream`, the newest-300 cap). The timestamps are the
+  recorded timestamps of the oldest and newest of those rows, normalised to
+  UTC; the stored samples keep their original offsets. An empty stream has
+  count 0 and null timestamps.
+- **The range describes retained records only.** It does not show that every
+  instant between the bounds was sampled, it is not a session list or a
+  recording archive, and nothing is inferred about gaps, earlier recordings
+  or rows removed by the retention rule. A count of 0 does not establish
+  whether data was never collected or has since been removed.
+- The two streams are counted independently and can cover different times.
+  A window ending at the newest timestamp of one stream may therefore contain
+  nothing from the other.
+
+The dashboard's Recorded mode uses this endpoint behind its **Find retained
+data** and **Review latest retained** buttons (see the `Athletrix_Web`
+README). Nothing about ingestion, retention or the stored timestamps changes.
 
 ### Historical timestamps stay historical
 

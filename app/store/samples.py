@@ -8,6 +8,7 @@ never disagree. Within a single transaction an insert replaces any row with the 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import NamedTuple
 from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -22,6 +23,14 @@ class _AthleteSample(Protocol):
 
 
 S = TypeVar("S", bound=BaseModel)
+
+
+class Retention(NamedTuple):
+    """Count and recorded UTC time bounds of the rows retained for one athlete in one stream."""
+
+    count: int
+    earliest: datetime | None
+    latest: datetime | None
 
 
 class SampleStore(Generic[S]):
@@ -92,6 +101,18 @@ class SampleStore(Generic[S]):
     def count(self, athlete_id: str) -> int:
         with self.db.read() as c:
             return c.execute(f"SELECT COUNT(*) FROM {self._table} WHERE athlete_id = ?", (athlete_id,)).fetchone()[0]
+
+    def retention(self, athlete_id: str) -> Retention:
+        """How many rows are retained for the athlete and the UTC timestamps of the oldest and newest, in one read.
+
+        Describes the rows present now: equal-instant replacement and the newest-N trim have already been
+        applied. Nothing is inferred about rows that were never stored or have been trimmed.
+        """
+        with self.db.read() as c:
+            n, lo, hi = c.execute(
+                f"SELECT COUNT(*), MIN(ts_utc), MAX(ts_utc) FROM {self._table} WHERE athlete_id = ?", (athlete_id,)
+            ).fetchone()
+        return Retention(n, datetime.fromisoformat(lo) if lo else None, datetime.fromisoformat(hi) if hi else None)
 
     def clear(self) -> None:
         with self.db.transaction() as c:

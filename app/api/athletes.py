@@ -6,7 +6,7 @@ from pydantic import AwareDatetime
 from app.core import clock
 from app.core.config import get_settings
 from app.core.summary import summarize_window
-from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, TrackingRules, TrackingSample
+from app.models import Athlete, AthleteSummary, AthleteWindow, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
@@ -85,6 +85,26 @@ def get_tracking_history(
 ) -> list[TrackingSample]:
     """The newest `limit` tracking samples for an athlete, oldest to newest. Empty list if none."""
     return tracking_history_store.recent(athlete_id, limit)
+
+
+# ---- retained data (registration not required) -----------------------------
+
+@router.get("/{athlete_id}/retained-data", response_model=RetainedData)
+def get_retained_data(athlete_id: str) -> RetainedData:
+    """Per stream: how many samples are currently retained for the athlete and the UTC recorded timestamps of the oldest and newest.
+
+    Reads the persisted rows as they are now. Ranges bound the retained records only: they do not show continuous
+    coverage, and a count of 0 (or an unknown athlete id) says nothing about whether data was never sent or has been
+    removed by the newest-300 retention rule. Streams can cover different times.
+    """
+    phys = physiological_history_store.retention(athlete_id)
+    track = tracking_history_store.retention(athlete_id)
+    return RetainedData(
+        athlete_id=athlete_id,
+        physiological=StreamRetention(sample_count=phys.count, earliest_timestamp=phys.earliest, latest_timestamp=phys.latest),
+        tracking=StreamRetention(sample_count=track.count, earliest_timestamp=track.earliest, latest_timestamp=track.latest),
+        max_samples_per_stream=MAX_HISTORY_SAMPLES,
+    )
 
 
 WINDOW_SECONDS = Query(60, ge=1, le=MAX_WINDOW_SECONDS, description="Window length ending at `end`, or at backend time now when `end` is omitted")

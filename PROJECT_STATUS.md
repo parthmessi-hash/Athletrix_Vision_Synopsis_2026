@@ -36,6 +36,7 @@ Terms used throughout:
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
+| Retained data | `GET /athletes/{id}/retained-data`: per stream, the count of rows currently stored and the UTC recorded timestamps of the oldest and newest, plus the 300 cap. Describes retained rows only, not coverage, sessions or an archive; the dashboard's Find retained data / Review latest retained buttons use it. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
 
@@ -101,6 +102,11 @@ curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=202
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60&end=2026-10-20T10:00:02Z"
 #    or in the dashboard: Review bar -> Recorded -> enter 2026-10-20T10:00:02Z -> Review
 
+# 3d. find what is retained for an athlete (per stream: count, oldest and newest UTC timestamps, cap), then open the
+#     60 s ending at the newest retained timestamp (dashboard: Recorded -> Find retained data -> Review latest retained)
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/retained-data"
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=<latest_timestamp from the previous call>"
+
 # 4. frontend, from the Athletrix_Web folder
 python3 -m http.server 3000
 ```
@@ -122,6 +128,7 @@ Timestamps must be ISO 8601 with a timezone.
 | `AthleteWindow` | `athlete_id`, `window_start`, `window_end`, `physiological_samples`, `tracking_samples`, `tracking_rules` |
 | `TrackingRules` | `min_confidence` (0-1): the applied `DISTANCE_MIN_CONFIDENCE` |
 | `AthleteSummary` | `athlete_id`, window bounds, `physiological` (`PhysiologicalSummary`), `tracking` (`TrackingSummary` incl. distance, high-speed and `distance_rules`) |
+| `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (300) |
 
 Endpoints, all under `/api/v1`:
 
@@ -137,6 +144,7 @@ Endpoints, all under `/api/v1`:
 | `GET /athletes/{id}/physiological/history?limit=60`, `.../tracking/history?limit=60` | Newest `limit` (1-300) samples, oldest to newest |
 | `GET /athletes/{id}/window?seconds=60[&end=...]` | Both streams in the `seconds` (1-300) before `end`, plus `tracking_rules`. Without `end`: live, one captured backend `window_end`. With `end` (ISO 8601 with timezone, not after backend time, `+` encoded as `%2B`): recorded review ending at that exact instant. Invalid, naive or future `end` is a 422. |
 | `GET /athletes/{id}/summary?seconds=60[&end=...]` | Descriptive metrics over the same window selection; ages are relative to `window_end` (in a review: seconds before the selected end) |
+| `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and the cap. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):
 
@@ -175,7 +183,7 @@ The page resolves a mode on load (`resolveEngineMode` in `index.html`):
 
 | Mode | When | Behaviour |
 |------|------|-----------|
-| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". |
+| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. |
 | `public` | any other hostname (the published site), or `?engine=0`, or `engineMode: "public"` | Shows an explanation card with the local startup steps. **No request is made to the engine.** |
 
 Polling: live cards every 1 s, summary and timeline every 5 s, only while the
@@ -291,6 +299,12 @@ Implemented today is listed above; the following are **not** implemented:
   no export. Recorded review (`end=` and the dashboard's Recorded mode) can
   therefore show only what is still retained: it is a review of retained
   samples, not a recording archive, and older records may already be gone.
+- Retained-data lookup (`retained-data`, dashboard Find retained data)
+  describes rows present at the moment of the request only: count, oldest and
+  newest UTC timestamps per stream. It is not a session list, does not show
+  continuous coverage between the bounds, and cannot say whether an empty
+  stream was never sent or has been trimmed. The streams are independent, so
+  "Review latest retained" may open a window holding only one of them.
 - Recorded review uses a fixed 60 s duration in the dashboard (the API accepts
   1-300 s), one window at a time, with a typed timestamp; there is no
   recording index, scrubber or list of available time ranges.
@@ -311,7 +325,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (405 tests as of this handoff)
+# engine: full suite, isolated temporary databases (418 tests as of this handoff)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -336,12 +350,15 @@ python scripts/replay_samples.py /tmp/trk.jsonl --url http://127.0.0.1:8010
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/window?seconds=60&end=2026-10-20T10:00:04Z"   # expect 5 + 5 samples, bounds 09:59:04Z..10:00:04Z
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60&end=2026-10-20T10:00:04Z"  # expect tracking: peak 6.0, 10.5 m over 2.0 s, 2 excluded, high speed 1.5 s / 8.25 m
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60"                            # expect 0 samples in both streams (historical)
+curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/retained-data"                                 # expect 5 + 5 rows, both ranges 10:00:00Z..10:00:04Z, cap 300
+# dashboard against that backend (serve a copy of index.html with apiBase pointed at :8010): Recorded -> Find retained data ->
+# expect both streams "5 retained · 2026-10-20T10:00:00Z → 2026-10-20T10:00:04Z UTC"; Review latest retained -> the review above
 
 # frontend: open http://localhost:3000/tests/timeline_confidence.test.html (expect all tests passing), then on the
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "15 tests, 15 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "26 tests, 26 passed"
 
 # frontend: public mode locally (must make no engine requests; check the Network tab)
 open "http://localhost:3000/?engine=0#demo"
@@ -349,19 +366,15 @@ open "http://localhost:3000/?engine=0#demo"
 
 ## 10. Recommended next milestone
 
-**Dashboard review of a converted session.** Both CSV adapters exist (heart
-rate done 2026-10-25, tracking done 2026-10-25) and the replay and recorded
-review already show a converted session end to end on the dashboard. Two
-small gaps remain before a recorded session is comfortable to work with:
-
-- The dashboard's Recorded mode needs the review end typed by hand. A
-  helper that reads a replayed athlete's first and last retained timestamps
-  (the history endpoints already expose them) and offers them as review
-  bounds would remove the guesswork, without adding any interpretation.
-- The adapters cover one heart-rate column and the five tracking fields.
-  Optional physiological fields the model already has (`signal_quality`,
-  `posture`, `altitude_m`) could be mapped by the heart-rate adapter with the
-  same explicit-column, no-guessing rules.
-
-Keep both as descriptive tooling: no clock correction between files, no
-scores, no baselines.
+**Optional physiological fields in the heart-rate adapter.** With both CSV
+adapters, the replay, recorded review and the retained-data lookup (done
+2026-10-25), a converted session can be found and reviewed end to end on
+the dashboard without the simulator. The remaining gap in the data path is
+that the heart-rate adapter maps one column only, while `PhysiologicalSample`
+already accepts optional `signal_quality`, `posture`, `activity_level` and
+the other documented fields. Extending the adapter with explicit, optional
+column options for those fields (same no-guessing, blank-means-null,
+whole-file validation rules; never derived or filled in) would let a
+recorded export carry its own quality information into the review. Keep it
+descriptive: no interpretation of the extra fields, no clock correction
+between files, no scores or baselines.
