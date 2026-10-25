@@ -18,6 +18,10 @@ Usage (backend must already be running):
     python scripts/simulate_athlete.py
     python scripts/simulate_athlete.py --with-tracking
     python scripts/simulate_athlete.py --seconds 10 --url http://127.0.0.1:8000
+    python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-2 --with-tracking
+
+Several instances can run at once with different --athlete-id / --device-id
+values; the backend keeps their data separate. Registration is not required.
 """
 
 import argparse
@@ -27,8 +31,8 @@ from datetime import UTC, datetime
 
 import httpx
 
-ATHLETE_ID = "athlete-1"
-DEVICE_ID = "simulator-1"
+DEFAULT_ATHLETE_ID = "athlete-1"
+DEFAULT_DEVICE_ID = "simulator-1"
 RESTING_BPM = 110.0
 PEAK_RISE_BPM = 40.0
 PEAK_SPEED_MPS = 8.0
@@ -65,7 +69,10 @@ def main() -> None:
     parser.add_argument("--url", default="http://127.0.0.1:8000", help="Backend base URL")
     parser.add_argument("--seconds", type=int, default=60, help="How long to run")
     parser.add_argument("--with-tracking", action="store_true", help="Also send a TrackingSample each second")
+    parser.add_argument("--athlete-id", default=DEFAULT_ATHLETE_ID, help="athlete_id for all samples")
+    parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="device_id for physiological samples")
     args = parser.parse_args()
+    athlete_id, device_id = args.athlete_id, args.device_id
 
     base = args.url.rstrip("/")
     physiological_endpoint = f"{base}/api/v1/samples/physiological"
@@ -73,25 +80,28 @@ def main() -> None:
 
     print("FICTIONAL DEMO DATA - not from any real athlete or device.")
     kinds = "physiological + tracking" if args.with_tracking else "physiological"
-    print(f"Sending {args.seconds} {kinds} samples for {ATHLETE_ID} to {base}")
+    print(f"Sending {args.seconds} {kinds} samples for athlete_id={athlete_id} device_id={device_id} to {base}")
 
     with httpx.Client(timeout=5.0) as client:
         for i in range(args.seconds):
             timestamp = datetime.now(UTC).isoformat()
             hr = heart_rate_at(i, args.seconds)
             physiological = {
-                "athlete_id": ATHLETE_ID,
+                "athlete_id": athlete_id,
                 "timestamp": timestamp,
                 "source": "simulated",
-                "device_id": DEVICE_ID,
+                "device_id": device_id,
                 "heart_rate_bpm": hr,
             }
-            line = f"t={i:02d}s  heart_rate_bpm={hr:6.1f}  physiological={post(client, physiological_endpoint, physiological)}"
+            line = (
+                f"[{athlete_id}/{device_id}] t={i:02d}s  heart_rate_bpm={hr:6.1f}  "
+                f"physiological={post(client, physiological_endpoint, physiological)}"
+            )
 
             if args.with_tracking:
                 speed, x_position, acceleration = motion_at(i, args.seconds)
                 tracking = {
-                    "athlete_id": ATHLETE_ID,
+                    "athlete_id": athlete_id,
                     "timestamp": timestamp,
                     "x_position": x_position,
                     "y_position": 0.0,

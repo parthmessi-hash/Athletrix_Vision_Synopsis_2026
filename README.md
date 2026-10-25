@@ -129,7 +129,9 @@ python scripts/simulate_athlete.py --with-tracking  # heart rate + straight-line
 ```
 
 All simulator output is fictional demo data. Optional flags: `--seconds 10`
-to run shorter, `--url http://host:port` for a different backend. With
+to run shorter, `--url http://host:port` for a different backend,
+`--athlete-id` (default `athlete-1`) and `--device-id` (default `simulator-1`)
+to choose the identifiers used in the samples. With
 `--with-tracking`, each second also sends a `TrackingSample` with the same
 timestamp: speed rises and falls, `x_position` accumulates accordingly,
 `y_position` stays at 0, and `acceleration_mps2` goes negative while slowing.
@@ -137,6 +139,22 @@ While it runs, the latest samples are visible at:
 
 - http://127.0.0.1:8000/api/v1/athletes/athlete-1/physiological/latest
 - http://127.0.0.1:8000/api/v1/athletes/athlete-1/tracking/latest
+
+To simulate two athletes at once, run one instance per terminal with
+different identifiers (no registration needed; the backend keeps each
+athlete's latest readings, histories and summaries separate):
+
+```bash
+# Terminal A
+python scripts/simulate_athlete.py --athlete-id athlete-1 --device-id simulator-1 --with-tracking
+
+# Terminal B
+python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-2 --with-tracking
+```
+
+Then compare, for example,
+http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60 with
+http://127.0.0.1:8000/api/v1/athletes/athlete-2/summary?seconds=60.
 
 ## Running with the Athletrix_Web frontend
 
