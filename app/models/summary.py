@@ -1,6 +1,7 @@
 from pydantic import AwareDatetime, Field
 
 from app.models.common import AthletrixModel
+from app.models.sources import SourceBreakdown
 
 
 class PhysiologicalSummary(AthletrixModel):
@@ -27,6 +28,7 @@ class PhysiologicalSummary(AthletrixModel):
     max_inter_sample_gap_seconds: float | None = Field(
         None, ge=0, description="Largest gap between consecutive sample timestamps, seconds; null if fewer than two samples."
     )
+    sources: SourceBreakdown = Field(default_factory=SourceBreakdown, description="Reported sources of the samples in the window (adds up to sample_count).")
 
 
 class DistanceRules(AthletrixModel):
@@ -105,6 +107,7 @@ class TrackingSummary(AthletrixModel):
     high_speed_duration_seconds: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_duration_seconds.")
     high_speed_distance_m: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_distance_m.")
     distance_rules: DistanceRules | None = Field(None, description="The gap, confidence and high-speed threshold rules applied to the estimates.")
+    sources: SourceBreakdown = Field(default_factory=SourceBreakdown, description="Reported sources of the samples in the window (adds up to sample_count).")
 
 
 class AthleteSummary(AthletrixModel):

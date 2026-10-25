@@ -1,7 +1,8 @@
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from app.models.common import AthletrixModel
 from app.models.physiological import PhysiologicalSample
+from app.models.sources import WindowSources
 from app.models.tracking import TrackingSample
 
 
@@ -30,7 +31,10 @@ class AthleteWindow(AthletrixModel):
 
     `tracking_rules` carries the confidence rule in force when the samples
     were selected, so a consumer can classify the tracking samples from this
-    response alone without a second request.
+    response alone without a second request. `sources` counts, per stream,
+    how many of exactly these samples reported each source and how many
+    reported none; it is derived from the sample lists when not given, so it
+    always adds up to them.
     """
 
     athlete_id: str = Field(..., description="Athlete the window belongs to.")
@@ -39,3 +43,15 @@ class AthleteWindow(AthletrixModel):
     physiological_samples: list[PhysiologicalSample] = Field(..., description="Oldest to newest.")
     tracking_samples: list[TrackingSample] = Field(..., description="Oldest to newest.")
     tracking_rules: TrackingRules = Field(..., description="Applied tracking rule (the engine's configured minimum confidence).")
+    sources: WindowSources | None = Field(None, description="Per-stream source breakdown of the samples above; derived from them when omitted.")
+
+    @model_validator(mode="after")
+    def _derive_sources(self) -> "AthleteWindow":
+        if self.sources is None:
+            from app.core.sources import source_breakdown  # local import: app.core.sources depends on app.models
+
+            self.sources = WindowSources(
+                physiological=source_breakdown(self.physiological_samples),
+                tracking=source_breakdown(self.tracking_samples),
+            )
+        return self

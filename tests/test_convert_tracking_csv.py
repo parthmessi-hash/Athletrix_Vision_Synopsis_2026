@@ -29,7 +29,7 @@ ct = load("convert_tracking_csv")
 hr = load("convert_heart_rate_csv")
 rp = load("replay_samples")
 
-ARGS = ["--athlete-id", "athlete-1"]
+ARGS = ["--athlete-id", "athlete-1", "--source", "simulated", "--device-id", "fictional-trk-csv-1"]
 
 
 def run(argv):
@@ -63,9 +63,10 @@ def test_fixture_converts_preserving_order_text_zeros_and_negative_acceleration(
     assert [s["speed_mps"] for s in samples] == [0.0, 4.0, 3.0, 6.0, 5.0]                  # the stationary zero is a real value
     assert [s["acceleration_mps2"] for s in samples] == [0.0, 1.0, 3.0, 2.0, -1.0]         # negative acceleration preserved
     assert [s["tracking_confidence"] for s in samples] == [0.9, 0.95, 0.3, 0.9, 0.85]      # low confidence written as recorded, not altered
-    assert all(s["athlete_id"] == "athlete-1" for s in samples)
-    assert all(set(s) == {"athlete_id", "timestamp", "x_position", "y_position", "speed_mps", "acceleration_mps2", "tracking_confidence"} for s in samples)  # no source/device, nothing invented
+    assert all(s["athlete_id"] == "athlete-1" and s["source"] == "simulated" and s["device_id"] == "fictional-trk-csv-1" for s in samples)  # as given on the command line
+    assert all(set(s) == {"athlete_id", "timestamp", "x_position", "y_position", "speed_mps", "acceleration_mps2", "tracking_confidence", "source", "device_id"} for s in samples)  # nothing invented
     assert "TRACKING CSV CONVERSION" in text and "5 tracking records" in text
+    assert "source=simulated device_id=fictional-trk-csv-1 (applied to every row; nothing inferred from the file)" in text
     assert "1 row(s) with speed 0; 1 row(s) with negative acceleration" in text
     assert "tracking_confidence as written: 0.3 to 0.95" in text
     assert "1 row(s) are earlier than the row before them" in text
@@ -84,11 +85,12 @@ def test_custom_column_mapping_and_extra_columns_ignored(tmp_path):
     src = csv_file(tmp_path, "id,conf,accel,speed,y,x,time,note\n7,0.8,-0.25,1.5,2,-3.5,2026-10-20T10:00:00Z,x\n")
     dst = tmp_path / "o.jsonl"
     code, text = run([
-        str(src), str(dst), "--athlete-id", "a", "--timestamp-column", "time", "--x-position-column", "x", "--y-position-column", "y",
+        str(src), str(dst), "--athlete-id", "a", "--source", "camera", "--timestamp-column", "time", "--x-position-column", "x", "--y-position-column", "y",
         "--speed-mps-column", "speed", "--acceleration-mps2-column", "accel", "--tracking-confidence-column", "conf",
     ])
     assert code == 0, text
-    assert records(dst)[0]["sample"] == {"athlete_id": "a", "timestamp": "2026-10-20T10:00:00Z", "x_position": -3.5, "y_position": 2, "speed_mps": 1.5, "acceleration_mps2": -0.25, "tracking_confidence": 0.8}
+    assert records(dst)[0]["sample"] == {"athlete_id": "a", "timestamp": "2026-10-20T10:00:00Z", "x_position": -3.5, "y_position": 2, "speed_mps": 1.5, "acceleration_mps2": -0.25, "tracking_confidence": 0.8, "source": "camera"}  # no --device-id: no device_id key
+    assert "device_id=(none given)" in text
 
 
 def test_bom_blank_lines_and_crlf_are_handled(tmp_path):
@@ -203,17 +205,18 @@ def test_empty_file_header_only_and_missing_file(tmp_path):
     assert "Cannot read" in run([str(tmp_path / "missing.csv"), str(tmp_path / "c.jsonl"), *ARGS])[1]
 
 
-def test_athlete_id_is_required_and_no_source_or_device_options_exist(tmp_path):
-    src = csv_file(tmp_path, HEADER + "\n2026-10-20T10:00:00Z,1,2,3,4,0.5\n")
+def test_athlete_id_and_source_are_required_and_source_is_never_inferred(tmp_path, capsys):
+    src = csv_file(tmp_path, HEADER + "\n2026-10-20T10:00:00Z,1,2,3,4,0.5\n", name="camera_export_wearable.csv")
     with pytest.raises(SystemExit) as exc:
-        ct.main([str(src), str(tmp_path / "o.jsonl")])
+        ct.main([str(src), str(tmp_path / "o.jsonl"), "--source", "simulated"])  # no athlete id
     assert exc.value.code == 2
     with pytest.raises(SystemExit) as exc:
-        ct.main([str(src), str(tmp_path / "o.jsonl"), *ARGS, "--source", "camera"])
-    assert exc.value.code == 2
+        ct.main([str(src), str(tmp_path / "o.jsonl"), "--athlete-id", "a"])  # no source: nothing is guessed from the file name
+    assert exc.value.code == 2 and "--source" in capsys.readouterr().err
     with pytest.raises(SystemExit) as exc:
-        ct.main([str(src), str(tmp_path / "o.jsonl"), *ARGS, "--device-id", "cam-1"])
-    assert exc.value.code == 2
+        ct.main([str(src), str(tmp_path / "o.jsonl"), "--athlete-id", "a", "--source", "acme-cam"])  # not an existing generic category
+    assert exc.value.code == 2 and "invalid choice: 'acme-cam'" in capsys.readouterr().err
+    assert sorted(ct.SOURCES) == ["camera", "manual", "simulated", "wearable"]
 
 
 # ---- timezone handling -----------------------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from app.core.distance import (
     estimate_distance,
     estimate_high_speed,
 )
+from app.core.sources import source_breakdown
 from app.models import AthleteSummary, AthleteWindow, DistanceRules, PhysiologicalSummary, TrackingSummary
 
 
@@ -46,6 +47,7 @@ def summarize_window(
         last_sample_at=phys[-1].timestamp if phys else None,
         latest_sample_age_seconds=latest_sample_age_seconds(phys_ts, window.window_end),
         max_inter_sample_gap_seconds=max_inter_sample_gap_seconds(phys_ts),
+        sources=source_breakdown(phys),  # every selected sample counts, null heart rates included
     )
 
     track_ts = [s.timestamp for s in track]
@@ -71,6 +73,7 @@ def summarize_window(
             min_confidence=dist.min_confidence,
             high_speed_threshold_mps=hs.high_speed_threshold_mps,
         ),
+        sources=source_breakdown(track),
     )
 
     return AthleteSummary(

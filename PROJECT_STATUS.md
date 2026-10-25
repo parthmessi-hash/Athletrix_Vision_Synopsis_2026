@@ -13,7 +13,7 @@ is watching, and shows them side by side with descriptive performance language.
 Ground rules that apply to all code and copy in the engine and its connected cards:
 
 - **Provider agnostic.** Models describe data shapes, never a vendor's payload.
-  `source` is a generic category (`wearable`, `camera`, `manual`, `simulated`).
+  `source` is a generic category (`wearable`, `camera`, `manual`, `simulated`): supplied metadata, never proof of authenticity or sensor accuracy. Required on physiological samples, optional on tracking samples (absent = not reported).
 - **Descriptive, not prescriptive.** The engine reports counts, means, peaks,
   ages, gaps, distances and durations. It does not produce medical diagnoses,
   fatigue classifications, readiness or condition scores, or substitution
@@ -89,13 +89,13 @@ python scripts/replay_samples.py /tmp/hr.jsonl
 #    wearable|camera|manual|simulated and is never inferred; exit 0 ok, 1 invalid CSV / output exists, 2 bad arguments
 
 # 3b''. convert a tracking CSV (metres, m/s, m/s², confidence 0-1, ISO timestamps with timezone) and replay it
-python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl --athlete-id athlete-1 --dry-run
-python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl --athlete-id athlete-1
+python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl --athlete-id athlete-1 --source simulated --device-id fictional-trk-csv-1 --dry-run
+python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl --athlete-id athlete-1 --source simulated --device-id fictional-trk-csv-1
 python scripts/replay_samples.py /tmp/trk.jsonl
-#    flags: --timestamp-column --x-position-column --y-position-column --speed-mps-column --acceleration-mps2-column
-#    --tracking-confidence-column (defaults = model field names, all six must be distinct and present exactly once);
-#    every measurement is required (blank = error, nothing filled in or calculated); no source/device options exist
-#    because TrackingSample has none; exit 0 ok, 1 invalid CSV / output exists, 2 bad arguments
+#    flags: --source REQUIRED (wearable|camera|manual|simulated, never inferred) --device-id optional; --timestamp-column
+#    --x-position-column --y-position-column --speed-mps-column --acceleration-mps2-column --tracking-confidence-column
+#    (defaults = model field names, all six must be distinct and present exactly once); every measurement is required
+#    (blank = error, nothing filled in or calculated); exit 0 ok, 1 invalid CSV / output exists, 2 bad arguments
 
 # 3c. review the 60 s ending at a recorded instant (same endpoints, optional end=; encode '+' as %2B)
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:02Z"
@@ -123,9 +123,10 @@ Timestamps must be ISO 8601 with a timezone.
 |-------|----------------|
 | `Athlete` | `id`, `name`, `jersey_number` (0-999), `sport` (free text), `team_id` |
 | `PhysiologicalSample` | `athlete_id`, `timestamp`, `source`, `device_id`; optional `heart_rate_bpm` (20-260), `breathing_rate_bpm`, `hrv_rmssd_ms`, `hrv_sdnn_ms`, `activity_level` (0-1), `posture`, `skin_temperature_c`, `spo2_percent`, `signal_quality` (0-1) |
-| `TrackingSample` | `athlete_id`, `timestamp`, `x_position` (m), `y_position` (m), `speed_mps` (>= 0), `acceleration_mps2`, `tracking_confidence` (0-1); all required |
+| `TrackingSample` | `athlete_id`, `timestamp`, `x_position` (m), `y_position` (m), `speed_mps` (>= 0), `acceleration_mps2`, `tracking_confidence` (0-1); all required. Optional, backward-compatible `source` and `device_id` (absent = not reported; older stored rows still load) |
 | `DeviceStatus` | `device_id`, `timestamp`, `connected`; optional `battery_percent`, `signal_quality` |
-| `AthleteWindow` | `athlete_id`, `window_start`, `window_end`, `physiological_samples`, `tracking_samples`, `tracking_rules` |
+| `AthleteWindow` | `athlete_id`, `window_start`, `window_end`, `physiological_samples`, `tracking_samples`, `tracking_rules`, `sources` (`physiological` and `tracking` breakdowns of exactly the listed samples) |
+| `SourceBreakdown` | `reported` (count per source category that occurs), `not_reported`; always adds up to the stream's sample count. Also on `PhysiologicalSummary.sources` and `TrackingSummary.sources` |
 | `TrackingRules` | `min_confidence` (0-1): the applied `DISTANCE_MIN_CONFIDENCE` |
 | `AthleteSummary` | `athlete_id`, window bounds, `physiological` (`PhysiologicalSummary`), `tracking` (`TrackingSummary` incl. distance, high-speed and `distance_rules`) |
 | `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (300) |
@@ -183,7 +184,7 @@ The page resolves a mode on load (`resolveEngineMode` in `index.html`):
 
 | Mode | When | Behaviour |
 |------|------|-----------|
-| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. |
+| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). Each card's source badge is derived from the data it shows: the two latest-reading cards from that sample's own `source`/`device_id`, the summary and timeline cards from their response's `sources` breakdown ("Reported source: simulated", "Reported source: wearable", "Mixed sources: camera 1, wearable 3, not reported 2", "Source not reported", "No samples", "Source information unavailable"); badges are cleared on athlete, mode and review-time changes. Browser-generated demonstration panels keep their own "Browser demo · fictional data" labels. In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. |
 | `public` | any other hostname (the published site), or `?engine=0`, or `engineMode: "public"` | Shows an explanation card with the local startup steps. **No request is made to the engine.** |
 
 Polling: live cards every 1 s, summary and timeline every 5 s, only while the
@@ -260,9 +261,17 @@ All of these are descriptive and cover only the samples available in the window
   acceleration are never derived from positions); real zeros and negative
   acceleration kept; same timestamp rule, whole-file `TrackingSample`
   validation, row/column errors, dry run, atomic output and no-overwrite
-  protection as the heart-rate adapter. No source or device field is added
-  because the model has none. Reuses the heart-rate adapter's timestamp,
-  CSV-reading and output helpers.
+  protection as the heart-rate adapter. `--source` is required and
+  `--device-id` optional; both are written as given and never inferred.
+  Reuses the heart-rate adapter's timestamp, CSV-reading and output helpers.
+- **Source breakdown (`app/core/sources.py`).** For the samples selected into
+  a window, per stream: how many reported each source category and how many
+  reported none. Shared by the window response (`sources`) and both summary
+  streams (`sources`); every selected sample counts once, null heart rates
+  included, so the counts equal `sample_count`. The dashboard derives its
+  card labels from these counts and from each latest sample's own `source`
+  ("Reported source: wearable", "Mixed sources: ...", "Source not
+  reported"); it never says "real" or "verified".
 - **Simulator profiles.** `sine`: one rise-and-fall of heart rate (110 to 150 bpm)
   and straight-line speed (peak 8 m/s), confidence 1.0. `effort-rest`: repeating
   40 s cycle (accelerate 10 s to 6 m/s, hold 10 s, slow 10 s, stand 10 s), position
@@ -284,6 +293,12 @@ Implemented today is listed above; the following are **not** implemented:
   explicitly, a unit or timestamp reformatting step, or another adapter.
   Other measurements (signal quality, posture, altitude) and live hardware
   are **planned**.
+- `source` and `device_id` are metadata supplied by whoever sent the sample.
+  The engine validates the category, stores and counts it, and echoes it; it
+  does not verify it, and a source label is not a claim about authenticity or
+  sensor accuracy. Tracking rows stored before the fields existed (and any
+  sender that omits them) read as "not reported", never as camera, wearable
+  or simulated. No live hardware integration exists.
 - Recorded clocks are not synchronized or corrected. A heart-rate file and a
   tracking file replayed for the same athlete line up on the dashboard only
   as far as their recorded timestamps already agree; the fictional fixtures
@@ -325,7 +340,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (418 tests as of this handoff)
+# engine: full suite, isolated temporary databases (432 tests as of this handoff)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -358,7 +373,7 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/retained-data"         
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "26 tests, 26 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "29 tests, 29 passed"
 
 # frontend: public mode locally (must make no engine requests; check the Network tab)
 open "http://localhost:3000/?engine=0#demo"
@@ -367,9 +382,11 @@ open "http://localhost:3000/?engine=0#demo"
 ## 10. Recommended next milestone
 
 **Optional physiological fields in the heart-rate adapter.** With both CSV
-adapters, the replay, recorded review and the retained-data lookup (done
-2026-10-25), a converted session can be found and reviewed end to end on
-the dashboard without the simulator. The remaining gap in the data path is
+adapters, the replay, recorded review, the retained-data lookup and
+source-derived card labels (all done 2026-10-25), a converted session can be
+found and reviewed end to end on the dashboard without the simulator, and
+every engine-connected card says where its samples were reported to come
+from. The remaining gap in the data path is
 that the heart-rate adapter maps one column only, while `PhysiologicalSample`
 already accepts optional `signal_quality`, `posture`, `activity_level` and
 the other documented fields. Extending the adapter with explicit, optional

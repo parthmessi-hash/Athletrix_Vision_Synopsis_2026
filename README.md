@@ -50,7 +50,7 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 |-----------------------|-------------------------------------------|
 | `Athlete`             | Identity: id, name, jersey, sport, team   |
 | `PhysiologicalSample` | HR, breathing, HRV, SpO2, temp, posture   |
-| `TrackingSample`      | Position (m), speed (m/s), accel (m/s²)   |
+| `TrackingSample`      | Position (m), speed (m/s), accel (m/s²); optional `source`, `device_id` |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
 | `AthleteWindow`       | Both streams for one athlete, last N secs, plus `tracking_rules` |
 | `TrackingRules`       | Applied `min_confidence` (= `DISTANCE_MIN_CONFIDENCE`) |
@@ -415,12 +415,12 @@ adapters are separate scripts.
 ```bash
 # describe and validate without writing anything
 python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl \
-    --athlete-id athlete-1 --dry-run
+    --athlete-id athlete-1 --source simulated --device-id fictional-trk-csv-1 --dry-run
 # convert (the output file must not already exist)
 python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl \
-    --athlete-id athlete-1
-# a real export with other column names: every column is mapped explicitly
-python scripts/convert_tracking_csv.py export.csv /tmp/trk2.jsonl --athlete-id athlete-2 \
+    --athlete-id athlete-1 --source simulated --device-id fictional-trk-csv-1
+# a real export with other column names: every column is mapped explicitly; the source is what you state, never guessed
+python scripts/convert_tracking_csv.py export.csv /tmp/trk2.jsonl --athlete-id athlete-2 --source camera \
     --timestamp-column time --x-position-column x --y-position-column y \
     --speed-mps-column speed --acceleration-mps2-column accel --tracking-confidence-column conf
 # replay it (with the converted heart-rate file, if any), then review the 60 s ending at the last timestamp
@@ -449,8 +449,11 @@ Rules of this first version:
   `T` separator and an explicit timezone, copied into the output as written.
   Naive timestamps, numeric epochs, invalid dates and other layouts are
   rejected.
-- `--athlete-id` is required and applies to every row. `TrackingSample` has
-  no source or device field, so none is added.
+- `--athlete-id` and `--source` are required and apply to every row;
+  `--source` is one of `wearable`, `camera`, `manual`, `simulated` and is
+  never inferred from the file name or contents. `--device-id` is optional
+  and written to every row when given. The fictional fixture is converted
+  with `--source simulated`.
 - Whole-file validation with the API's own model, row-numbered errors naming
   the CSV column, dry run, atomic output and no-overwrite protection work
   exactly as for the heart-rate adapter. Rows keep their CSV order; the
@@ -507,6 +510,40 @@ backend keeps only the newest 300 samples per athlete per stream, so a window
 can only show what is still in SQLite: older records may already have been
 removed, and a window may come back empty or partial for that reason. Nothing
 is rebased, ingestion is unchanged and retention is not expanded.
+
+### Source information (`source`, `device_id` and the per-stream breakdown)
+
+Every `PhysiologicalSample` carries a `source` (one of the generic categories
+`wearable`, `camera`, `manual`, `simulated`) and a `device_id`. Since this
+milestone `TrackingSample` accepts the same two fields as **optional**
+metadata: payloads and stored records without them stay valid and mean
+"not reported". The simulator marks its tracking samples `simulated` with its
+configured device id, the tracking CSV adapter requires an explicit
+`--source`, and the replay sends whatever the file holds, so older files that
+omit the fields are replayed as not reported. Nothing is ever inferred from a
+file name, a value, a confidence, or the fact that data was replayed: replay
+describes delivery, not the original measurement source.
+
+The window and summary responses add a small per-stream breakdown of exactly
+the samples they selected:
+
+```json
+"sources": {"reported": {"camera": 1, "wearable": 3}, "not_reported": 2}
+```
+
+`reported` counts each category that occurs and `not_reported` counts samples
+without a source; together they always equal the stream's `sample_count`
+(a physiological sample with a null heart rate still counts under its
+source). The window carries `sources.physiological` and `sources.tracking`;
+each summary stream carries its own `sources`. Existing metrics, window
+selection and `tracking_rules` are unchanged.
+
+**A source is supplied metadata, not proof of authenticity.** It says what
+the sender labelled the sample, not where the data really came from or how
+accurate a sensor was; a `wearable` label on fictional test values does not
+make them real, and `simulated` is a label like any other. No live hardware
+integration has been added: data still arrives from the simulator, manual
+POSTs, the replay script or the CSV adapters.
 
 ### Finding retained data (`retained-data` endpoint)
 

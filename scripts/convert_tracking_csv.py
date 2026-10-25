@@ -28,8 +28,12 @@ WHAT THE CSV MUST LOOK LIKE (first version)
   acceleration is never calculated from positions. Zeros are real values and
   are kept. Non-numeric or non-finite values, and values outside the model's
   ranges, are errors.
-- `--athlete-id` is required and applies to every row. `TrackingSample` has no
-  source or device field, so none is added.
+- `--athlete-id` and `--source` are required and apply to every row;
+  `--source` must be one of the existing generic categories (`wearable`,
+  `camera`, `manual`, `simulated`) and is never inferred from the file name or
+  contents. `--device-id` is optional and, when given, is written to every
+  row; without it the records carry no device id. A source is supplied
+  metadata, not proof of where the data came from.
 
 The whole file is validated first, using the same `TrackingSample` model as the
 API; any problem is reported with its CSV row number (the header is row 1) and
@@ -40,8 +44,8 @@ replay script orders them by timestamp when sending.
 
 USAGE
     python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv out.jsonl \
-        --athlete-id athlete-1 --dry-run
-    python scripts/convert_tracking_csv.py export.csv out.jsonl --athlete-id athlete-2 \
+        --athlete-id athlete-1 --source simulated --device-id fictional-trk-csv-1 --dry-run
+    python scripts/convert_tracking_csv.py export.csv out.jsonl --athlete-id athlete-2 --source camera \
         --timestamp-column time --x-position-column x --y-position-column y \
         --speed-mps-column speed --acceleration-mps2-column accel --tracking-confidence-column conf
 
@@ -72,7 +76,7 @@ if str(ROOT) not in sys.path:  # allow `python scripts/convert_tracking_csv.py` 
     sys.path.insert(0, str(ROOT))
 
 from app.models import TrackingSample  # noqa: E402
-from scripts.convert_heart_rate_csv import INTEGER, RowError, parse_timestamp, read_csv, write_jsonl  # noqa: E402
+from scripts.convert_heart_rate_csv import INTEGER, SOURCES, RowError, parse_timestamp, read_csv, write_jsonl  # noqa: E402
 
 # Model measurement fields, in output order. The CSV column for each is chosen on the command line.
 MEASUREMENTS = ("x_position", "y_position", "speed_mps", "acceleration_mps2", "tracking_confidence")
@@ -135,7 +139,9 @@ def read_header(header: list[str], columns: dict[str, str]) -> tuple[dict[str, i
     return index, errors
 
 
-def convert_rows(rows: list[list[str]], *, columns: dict[str, str], athlete_id: str) -> tuple[list[Converted], list[RowError]]:
+def convert_rows(
+    rows: list[list[str]], *, columns: dict[str, str], athlete_id: str, source: str, device_id: str | None = None
+) -> tuple[list[Converted], list[RowError]]:
     """Validate every CSV row (header first) and build the records. Errors never stop the scan, so all are reported."""
     if not rows:
         return [], [RowError(1, "row", "file is empty (no header row)")]
@@ -163,6 +169,9 @@ def convert_rows(rows: list[list[str]], *, columns: dict[str, str], athlete_id: 
         if row_errors:
             errors.extend(row_errors)
             continue
+        sample["source"] = source
+        if device_id is not None:
+            sample["device_id"] = device_id
         try:
             TrackingSample.model_validate(sample)
         except ValidationError as exc:
@@ -178,7 +187,7 @@ def convert_rows(rows: list[list[str]], *, columns: dict[str, str], athlete_id: 
 
 # ---- description ----------------------------------------------------------------------------------------------
 
-def describe(converted: list[Converted], src: Path, dst: Path, athlete_id: str) -> list[str]:
+def describe(converted: list[Converted], src: Path, dst: Path, athlete_id: str, source: str, device_id: str | None) -> list[str]:
     stamps = [c.timestamp for c in converted]
     out_of_order = sum(1 for a, b in zip(stamps, stamps[1:]) if b < a)
     first, last = min(stamps), max(stamps)
@@ -192,7 +201,7 @@ def describe(converted: list[Converted], src: Path, dst: Path, athlete_id: str) 
         "Positions (m), speed (m/s), acceleration (m/s^2) and confidence (0-1) are taken as written; timestamps and offsets are copied as written. No hardware, no network.",
         f"Input: {src} -> {len(converted)} tracking records",
         f"Output: {dst}",
-        f"athlete_id={athlete_id} (applied to every row; nothing inferred from the file; TrackingSample has no source or device field)",
+        f"athlete_id={athlete_id} source={source} device_id={device_id if device_id is not None else '(none given)'} (applied to every row; nothing inferred from the file)",
         f"Recorded range: {first.isoformat()} to {last.isoformat()} (span {(last - first).total_seconds():.3f} s)",
         f"speed_mps as written: {min(speeds)} to {max(speeds)}; {stationary} row(s) with speed 0; {decelerating} row(s) with negative acceleration",
         f"tracking_confidence as written: {min(confidences)} to {max(confidences)} (the engine applies its own minimum-confidence rule when reviewing)",
@@ -208,6 +217,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path, help="CSV file with a header row")
     parser.add_argument("output", type=Path, help="JSON Lines file to create (must not exist)")
     parser.add_argument("--athlete-id", required=True, help="athlete_id for every record")
+    parser.add_argument("--source", required=True, choices=SOURCES, help="generic source category for every record (never inferred)")
+    parser.add_argument("--device-id", default=None, help="optional device_id for every record (omitted from the records when not given)")
     parser.add_argument("--timestamp-column", default="timestamp", help="header name of the ISO 8601 timestamp column (default 'timestamp')")
     for field in MEASUREMENTS:
         parser.add_argument(
@@ -234,14 +245,14 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         out(f"Cannot read {src}: {exc}")
         return 1
-    converted, errors = convert_rows(rows, columns=columns, athlete_id=args.athlete_id)
+    converted, errors = convert_rows(rows, columns=columns, athlete_id=args.athlete_id, source=args.source, device_id=args.device_id)
     if errors:
         out(f"TRACKING CSV CONVERSION: {src} is invalid; nothing was written.")
         for e in errors:
             out(f"  {e}")
         out(f"{len(errors)} error(s) on {len({e.row for e in errors})} row(s); {len(converted)} row(s) were valid.")
         return 1
-    for line in describe(converted, src, dst, args.athlete_id):
+    for line in describe(converted, src, dst, args.athlete_id, args.source, args.device_id):
         out(line)
     if args.dry_run:
         out("Dry run: the CSV is valid; no file was written.")

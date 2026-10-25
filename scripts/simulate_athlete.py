@@ -147,7 +147,7 @@ def main() -> None:
     parser.add_argument("--seconds", type=int, default=60, help="How long to run")
     parser.add_argument("--with-tracking", action="store_true", help="Also send a TrackingSample each second")
     parser.add_argument("--athlete-id", default=DEFAULT_ATHLETE_ID, help="athlete_id for all samples")
-    parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="device_id for physiological samples")
+    parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="device_id for every sample (physiological and tracking)")
     parser.add_argument("--profile", choices=("sine", "effort-rest"), default="sine",
                         help="sine: single rise-and-fall over the run (default); effort-rest: repeating 40 s accelerate/sustain/slow/stationary cycle with a delayed toy heart-rate response")
     args = parser.parse_args()
@@ -192,6 +192,8 @@ def main() -> None:
                     "speed_mps": speed,
                     "acceleration_mps2": acceleration,
                     "tracking_confidence": 1.0,
+                    "source": "simulated",   # explicit: generated here, from no device
+                    "device_id": device_id,
                 }
                 line += (
                     f"  |  speed_mps={speed:5.2f}  x_position={x_position:7.2f}  "
