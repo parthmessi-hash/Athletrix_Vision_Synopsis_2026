@@ -32,8 +32,9 @@ app/
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
   scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers),
-                     # replay_samples.py (recorded JSONL replay), convert_heart_rate_csv.py (CSV adapter),
-                     # examples/fictional_replay.jsonl, examples/fictional_heart_rate.csv
+                     # replay_samples.py (recorded JSONL replay), convert_heart_rate_csv.py and
+                     # convert_tracking_csv.py (CSV adapters), examples/fictional_replay.jsonl,
+                     # examples/fictional_heart_rate.csv, examples/fictional_tracking.csv
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
   store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status
 tests/
@@ -289,7 +290,8 @@ a running backend, exactly as recorded. This is the first non-simulator data
 path. It reads **Athletrix's normalized interchange format**: it does not
 parse arbitrary vendor CSV exports and does not connect to wearable or camera
 hardware; mapping an export onto this format is a separate step (see
-"Converting a heart-rate CSV" below for the one adapter that exists).
+"Converting a heart-rate CSV" and "Converting a tracking CSV" below for the two
+adapters that exist).
 
 ### File format (JSON Lines)
 
@@ -399,6 +401,76 @@ documented conversion uses `--source simulated`. Everything said under
 "Historical timestamps stay historical" applies to converted files too: the
 recorded times are preserved, so they stay out of the live window and are
 subject to the newest-timestamp and 300-sample retention rules.
+
+### Converting a tracking CSV (`scripts/convert_tracking_csv.py`)
+
+The matching adapter for the tracking stream: a provider-agnostic converter
+that turns a position/motion CSV into the interchange format, one `tracking`
+record per row. Like the heart-rate adapter it is not support for any
+vendor's export, makes no network requests and does not connect to any camera
+or positioning hardware. The replay script stays format-agnostic; the two
+adapters are separate scripts.
+
+```bash
+# describe and validate without writing anything
+python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl \
+    --athlete-id athlete-1 --dry-run
+# convert (the output file must not already exist)
+python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl \
+    --athlete-id athlete-1
+# a real export with other column names: every column is mapped explicitly
+python scripts/convert_tracking_csv.py export.csv /tmp/trk2.jsonl --athlete-id athlete-2 \
+    --timestamp-column time --x-position-column x --y-position-column y \
+    --speed-mps-column speed --acceleration-mps2-column accel --tracking-confidence-column conf
+# replay it (with the converted heart-rate file, if any), then review the 60 s ending at the last timestamp
+python scripts/replay_samples.py /tmp/trk.jsonl --dry-run
+python scripts/replay_samples.py /tmp/trk.jsonl
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60&end=2026-10-20T10:00:04Z"
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:04Z"
+```
+
+Rules of this first version:
+
+- The CSV needs a header row. The six columns (timestamp, `x_position`,
+  `y_position`, `speed_mps`, `acceleration_mps2`, `tracking_confidence`) are
+  named explicitly, default to the model's field names, must each appear
+  exactly once, and must be six different names. Other columns are ignored.
+- **Measurements must already be in the model's units**: positions in metres
+  in the venue's coordinate frame, speed in m/s (never negative),
+  acceleration in m/s² (negative = decelerating), confidence on the model's
+  0.0 to 1.0 scale. No unit or scale conversion is done.
+- **Every measurement is required on every row.** A blank cell is an error:
+  missing confidence is never filled in with 1, and speed or acceleration is
+  never calculated from positions. Zeros are real values and are kept
+  (a stationary row stays `0.0`). Non-numeric or non-finite values and values
+  outside the `TrackingSample` ranges are errors.
+- Timestamps follow the same rule as the heart-rate adapter: ISO 8601 with a
+  `T` separator and an explicit timezone, copied into the output as written.
+  Naive timestamps, numeric epochs, invalid dates and other layouts are
+  rejected.
+- `--athlete-id` is required and applies to every row. `TrackingSample` has
+  no source or device field, so none is added.
+- Whole-file validation with the API's own model, row-numbered errors naming
+  the CSV column, dry run, atomic output and no-overwrite protection work
+  exactly as for the heart-rate adapter. Rows keep their CSV order; the
+  replay orders them by timestamp when sending.
+
+`scripts/examples/fictional_tracking.csv` is a tiny fictional example aligned
+in recorded time with `fictional_heart_rate.csv` (both cover
+`2026-10-20T10:00:00Z` to `10:00:04Z`, one row per second): it has a
+stationary row of real zeros, a row with negative acceleration, a row with
+low (0.3) tracking confidence, `+02:00` and `-05:00` offsets and an
+out-of-order row. Converting and replaying both fixtures for the same athlete
+and reviewing the window ending at `2026-10-20T10:00:04Z` gives, with the
+default rules, 5 samples in each stream, the heart-rate values above, and a
+tracking summary of 10.5 m over 2.0 s of eligible intervals (two intervals
+excluded by the confidence rule) with 1.5 s and 8.25 m at or above 5 m/s.
+These numbers describe the fictional file only. The two files line up only
+because their recorded timestamps already do: the engine does not
+synchronize or correct device clocks, so a real heart-rate export and a real
+tracking export align in a review only as far as the recording devices'
+clocks agreed. Converted tracking files are historical and subject to the
+300-sample retention cap, exactly like converted heart-rate files.
 
 ### Reviewing a recorded window (`end` parameter)
 

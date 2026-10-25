@@ -1,0 +1,6 @@
+timestamp,x_position,y_position,speed_mps,acceleration_mps2,tracking_confidence,comment
+2026-10-20T10:00:00Z,10.0,5.0,0.0,0.0,0.9,fictional demo row: stationary (real zeros are kept)
+2026-10-20T12:00:02+02:00,15.0,4.5,4.0,1.0,0.95,fictional row with a +02:00 offset (same instant as 10:00:02Z)
+2026-10-20T10:00:01Z,11.5,5.0,3.0,3.0,0.3,fictional row with low tracking confidence; earlier than the row above
+2026-10-20T05:00:03-05:00,20.0,4.0,6.0,2.0,0.9,fictional row with a -05:00 offset (same instant as 10:00:03Z)
+2026-10-20T10:00:04Z,25.5,4.0,5.0,-1.0,0.85,fictional row with negative acceleration (decelerating)
