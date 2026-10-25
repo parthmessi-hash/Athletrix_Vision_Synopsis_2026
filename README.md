@@ -218,7 +218,26 @@ python scripts/simulate_athlete.py --with-tracking  # heart rate + straight-line
 All simulator output is fictional demo data. Optional flags: `--seconds 10`
 to run shorter, `--url http://host:port` for a different backend,
 `--athlete-id` (default `athlete-1`) and `--device-id` (default `simulator-1`)
-to choose the identifiers used in the samples. With
+to choose the identifiers used in the samples, and `--profile` to pick the
+scenario (default `sine`, the single rise-and-fall above).
+
+### Effort-rest scenario
+
+```bash
+python scripts/simulate_athlete.py --profile effort-rest --with-tracking --seconds 120   # three full cycles
+```
+
+A repeating 40 s cycle: accelerate 0 to 6 m/s over 10 s (+0.6 m/s²), hold
+6 m/s for 10 s, slow to 0 over 10 s (-0.6 m/s²), then stand still for 10 s.
+Position is the exact integral of speed (120 m per cycle) and keeps
+accumulating across cycles. Heart rate is a toy delayed response: the target
+is `70 + 100 * speed(t - 5 s) / 6` bpm and the reported value follows it
+through a first-order lag with a 5 s time constant, stepped once per second
+(`hr(t) = hr(t-1) + (target - hr(t-1)) * (1 - e^(-1/5))`, `hr(0) = 70`). So
+heart rate starts rising about 5 s after movement, peaks a few seconds after
+the sustained phase ends, and declines through the stationary phase. Built
+to demonstrate timing on the dashboard timeline; not a validated
+physiological model. Equations are in `scripts/simulate_athlete.py`. With
 `--with-tracking`, each second also sends a `TrackingSample` with the same
 timestamp: speed rises and falls, `x_position` accumulates accordingly,
 `y_position` stays at 0, and `acceleration_mps2` goes negative while slowing.
