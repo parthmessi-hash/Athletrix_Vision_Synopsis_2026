@@ -1,23 +1,28 @@
-import pytest
-from fastapi.testclient import TestClient
+import os
+import tempfile
+from pathlib import Path
 
-from app.main import app
-from app.store.athletes import athlete_registry
-from app.store.device import latest_device_status_store
-from app.store.physiological import latest_physiological_store, physiological_history_store
-from app.store.tracking import latest_tracking_store, tracking_history_store
+# Belt and braces: even if something opened the default database during tests, it would be a
+# throwaway file, never the development database under ./data.
+os.environ.setdefault("DATABASE_PATH", str(Path(tempfile.mkdtemp(prefix="athletrix-tests-")) / "fallback.db"))
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.db import Database, set_database  # noqa: E402
+from app.main import app  # noqa: E402
 
 TS = "2026-10-15T12:00:00Z"
 
 
 @pytest.fixture(autouse=True)
-def clean_stores():
-    """Every test starts and ends with empty in-memory stores."""
-    for store in (latest_physiological_store, physiological_history_store, latest_tracking_store, tracking_history_store, latest_device_status_store, athlete_registry):
-        store.clear()
-    yield
-    for store in (latest_physiological_store, physiological_history_store, latest_tracking_store, tracking_history_store, latest_device_status_store, athlete_registry):
-        store.clear()
+def isolated_db(tmp_path):
+    """Every test runs against its own fresh SQLite file; the development database is never touched."""
+    db = Database(tmp_path / "test.db")
+    set_database(db)
+    yield db
+    db.close()
+    set_database(None)
 
 
 @pytest.fixture(scope="session")

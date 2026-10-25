@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     port: int = 8000
     # Origins allowed to call the API. Defaults cover common frontend dev servers.
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    # Local SQLite file holding athletes, device status and bounded sample histories.
+    # Relative paths are resolved from the working directory the backend is started in.
+    database_path: str = "data/athletrix.db"
 
     @property
     def cors_origin_list(self) -> list[str]:

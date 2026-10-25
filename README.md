@@ -9,6 +9,7 @@ The frontend lives in the separate `Athletrix_Web` repository and talks to this 
 - FastAPI (HTTP API, automatic OpenAPI docs)
 - Uvicorn (ASGI server)
 - pydantic-settings (configuration from environment / `.env`)
+- SQLite via Python's built-in `sqlite3` (local persistence, no extra dependency)
 
 ## Layout
 
@@ -27,7 +28,8 @@ app/
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
   scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers)
-  store/             # in-memory stores: athlete registry, latest samples, bounded history, device status
+  db.py              # SQLite storage layer (single source of truth; schema created at startup)
+  store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status
 tests/
 ```
 
@@ -45,28 +47,32 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 | `AthleteWindow`       | Both streams for one athlete, last N secs |
 | `AthleteSummary`      | Counts, HR mean/peak, peak speed, times   |
 
-`POST /api/v1/athletes` registers an athlete in an in-memory registry (201;
-409 if the id exists, keeping the original). `GET /api/v1/athletes` lists
+`POST /api/v1/athletes` registers an athlete (201; 409 if the id exists,
+keeping the original). `GET /api/v1/athletes` lists
 them sorted by id and `GET /api/v1/athletes/{id}` fetches one (404 if not
 registered). Registration is not yet required for sample ingestion, so the
 simulator works without it.
 
-The ingest endpoints validate the payload and echo it back. Physiological and
-tracking samples are kept in separate in-memory stores holding the newest
-sample per athlete, and device statuses in a store holding the newest status
-per device (by timestamp; ties go to the most recently received; older records
-are accepted but do not replace newer ones). The `/athletes/{id}/.../latest`
-and `/devices/{id}/status/latest` endpoints read these.
+The ingest endpoints validate the payload, check the timestamp, persist in
+one short SQLite transaction and echo the payload back. A sample's "latest"
+is simply the newest row of its persisted history (ties go to the most
+recently received; older samples are stored in history but do not become
+the latest). Device status keeps the newest status per device with the same
+tie rule; older statuses are accepted but not stored. The
+`/athletes/{id}/.../latest` and `/devices/{id}/status/latest` endpoints read
+these. Timestamps are compared in UTC, so `14:00:00+02:00` and `12:00:00Z`
+are the same instant.
 
-Physiological and tracking samples are also appended to separate per-athlete
+Physiological and tracking samples are kept in separate per-athlete
 histories, served by `GET /api/v1/athletes/{id}/physiological/history?limit=60`
 and `GET /api/v1/athletes/{id}/tracking/history?limit=60` (limit 1 to 300,
 newest samples returned oldest-to-newest, empty list if none). History is
 kept sorted by timestamp, accepts out-of-order arrivals, and replaces an
 equal-timestamp entry with the latest arrival. Each athlete keeps only the
-newest `MAX_HISTORY_SAMPLES` (300, in `app/store/history.py`) per stream. This is
-temporary process memory, and 300 samples is a count, not a time window: at
-one sample per second it covers about five minutes, at a higher rate less.
+newest `MAX_HISTORY_SAMPLES` (300, in `app/store/history.py`) per stream, and
+that bounded history is what is persisted: 300 samples is a count, not a
+time window (about five minutes at one sample per second, less at a higher
+rate), and this is not match or season storage.
 
 `GET /api/v1/athletes/{id}/window?seconds=60` (1 to 300) returns both streams
 for the last `seconds`, read from those histories. Backend UTC time is
@@ -100,6 +106,35 @@ the stores are left unchanged (`MAX_FUTURE_TIMESTAMP_SKEW` in
 `app/core/clock.py`, an initial clock-skew allowance). Nothing is persisted
 across restarts yet.
 
+## Storage
+
+Everything the API stores lives in one local SQLite file, by default
+`data/athletrix.db` relative to the folder you start the backend from
+(`DATABASE_PATH` in `.env`, see `.env.example`). The file, its folder and the
+tables are created automatically at startup, and the `data/` folder plus
+`*.db`, `*.db-wal`, `*.db-shm` and `*.db-journal` files are git-ignored.
+
+What persists across restarts:
+
+- registered athletes
+- each device's latest status
+- each athlete's newest 300 physiological samples (the latest sample is the
+  newest of these)
+- each athlete's newest 300 tracking samples (likewise)
+
+SQLite is the only source of truth: there is no separate in-memory copy.
+Each sample write (insert or equal-instant replacement plus the trim to 300)
+is one short transaction, so a successful POST means it was committed.
+Timestamps are stored as fixed-width UTC text so equivalent instants with
+different offsets compare equal, while each sample's payload keeps the
+timestamp exactly as it was sent.
+
+Supported local server configuration: one uvicorn process (the default;
+`--reload` is fine). One SQLite connection is shared across its worker
+threads behind a lock, in WAL mode with a 5 s busy timeout. Multiple backend
+processes on the same file are not part of this milestone. To run an
+isolated demo, point `DATABASE_PATH` at a different file.
+
 ## Run locally
 
 ```bash
@@ -131,8 +166,9 @@ python scripts/register_demo_roster.py          # or --url http://host:port
 
 It is safe to rerun: identical existing athletes are left alone, and an
 athlete that exists with different details is reported as a conflict and
-never overwritten (exit status 1). The registry is in memory, so run it again
-after every backend restart. Sample ingestion does not require registration.
+never overwritten (exit status 1). The registry is persisted in the SQLite
+database, so this is normally a one-time step per database file. Sample
+ingestion does not require registration.
 
 ## Demo simulator
 
@@ -181,7 +217,7 @@ its own terminal from this folder unless noted (activate `.venv` first):
 
 ```bash
 uvicorn app.main:app --reload                                   # 1. backend
-python scripts/register_demo_roster.py                          # 2. roster (rerun after any backend restart)
+python scripts/register_demo_roster.py                          # 2. roster (once per database file; safe to rerun)
 python scripts/simulate_athlete.py --athlete-id athlete-1 --device-id simulator-1 --with-tracking   # 3a
 python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-2 --with-tracking   # 3b
 python3 -m http.server 3000                                     # 4. frontend, from the Athletrix_Web folder
@@ -189,8 +225,9 @@ python3 -m http.server 3000                                     # 4. frontend, f
 
 Then open http://localhost:3000, click **Live Demo** in the top navigation,
 and use the **Athlete** selector above the cards to switch between the two
-athletes. Everything here is in process memory: the registry and all readings
-clear when the backend restarts. See `Athletrix_Web/README.md` for details.
+athletes. The roster, device statuses and the newest 300 samples per athlete
+per stream survive backend restarts (see Storage). See
+`Athletrix_Web/README.md` for details.
 
 ## Tests
 
