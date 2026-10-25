@@ -115,10 +115,11 @@ def get_athlete_window(athlete_id: str, seconds: int = WINDOW_SECONDS) -> Athlet
 
 @router.get("/{athlete_id}/summary", response_model=AthleteSummary)
 def get_athlete_summary(athlete_id: str, seconds: int = WINDOW_SECONDS) -> AthleteSummary:
-    """Descriptive counts, heart-rate mean/peak, peak speed, gap-aware distance estimate and timestamps for the last `seconds`."""
+    """Descriptive counts, heart-rate mean/peak, peak speed, gap-aware distance and high-speed estimates, and timestamps for the last `seconds`."""
     settings = get_settings()
     return summarize_window(
         select_window(athlete_id, seconds),
         distance_max_gap_seconds=settings.distance_max_gap_seconds,
         distance_min_confidence=settings.distance_min_confidence,
+        high_speed_threshold_mps=settings.high_speed_threshold_mps,
     )

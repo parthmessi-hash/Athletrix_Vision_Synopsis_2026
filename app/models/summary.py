@@ -34,6 +34,27 @@ class DistanceRules(AthletrixModel):
 
     max_gap_seconds: float = Field(..., gt=0, description="Longest consecutive-sample interval included, seconds.")
     min_confidence: float = Field(..., ge=0, le=1, description="Minimum tracking_confidence required at both ends of an interval.")
+    high_speed_threshold_mps: float = Field(..., gt=0, description="Speed at or above which time and distance count as high-speed, m/s.")
+
+
+class HighSpeedEstimate(AthletrixModel):
+    """Time and distance at or above a speed threshold, over the same eligible intervals as the distance estimate.
+
+    Speed is assumed to change linearly within each eligible interval; when an interval crosses the
+    threshold the crossing time is interpolated and only the qualifying part counts. An interval held
+    exactly at the threshold counts in full; one that only touches it at an endpoint contributes zero.
+    Both values are null when no interval was eligible and real zeros when eligible intervals existed
+    but none reached the threshold. Duration never exceeds the eligible duration and distance never
+    exceeds the total estimated distance. Descriptive workload estimates only: not sprint detection,
+    not a fatigue classification, not a substitution recommendation.
+
+    Units: seconds, metres, metres per second. The default threshold is a demonstration value, not a
+    validated standard for every sport or athlete.
+    """
+
+    high_speed_duration_seconds: float | None = Field(None, ge=0, description="Seconds at or above the threshold within eligible intervals; null if none eligible.")
+    high_speed_distance_m: float | None = Field(None, ge=0, description="Metres covered at or above the threshold within eligible intervals; null if none eligible.")
+    high_speed_threshold_mps: float = Field(..., gt=0, description="Applied threshold, m/s.")
 
 
 class DistanceEstimate(AthletrixModel):
@@ -81,7 +102,9 @@ class TrackingSummary(AthletrixModel):
     included_duration_seconds: float = Field(0.0, ge=0, description="See DistanceEstimate.included_duration_seconds.")
     included_window_fraction: float = Field(0.0, ge=0, le=1, description="See DistanceEstimate.included_window_fraction.")
     excluded_interval_count: int = Field(0, ge=0, description="See DistanceEstimate.excluded_interval_count.")
-    distance_rules: DistanceRules | None = Field(None, description="The gap and confidence rules applied to the distance estimate.")
+    high_speed_duration_seconds: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_duration_seconds.")
+    high_speed_distance_m: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_distance_m.")
+    distance_rules: DistanceRules | None = Field(None, description="The gap, confidence and high-speed threshold rules applied to the estimates.")
 
 
 class AthleteSummary(AthletrixModel):

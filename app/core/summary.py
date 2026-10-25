@@ -3,7 +3,13 @@
 from collections.abc import Sequence
 from datetime import datetime
 
-from app.core.distance import DEFAULT_MAX_GAP_SECONDS, DEFAULT_MIN_CONFIDENCE, estimate_distance
+from app.core.distance import (
+    DEFAULT_HIGH_SPEED_THRESHOLD_MPS,
+    DEFAULT_MAX_GAP_SECONDS,
+    DEFAULT_MIN_CONFIDENCE,
+    estimate_distance,
+    estimate_high_speed,
+)
 from app.models import AthleteSummary, AthleteWindow, DistanceRules, PhysiologicalSummary, TrackingSummary
 
 
@@ -24,6 +30,7 @@ def summarize_window(
     *,
     distance_max_gap_seconds: float = DEFAULT_MAX_GAP_SECONDS,
     distance_min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    high_speed_threshold_mps: float = DEFAULT_HIGH_SPEED_THRESHOLD_MPS,
 ) -> AthleteSummary:
     phys = window.physiological_samples
     track = window.tracking_samples
@@ -45,6 +52,7 @@ def summarize_window(
     speeds = [s.speed_mps for s in track]
     window_seconds = (window.window_end - window.window_start).total_seconds()
     dist = estimate_distance(track, window_seconds, distance_max_gap_seconds, distance_min_confidence)
+    hs = estimate_high_speed(track, high_speed_threshold_mps, distance_max_gap_seconds, distance_min_confidence)
     tracking = TrackingSummary(
         sample_count=len(track),
         speed_peak_mps=max(speeds) if speeds else None,  # max() of zeros is 0.0, kept as a real value
@@ -56,7 +64,13 @@ def summarize_window(
         included_duration_seconds=dist.included_duration_seconds,
         included_window_fraction=dist.included_window_fraction,
         excluded_interval_count=dist.excluded_interval_count,
-        distance_rules=DistanceRules(max_gap_seconds=dist.max_gap_seconds, min_confidence=dist.min_confidence),
+        high_speed_duration_seconds=hs.high_speed_duration_seconds,
+        high_speed_distance_m=hs.high_speed_distance_m,
+        distance_rules=DistanceRules(
+            max_gap_seconds=dist.max_gap_seconds,
+            min_confidence=dist.min_confidence,
+            high_speed_threshold_mps=hs.high_speed_threshold_mps,
+        ),
     )
 
     return AthleteSummary(

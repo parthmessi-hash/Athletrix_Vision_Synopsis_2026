@@ -191,7 +191,7 @@ def test_endpoint_distance_and_athlete_separation(client, tracking_payload, froz
     a3 = client.get("/api/v1/athletes/ath-3/summary?seconds=60").json()["tracking"]
     assert a1["estimated_distance_m"] == pytest.approx(20.0) and a1["included_duration_seconds"] == 10.0
     assert a1["included_window_fraction"] == pytest.approx(10 / 60) and a1["excluded_interval_count"] == 0
-    assert a1["distance_rules"] == {"max_gap_seconds": 3.0, "min_confidence": 0.5}
+    assert a1["distance_rules"] == {"max_gap_seconds": 3.0, "min_confidence": 0.5, "high_speed_threshold_mps": 5.0}
     assert a2["estimated_distance_m"] == 0.0 and a2["included_duration_seconds"] == 2.0 and a2["speed_peak_mps"] == 0.0
     assert a3["estimated_distance_m"] is None and a3["included_duration_seconds"] == 0.0 and a3["included_window_fraction"] == 0.0
     # existing fields still present and unchanged in meaning

@@ -117,7 +117,23 @@ eligible intervals were stationary; the fraction is included duration over
 the requested window length. Both rules are adjustable engineering defaults
 set in `.env`, not validated sport-specific standards, and the estimate
 covers only the eligible part of the window, bounded by the 300-sample
-history cap. All of these describe the samples available: transmission gaps
+history cap.
+
+Over exactly the same eligible intervals, the summary also reports
+`high_speed_duration_seconds` and `high_speed_distance_m`: the time and
+distance spent at or above `HIGH_SPEED_THRESHOLD_MPS` (default 5.0 m/s, a
+demonstration value that is not a validated standard for every sport or
+athlete; the applied value is echoed in `distance_rules`). Within an
+interval speed is assumed to change linearly; when it crosses the threshold
+the crossing time is interpolated and only the qualifying part is integrated
+(for 2 -> 6 m/s over 2 s with a 4 m/s threshold: crossing after 1 s,
+duration 1 s, distance (4 + 6) / 2 x 1 = 5 m). An interval held at the
+threshold counts in full; one that only touches it at an endpoint counts
+zero. Both values are null when no interval was eligible and real zeros when
+eligible intervals existed but none reached the threshold. Duration never
+exceeds the eligible duration and distance never exceeds the total estimate.
+These are descriptive workload estimates, not sprint detection, fatigue
+classification or substitution advice. All of these describe the samples available: transmission gaps
 and the history caps can limit coverage. No condition scores, baselines or
 recovery claims are derived. A sample whose timestamp is
 more than 5 seconds ahead of the backend's UTC clock is rejected with 422 and

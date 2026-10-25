@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # must reach this tracking_confidence for it to count.
     distance_max_gap_seconds: float = Field(3.0, gt=0, le=60)
     distance_min_confidence: float = Field(0.5, ge=0, le=1)
+    # Speed at or above which time and distance count as "high-speed" (m/s). 5.0 is a demonstration
+    # default, not a validated standard for every sport or athlete.
+    high_speed_threshold_mps: float = Field(5.0, gt=0, allow_inf_nan=False)
 
     @property
     def cors_origin_list(self) -> list[str]:
