@@ -314,8 +314,11 @@ def test_scenario_accounting_distinguishes_omitted_from_unsent_and_keeps_late_ti
     assert all(abs(r.scheduled_s - 12.0) < 1e-9 for r in late), "but is due at the delivery tick"
     assert [x.payload["battery_percent"] for x in sorted(res.statuses, key=lambda x: (x.tick, x.athlete))] == [90.0] * 3 + [80.0] * 3 + [90.0] * 3
     assert all(x.outcome == "accepted" for x in res.statuses)
-    assert [r.tick for r in res.reads] == [0, 2, 4, 6, 8, 10, 12] and all(r.outcome == "ok" and all(r.checks.values()) for r in res.reads)
-    assert vt.count_reads(res.reads) == {"expected": 7, "ok": 7, "failed": 0, "unsent": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "checks_failed": {}}
+    assert [r.tick for r in res.reads] == [0, 2, 4, 6, 8, 10, 12] and all(r.outcome == "ok" for r in res.reads)
+    # the mocked overview never shows samples, so during the pause the in-progress check must FAIL (nothing is current)
+    assert [r.checks.get("paused_tracking_stale_while_physiological_current") for r in res.reads] == [None, None, None, False, False, None, None]
+    counts_r = vt.count_reads(res.reads)
+    assert counts_r["checks_failed"] == {"paused_tracking_stale_while_physiological_current": 2} and counts_r["checks_evaluated"]["paused_tracking_stale_while_physiological_current"] == 2
     assert not any(path.endswith("/live") and b"fictional-athlete" in body for path, body in seen), "reads never send samples"
 
 
@@ -331,6 +334,49 @@ def test_check_overview_detects_substitution_missing_athletes_negative_ages_and_
     assert bad["device_ids_match_samples"] is False
 
 
+def test_pause_in_progress_check_only_applies_during_the_pause_and_sees_stale_tracking_with_current_physiological():
+    plan = vt.scenario_plan("interrupted", 3, 13)
+    row = lambda i, trk_tick, phys_tick: {"athlete": {"id": vt.athlete_id(i)}, "tracking": {"timestamp": (START + timedelta(seconds=trk_tick)).isoformat()}, "physiological": {"timestamp": (START + timedelta(seconds=phys_tick)).isoformat()}}  # noqa: E731
+    good = {"athletes": [row(0, 4, 7), row(1, 4, 8), row(2, 8, 8)]}
+    assert vt.check_pause_in_progress(good, plan, 8, START, 1.0) is True
+    assert vt.check_pause_in_progress(good, plan, 4, START, 1.0) is None, "before the pause: not decidable"
+    assert vt.check_pause_in_progress(good, plan, 5, START, 1.0) is None, "the first paused tick: the previous tracking tick may still be current"
+    assert vt.check_pause_in_progress(good, plan, 10, START, 1.0) is None, "after the pause"
+    leaked = {"athletes": [row(0, 7, 7), row(1, 4, 8), row(2, 8, 8)]}
+    assert vt.check_pause_in_progress(leaked, plan, 8, START, 1.0) is False, "a tracking reading from inside the pause means the pause was not reflected"
+    stale_phys = {"athletes": [row(0, 4, 3), row(1, 4, 8), row(2, 8, 8)]}
+    assert vt.check_pause_in_progress(stale_phys, plan, 8, START, 1.0) is False, "the other stream must stay current"
+    assert vt.check_pause_in_progress({"athletes": []}, plan, 8, START, 1.0) is False
+    assert vt.check_pause_in_progress(good, vt.Plan(), 8, START, 1.0) is None, "no pause planned"
+
+
+def test_overview_checks_depending_on_timed_out_requests_are_unknown_not_passed(client):
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=3, duration_s=13, rate_hz=1.0, workers=1, read_interval_s=0)
+    start = datetime(2026, 10, 25, 11, 58, 0, tzinfo=UTC)
+    vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
+    plan = vt.scenario_plan("interrupted", 3, 13)
+    res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start, plan=plan)
+    # pretend the late athlete's newest on-time sample and one paused athlete's physiological sample timed out (they were in fact stored)
+    for r in res.records:
+        if (r.athlete == "fictional-athlete-03" and r.stream == "physiological" and r.tick == 12) or (r.athlete == "fictional-athlete-01" and r.stream == "physiological" and r.tick == 7):
+            r.outcome, r.status, r.detail = "timeout", None, "ReadTimeout: acceptance unknown"
+    for x in res.statuses:
+        if x.athlete == "fictional-athlete-02" and x.tick == 10:
+            x.outcome = "timeout"
+    ov = vt.verify_overview(Borrowed2(client), "", res.records, res.statuses, cfg, plan)
+    assert ov["checks"]["latest_is_newest_accepted_timestamp"] is None, "the stored tick-12 sample does not match 'accepted' but the request timed out: unknown"
+    assert ov["checks"]["older_late_arrival_did_not_replace_newer_latest"] is None
+    assert ov["checks"]["paused_stream_absent_while_other_stream_continued"] is None
+    assert ov["checks"]["device_status_is_newest_report_old_resend_ignored"] is None
+    assert any("could not be settled" in n for n in ov["notes"])
+    report = vt.build_report(cfg, {"base_url": "x", "pid": 0, "db_path": "x", "command": [], "retention_cap": 300}, res.records, res.actual_s, res.start_utc, vt.verify(Borrowed2(client), "", res.records, cfg, res.start_utc), reads=res.reads, statuses=res.statuses, overview_verification=ov, plan=plan)
+    lines = []
+    vt.print_summary(report, lines.append)
+    assert any("Overview verification: UNKNOWN (outcome depends on timed-out requests)" in l for l in lines)
+    assert not any("all checks passed" in l for l in lines)
+
+
 def test_interrupted_scenario_end_to_end_against_the_app(client):
     clock = FakeClock()
     cfg = vt.RunConfig(athletes=3, duration_s=13, rate_hz=1.0, workers=1, read_interval_s=2.0)
@@ -341,7 +387,10 @@ def test_interrupted_scenario_end_to_end_against_the_app(client):
     res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start, plan=plan)
     counts = vt.count_outcomes(res.records)
     assert counts["failed"] == 0 and counts["unsent"] == 0 and counts["omitted_by_scenario"] == 10 and counts["delivered_late"] == 5
-    assert all(r.outcome == "ok" and all(r.checks.values()) for r in res.reads), [r.checks for r in res.reads]
+    assert all(r.outcome == "ok" and all(v is True for v in r.checks.values()) for r in res.reads), [r.checks for r in res.reads]
+    in_pause = {r.tick: r.checks.get("paused_tracking_stale_while_physiological_current") for r in res.reads}
+    assert in_pause == {0: None, 2: None, 4: None, 6: True, 8: True, 10: None, 12: None}, "the pause was visible in the live overview while it was happening"
+    assert vt.count_reads(res.reads)["checks_evaluated"]["paused_tracking_stale_while_physiological_current"] == 2
     v = vt.verify(Borrowed2(client), "", res.records, cfg, res.start_utc)
     assert v["overall"]["failed"] == 0 and v["overall"]["unknown"] == 0
     ov = vt.verify_overview(Borrowed2(client), "", res.records, res.statuses, cfg, plan)

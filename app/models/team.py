@@ -12,15 +12,19 @@ class ReportedDevice(AthletrixModel):
 
     The association is only that the athlete's newest sample(s) named this device id: it is a reported association,
     not a verified identity or a permanent assignment. `status` is the newest report the engine holds for the id
-    (null when none was ever received) and `status_age_seconds` is captured_at minus its timestamp. A report
-    describes the moment it was sent: an old "connected" is not proof of a current connection, and nothing here
-    infers connection or disconnection from samples arriving or not.
+    (null when none was ever received) and `status_age_seconds` is captured_at minus its timestamp. A report whose
+    timestamp lies after captured_at (accepted within the ingestion clock-skew allowance) is still the newest report
+    held, so it is returned with age 0 and `status_ahead_seconds` saying how far ahead it is; its age is never
+    negative and it is not presented as more current than captured_at. A report describes the moment it was sent:
+    an old "connected" is not proof of a current connection, and nothing here infers connection or disconnection
+    from samples arriving or not.
     """
 
     device_id: str = Field(..., description="Device id as reported in the athlete's newest sample(s).")
     streams: list[str] = Field(..., description="Which of the athlete's newest samples reported this id: physiological, tracking, or both.")
     status: DeviceStatus | None = Field(None, description="Latest status report received for this device id; null if none.")
-    status_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the status report timestamp; null if no report.")
+    status_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the status report timestamp, seconds; 0 when the report is timestamped after captured_at (see status_ahead_seconds); null if no report.")
+    status_ahead_seconds: float | None = Field(None, ge=0, description="How far the report's timestamp lies AFTER captured_at, seconds (a report accepted within the ingestion clock-skew allowance); 0 when it is not ahead; null if no report. A report ahead of engine time is shown because it is the newest one held, not because it is current.")
 
 
 class TeamAthleteLive(AthletrixModel):

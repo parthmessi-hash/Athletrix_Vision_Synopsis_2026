@@ -140,16 +140,40 @@ def test_legacy_tracking_rows_without_device_metadata_report_no_device(client, i
     assert row["tracking"]["speed_mps"] == 3.0 and row["tracking"]["device_id"] is None and row["devices"] == []
 
 
-def test_devices_are_per_athlete_and_a_status_after_the_captured_instant_has_age_zero(client):
+def test_devices_are_per_athlete(client):
     register(client, "a1")
     register(client, "b1", team_id="team-b")
     phys(client, "a1", -1, "w-a")
     phys(client, "b1", -1, "w-b")
-    status(client, "w-a", 2, True, 55, 0.5)   # reported within the skew allowance, after the captured instant
+    status(client, "w-a", -1)
     status(client, "w-b", -1)
-    da = devices(client, "a1")
-    assert [x["device_id"] for x in da] == ["w-a"] and da[0]["status_age_seconds"] == 0.0
+    assert [x["device_id"] for x in devices(client, "a1")] == ["w-a"]
     assert [x["device_id"] for x in devices(client, "b1", "team-b")] == ["w-b"]
+
+
+def test_status_reported_ahead_of_engine_time_is_explicit_never_negative_and_never_falsely_current(client):
+    """A report accepted within the 5 s ingestion skew allowance may be timestamped after the captured instant."""
+    register(client, "a1")
+    phys(client, "a1", -1, "w-a")
+    status(client, "w-a", 3, True, 55, 0.5)   # 3 s ahead of backend time, inside the allowance
+    r = client.get("/api/v1/teams/team-a/live")
+    assert r.status_code == 200, "a report ahead of engine time does not break the overview"
+    d = r.json()["athletes"][0]["devices"][0]
+    assert d["status"]["battery_percent"] == 55 and d["status_age_seconds"] == 0.0 and d["status_ahead_seconds"] == 3.0
+    status(client, "w-a", -2, True, 40, 0.5)   # an older report does not replace it
+    d = devices(client)[0]
+    assert d["status"]["battery_percent"] == 55 and d["status_ahead_seconds"] == 3.0
+    status(client, "w-a", 4, True, 30, 0.5)   # a newer one does, and the skew is reported again
+    d = devices(client)[0]
+    assert d["status"]["battery_percent"] == 30 and d["status_ahead_seconds"] == 4.0 and d["status_age_seconds"] == 0.0
+
+
+def test_status_exactly_at_the_captured_instant_has_zero_age_and_zero_skew(client):
+    register(client, "a1")
+    phys(client, "a1", -1, "w-a")
+    status(client, "w-a", 0)
+    d = devices(client)[0]
+    assert d["status_age_seconds"] == 0.0 and d["status_ahead_seconds"] == 0.0
 
 
 def test_simulator_status_flag_is_opt_in_and_fictional():

@@ -52,6 +52,12 @@ def reported_devices(phys, track, statuses: dict, captured_at) -> list[ReportedD
     out = []
     for device_id, names in streams.items():
         status = statuses.get(device_id)
-        age = (captured_at - status.timestamp).total_seconds() if status else None
-        out.append(ReportedDevice(device_id=device_id, streams=names, status=status, status_age_seconds=max(0.0, age) if age is not None else None))
+        if status is None:
+            out.append(ReportedDevice(device_id=device_id, streams=names))
+            continue
+        delta = (captured_at - status.timestamp).total_seconds()
+        # Clock skew, made explicit: a report timestamped after captured_at was accepted within the ingestion skew
+        # allowance. It is still the newest report held, so it is returned with age 0 and the amount it is ahead;
+        # an age is never negative and the report is never presented as more current than captured_at.
+        out.append(ReportedDevice(device_id=device_id, streams=names, status=status, status_age_seconds=max(0.0, delta), status_ahead_seconds=max(0.0, -delta)))
     return out

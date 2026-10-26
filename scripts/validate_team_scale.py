@@ -198,6 +198,32 @@ def status_payload(i: int, status_tick: int, battery: float, rate_hz: float, sta
 
 # ---- overview reads ------------------------------------------------------------------------------------------------
 
+def pause_window(plan: "Plan") -> tuple[int, int] | None:
+    """(first, last) paused tick of the scenario's tracking pause, or None when nothing is paused."""
+    ticks = sorted({t for (_, t, s) in plan.omitted if s == "tracking"})
+    return (ticks[0], ticks[-1]) if ticks else None
+
+
+def check_pause_in_progress(body: dict, plan: "Plan", tick: int, start_utc: datetime, rate_hz: float) -> bool | None:
+    """While the tracking pause is in progress, a paused athlete's tracking reading must be from before the pause while the
+    physiological reading is current (at most one tick old). None when the read falls outside the window where this is decidable."""
+    window = pause_window(plan)
+    if window is None or not (window[0] < tick <= window[1]):
+        return None
+    rows = {r["athlete"]["id"]: r for r in body.get("athletes", [])}
+    stale_before = start_utc + timedelta(seconds=window[0] / rate_hz)       # tracking must be older than the first paused tick
+    current_after = start_utc + timedelta(seconds=(tick - 1) / rate_hz)     # physiological must be at least this recent
+    for i in plan.paused_tracking:
+        row = rows.get(athlete_id(i))
+        if row is None or row["tracking"] is None or row["physiological"] is None:
+            return False
+        trk = datetime.fromisoformat(row["tracking"]["timestamp"].replace("Z", "+00:00"))
+        phys = datetime.fromisoformat(row["physiological"]["timestamp"].replace("Z", "+00:00"))
+        if not (trk < stale_before and phys >= current_after):
+            return False
+    return True
+
+
 def check_overview(body: dict, expected_ids: list[str], previous_latest: dict) -> dict:
     """Consistency checks on one team overview; updates previous_latest (athlete -> {stream: timestamp}) in place."""
     rows = body.get("athletes", [])
@@ -350,6 +376,9 @@ def run_load(
             if body is not None:
                 with lock:
                     checks = check_overview(body, expected_ids, previous_latest)
+                in_pause = check_pause_in_progress(body, plan, tick, start_utc, cfg.rate_hz)
+                if in_pause is not None:
+                    checks["paused_tracking_stale_while_physiological_current"] = in_pause
             rec = ReadRecord(tick, due, sent - start, latency, outcome, status, checks, detail)
         with lock:
             reads.append(rec)
@@ -416,13 +445,14 @@ def summarize(values: list[float]) -> dict:
 
 
 def count_reads(reads: list[ReadRecord]) -> dict:
-    out = {"expected": len(reads), "ok": 0, "failed": 0, "unsent": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "checks_failed": {}}
+    out = {"expected": len(reads), "ok": 0, "failed": 0, "unsent": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "checks_failed": {}, "checks_evaluated": {}}
     for r in reads:
         if r.outcome == "unsent":
             out["unsent"] += 1
         elif r.outcome == "ok":
             out["ok"] += 1
             for k, v in r.checks.items():
+                out["checks_evaluated"][k] = out["checks_evaluated"].get(k, 0) + 1
                 if v is False:
                     out["checks_failed"][k] = out["checks_failed"].get(k, 0) + 1
         else:
@@ -537,9 +567,15 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
         return {"checks": {"read": False}, "notes": [f"overview read failed: {type(exc).__name__}: {exc}"]}
     rows = {r["athlete"]["id"]: r for r in body.get("athletes", [])}
     checks.update(check_overview(body, expected_ids, {}))
-    timed_out = {r.athlete for r in records if r.outcome == "timeout"}
+    timed_out = {r.athlete for r in records if r.outcome == "timeout"}   # acceptance unknown for these athletes
+    unknown_notes: list[str] = []
+
+    def settle(ok: bool, uncertain: bool) -> bool | None:
+        """A check that found no mismatch but depended on an unknown outcome is unknown (None), never a pass."""
+        return False if not ok else (None if uncertain else True)
+
     # newest-timestamp ordering: the overview's latest per stream is the newest ACCEPTED timestamp, whatever order things arrived in
-    ordering_ok, recency_ok = True, True
+    ordering_ok, ordering_uncertain = True, False
     for i in range(cfg.athletes):
         a = athlete_id(i)
         row = rows.get(a)
@@ -549,18 +585,21 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
         for s in STREAMS:
             exp = expected_retained(records, a, s)
             got = row[s]
-            if not exp:
-                if got is not None and a not in timed_out:
+            match = (got is None) if not exp else (got is not None and datetime.fromisoformat(got["timestamp"].replace("Z", "+00:00")) == datetime.fromisoformat(exp[-1].payload["timestamp"]))
+            if not match:
+                if a in timed_out:
+                    ordering_uncertain = True   # a timed-out sample may have been stored: the mismatch is not a proven defect
+                else:
                     ordering_ok = False
-                continue
-            if got is None or datetime.fromisoformat(got["timestamp"].replace("Z", "+00:00")) != datetime.fromisoformat(exp[-1].payload["timestamp"]):
-                if a not in timed_out:
-                    ordering_ok = False
-    checks["latest_is_newest_accepted_timestamp"] = ordering_ok
+    checks["latest_is_newest_accepted_timestamp"] = settle(ordering_ok, ordering_uncertain)
+    if ordering_uncertain:
+        unknown_notes.append("latest-timestamp ordering could not be settled for athletes with timed-out requests")
     if plan.late:
-        late_ok = True
+        late_ok, late_uncertain = True, False
         for (i, tick, s), _ in plan.late.items():
             a = athlete_id(i); row = rows.get(a)
+            if a in timed_out:
+                late_uncertain = True
             if row is None or row[s] is None:
                 late_ok = False; continue
             latest_tick_ts = datetime.fromisoformat(row[s]["timestamp"].replace("Z", "+00:00"))
@@ -568,14 +607,17 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
             newest_on_time = max((datetime.fromisoformat(r.payload["timestamp"]) for r in accepted if r.plan == "scheduled"), default=None)
             if newest_on_time is not None and latest_tick_ts < newest_on_time:
                 late_ok = False
-        checks["older_late_arrival_did_not_replace_newer_latest"] = late_ok
+        checks["older_late_arrival_did_not_replace_newer_latest"] = settle(late_ok, late_uncertain)
         notes.append(f"{len(plan.late)} samples were delivered late at tick 12 with their original timestamps")
     if plan.omitted:
-        # independent stream recency: during the pause the paused stream's latest stayed older than the other stream's.
-        # Verified from the retained history: for paused athletes no tracking sample exists for the paused ticks while physiological ones do.
-        pause_ok = True
+        # independent stream recency, settled from the retained history after the run: for paused athletes no tracking sample
+        # exists for the paused ticks while their physiological samples for those ticks do. The in-progress view is checked
+        # on the overview reads taken during the pause (paused_tracking_stale_while_physiological_current).
+        pause_ok, pause_uncertain = True, False
         for i in plan.paused_tracking:
             a = athlete_id(i)
+            if a in timed_out:
+                pause_uncertain = True
             try:
                 hist = client.get(f"{base_url}/api/v1/athletes/{a}/tracking/history?limit={RETENTION_CAP}").json()
                 phys_hist = client.get(f"{base_url}/api/v1/athletes/{a}/physiological/history?limit={RETENTION_CAP}").json()
@@ -587,24 +629,33 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
             track_stamps = {iso(h["timestamp"]) for h in hist}
             phys_stamps = {iso(h["timestamp"]) for h in phys_hist}
             exp_phys = {iso(r.payload["timestamp"]) for r in records if r.athlete == a and r.stream == "physiological" and r.outcome == "accepted" and r.tick in paused_ticks}
-            if omitted_stamps & track_stamps or not exp_phys.issubset(phys_stamps):
+            if omitted_stamps & track_stamps:
+                pause_ok = False            # an omitted sample can never have been stored: a definite defect
+            elif not exp_phys.issubset(phys_stamps) and a not in timed_out:
                 pause_ok = False
-        checks["paused_stream_absent_while_other_stream_continued"] = pause_ok
+        checks["paused_stream_absent_while_other_stream_continued"] = settle(pause_ok, pause_uncertain)
         notes.append(f"{len(plan.omitted)} tracking samples were left out on purpose for athletes {[athlete_id(i) for i in plan.paused_tracking]} (ticks 5-9)")
     if plan.statuses:
-        dev_ok = True
+        dev_ok, dev_uncertain, dev_checked = True, False, 0
         for i in plan.status_athletes:
             a = athlete_id(i); row = rows.get(a)
-            sent_ok = [x for x in statuses if x.athlete == a and x.outcome == "accepted"]
+            mine = [x for x in statuses if x.athlete == a]
+            if any(x.outcome == "timeout" for x in mine):
+                dev_uncertain = True        # a timed-out report may have been stored
+            sent_ok = [x for x in mine if x.outcome == "accepted"]
             if not sent_ok:
                 continue   # nothing accepted: nothing to verify (reported in counts)
+            dev_checked += 1
             newest = max(sent_ok, key=lambda x: x.payload["timestamp"])
             devs = {d["device_id"]: d for d in (row.get("devices", []) if row else [])}
             d = devs.get(device_id(i, "physiological"))
             if d is None or d["status"] is None or datetime.fromisoformat(d["status"]["timestamp"].replace("Z", "+00:00")) != datetime.fromisoformat(newest.payload["timestamp"]) or d["status"]["battery_percent"] != newest.payload["battery_percent"]:
-                dev_ok = False
-        checks["device_status_is_newest_report_old_resend_ignored"] = dev_ok
+                if not dev_uncertain:
+                    dev_ok = False
+        checks["device_status_is_newest_report_old_resend_ignored"] = settle(dev_ok, dev_uncertain) if dev_checked else None
         notes.append("device statuses were sent at ticks 0 and 10 and the tick-0 report was re-sent at tick 12")
+    if unknown_notes:
+        notes.extend(unknown_notes)
     return {"checks": checks, "notes": notes}
 
 
@@ -730,8 +781,12 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
         out(f"Scenario {sc['name']}: {sc['omitted_samples']} samples left out on purpose ({r['omitted_by_scenario']} counted as omitted, apart from {r['unsent']} unsent) · {sc['late_deliveries']} delivered late with original timestamps ({r['delivered_late']} delivered) · device status reports {ds.get('accepted')}/{ds.get('sent')} accepted")
     ov = report.get("overview_verification", {})
     if ov.get("checks"):
-        bad = [k for k, v in ov["checks"].items() if v is not True]
-        out("Overview verification: " + ("all checks passed" if not bad else "FAILED " + ", ".join(bad)) + " · " + "; ".join(ov.get("notes", [])))
+        failed = [k for k, v in ov["checks"].items() if v is False]
+        unknown = [k for k, v in ov["checks"].items() if v is None]
+        verdict = "all checks passed" if not failed and not unknown else ((("FAILED " + ", ".join(failed)) if failed else "") + ((" · UNKNOWN " if failed else "UNKNOWN (outcome depends on timed-out requests) ") + ", ".join(unknown) if unknown else ""))
+        out("Overview verification: " + verdict + " · " + "; ".join(ov.get("notes", [])))
+    if rd.get("expected"):
+        out(f"Overview checks evaluated per read: {rd.get('checks_evaluated') or 'none'}")
     st = report.get("setup", {})
     if st:
         out(f"Setup (before the timed run, not counted above): {st.get('registered')} athletes registered to team {st.get('team_id')} in {st.get('seconds', 0):.2f} s")
@@ -823,7 +878,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
         print_summary(report, out)
         out(f"JSON report: {report_path}")
         v = report["verification"]["overall"]
-        ov_ok = all(x is not False for x in report["overview_verification"].get("checks", {}).values())
+        ov_ok = all(x is True for x in report["overview_verification"].get("checks", {}).values())   # unknown is not a pass
         reads_ok = not report["reads"]["checks_failed"] and report["reads"]["unsent"] == 0
         return 0 if v["failed"] == 0 and report["requests"]["unsent"] == 0 and ov_ok and reads_ok else 1
     finally:

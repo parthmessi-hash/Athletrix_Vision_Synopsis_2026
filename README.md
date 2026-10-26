@@ -561,7 +561,12 @@ curl "http://127.0.0.1:8000/api/v1/teams/demo-team/live"
   not proof of a current connection; nothing infers connection or
   disconnection from samples arriving or stopping. `status` is null when
   no report was ever received; battery and signal quality are null when
-  not reported and 0 when reported as 0.
+  not reported and 0 when reported as 0. Clock skew is explicit: a report
+  timestamped after `captured_at` (accepted within the 5 s ingestion skew
+  allowance) is still the newest report held, so it is returned with
+  `status_age_seconds` 0 and `status_ahead_seconds` saying how far ahead it
+  is; ages are never negative and such a report is not presented as more
+  current than `captured_at`.
 
 The simulator can send clearly fictional status reports for its own device
 id every 5 s with `--with-device-status` (off by default; existing commands
@@ -852,9 +857,15 @@ re-sent at tick 12. The verification then also checks that the overview's
 latest reading per stream is the newest accepted timestamp (so an older
 late arrival never replaced a newer one), that the paused samples are
 absent while the other stream's samples for those ticks are present, and
-that each device's status is the newest report. It is one reproducible
-scenario, not a fault-injection framework, and timestamp validation is
-never bypassed: late samples are late only in delivery.
+that each device's status is the newest report. The pause is also checked
+while it is happening: on every overview read taken during the pause the
+paused athletes' tracking reading must still be from before the pause while
+their physiological reading is current, and the summary reports how many
+reads evaluated that check. Checks whose outcome depends on a timed-out
+request are reported as unknown, never as passed, and the exit code treats
+unknown as not passed. It is one reproducible scenario, not a
+fault-injection framework, and timestamp validation is never bypassed: late
+samples are late only in delivery.
 
 What a run does:
 
