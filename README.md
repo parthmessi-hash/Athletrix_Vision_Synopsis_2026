@@ -1022,6 +1022,33 @@ as stored, with a safe filename
 record-count headers plus `X-Athletrix-Recording-Id`; roster and session
 metadata stay in the recording detail rather than in the file.
 
+The dashboard's **Local recording** card (engine mode only) starts and stops a
+recording explicitly, shows a persistent indicator naming the active
+recording and its athletes, lists the recordings and opens one in
+**Recording** review, where the existing summary, timeline, effort review,
+data lookup and download read only that recording (see the `Athletrix_Web`
+README).
+
+### End-to-end check (`scripts/verify_recording_flow.py`)
+
+```bash
+python scripts/verify_recording_flow.py                      # isolated backend, rolling caps 3/3, 8 samples while recording, 4 after
+python scripts/verify_recording_flow.py --cap 3 --samples 8 --after 4 --report reports/recording-flow.json   # reports/ is ignored
+```
+
+On an isolated backend with deliberately small rolling caps it registers
+three fictional athletes, starts a recording for two, sends more samples than
+the caps for all three, stops, sends more, restarts the backend on the same
+database file, and then checks against expectations computed in the script:
+the rolling history holds only its capped newest rows (the later ones), the
+stopped recording holds exactly the samples accepted for its two athletes
+while active and nothing after the stop or for the third athlete, the
+recording stays visible and stopped after the restart, the session window,
+summary and effort review match independent distance and heart-rate-period
+expectations while the rolling effort over the same period has no samples and
+a null distance, and the export holds every recorded sample and replays
+identically into a second isolated backend. Exit 0 when every check passed.
+
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 
 ```bash

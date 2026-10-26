@@ -36,6 +36,7 @@ Terms used throughout:
 | Demo launcher | `scripts/demo_launcher.py`: one command starts a temporary database, an isolated backend and a frontend copy on free ports, registers a fictional multi-sport roster and feeds simulated data for a bounded time; nothing in the repositories, `.env` or the development database is touched. |
 | Team-scale validation | `scripts/validate_team_scale.py`: starts an isolated backend, registers N fictional athletes to a fictional team, sends samples concurrently on independent per-stream grids (`--rate`, or `--physiological-rate` / `--tracking-rate`) while reading the team overview every 2 s, reports write and read latency, scheduling lateness and counts (omitted-by-scenario apart from unsent), verifies retained data, overview consistency (no substituted readings, newest-timestamp ordering, paused-stream recency checked on the reads taken during the pause) and device statuses, with timeout-dependent checks reported as unknown rather than passed; `--scenario interrupted` adds a fixed paused/late-stream disturbance. Observations on one machine, not a capacity claim. |
 | Retention comparison | `scripts/compare_retention.py`: the team-scale scenario run twice on two isolated backends, profile A (default caps) and profile B (larger tracking cap), same deterministic values and relative schedule, genuine timestamps per run; verifies retention, an early effort review (movement against independently calculated expectations, heart-rate periods, availability metadata, null distance preserved), the recorded window, export and replay into a third isolated backend, and compares the runs. Observations, not thresholds. |
+| Recording flow check | `scripts/verify_recording_flow.py`: an isolated backend with tiny rolling caps, a recording for two of three fictional athletes, more samples than the caps, stop, more samples, a restart, then rolling versus recorded contents, session separation, independent summary and effort expectations, and export plus replay into a second isolated backend. A functional check, not a performance test. |
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm, plus explicitly mapped optional physiological fields) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (the newest per athlete up to each stream's cap); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
@@ -148,6 +149,9 @@ curl -s http://127.0.0.1:8000/api/v1/recordings/active
 curl -s -X POST "http://127.0.0.1:8000/api/v1/recordings/<id>/stop"
 curl -s "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/summary?seconds=60&end=<UTC time>"     # session review
 curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/recorded-samples.jsonl"            # export
+
+# 3l. recording end-to-end check on an isolated backend with rolling caps of 3 (report under reports/, ignored by git)
+python scripts/verify_recording_flow.py
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
 
 # 3h. live team overview: every registered athlete on a team, newest retained reading per stream with its age
@@ -454,7 +458,10 @@ Implemented today is listed above; the following are **not** implemented:
   as such.
 - Recordings are a first version: one active at a time, no deletion, no
   upload, no automatic start, no management of disk use; an active recording
-  survives a restart until stopped explicitly.
+  survives a restart until stopped explicitly. The dashboard's Recording
+  review reads one recording at a time through the same cards as the rolling
+  review; recordings are not compared with each other and nothing is
+  interpreted from them.
 - The `availability` block and the dashboard's Available data lines describe
   retained rows against a request's selection only. They never call a period
   complete, never derive an expected count or coverage from a rate, never
@@ -547,7 +554,9 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "53 tests, 53 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "56 tests, 56 passed"
+# recording flow on an isolated backend (seconds; exit 0 means every check passed)
+python scripts/verify_recording_flow.py
 # retention comparison on isolated backends (about three minutes; exit 0 means every check passed, unknown is not a pass)
 python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000
 
