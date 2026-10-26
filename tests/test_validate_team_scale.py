@@ -7,7 +7,7 @@ TestClient on an isolated database. All athletes and values are fictional.
 import importlib.util
 import json
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -81,7 +81,8 @@ def test_run_load_schedules_on_the_monotonic_clock_and_records_lateness_and_late
     clock = FakeClock()
     cfg = vt.RunConfig(athletes=2, duration_s=3, rate_hz=1.0, workers=1)
     client = mock_client(lambda req: httpx.Response(200, json={}), clock, cost=0.01)
-    records, actual, start = vt.run_load("http://test", cfg, make_client=lambda: client, clock=clock, sleep=clock.sleep, start_utc=START)
+    res = vt.run_load("http://test", cfg, make_client=lambda: client, clock=clock, sleep=clock.sleep, start_utc=START)
+    records, actual, start = res.records, res.actual_s, res.start_utc
     assert len(records) == 2 * 3 * 2 and all(r.outcome == "accepted" and r.status == 200 for r in records)
     assert sorted({r.tick for r in records}) == [0, 1, 2]
     assert all(abs(r.latency_s - 0.01) < 1e-9 for r in records), "latency is the fake request cost"
@@ -102,8 +103,9 @@ def test_failures_are_counted_by_kind_never_retried_and_never_invented():
             raise httpx.ReadTimeout("slow")
         return httpx.Response(200, json={})
     clock = FakeClock()
-    cfg = vt.RunConfig(athletes=3, duration_s=2, rate_hz=1.0, workers=1)
-    records, _, _ = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START)
+    cfg = vt.RunConfig(athletes=3, duration_s=2, rate_hz=1.0, workers=1, read_interval_s=0)  # no overview reads: this test counts sample attempts only
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START)
+    records, actual, start = res.records, res.actual_s, res.start_utc
     counts = vt.count_outcomes(records)
     assert counts["expected"] == 12 and counts["attempted"] == 12 and counts["unsent"] == 0
     assert counts["by_stream"]["tracking"]["failed"] == 6 and counts["http_status_counts"] == {"422": 6}
@@ -119,7 +121,8 @@ def test_requests_after_the_deadline_are_unsent_not_successes():
     def handler(req):
         clock.now += 5.0  # each request takes longer than the whole run: later ones miss the deadline
         return httpx.Response(200, json={})
-    records, _, _ = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START)
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START)
+    records, actual, start = res.records, res.actual_s, res.start_utc
     counts = vt.count_outcomes(records)
     assert counts["expected"] == 4 and counts["unsent"] >= 1 and counts["accepted"] + counts["unsent"] == 4
     assert all(r.sent_s is None and "deadline" in r.detail or r.outcome == "accepted" for r in records)
@@ -132,7 +135,8 @@ def test_lateness_is_reported_when_the_rate_cannot_be_kept():
     def handler(req):
         clock.now += 0.6  # two requests per tick at 0.6 s each: 1.2 s per tick against a 1 s schedule
         return httpx.Response(200, json={})
-    records, actual, _ = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START)
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START)
+    records, actual, start = res.records, res.actual_s, res.start_utc
     late = [r.lateness_s for r in records if r.sent_s is not None]
     assert len(late) == 6 and max(late) >= 0.6 and actual > 3.0, "the slip is visible in lateness and in the actual duration"
     assert vt.count_outcomes(records)["accepted"] == 6
@@ -158,7 +162,8 @@ def test_end_to_end_against_the_app_and_verification_passes(client, tmp_path):
     clock = FakeClock()
     cfg = vt.RunConfig(athletes=3, duration_s=4, rate_hz=1.0, workers=2)
     start = datetime(2026, 10, 25, 11, 59, 0, tzinfo=UTC)  # in the past relative to the backend clock, so ingestion accepts it
-    records, actual, start_utc = vt.run_load("http://test", cfg, make_client=lambda: Borrowed(client), clock=clock, sleep=clock.sleep, start_utc=start)
+    res = vt.run_load("http://test", cfg, make_client=lambda: Borrowed(client), clock=clock, sleep=clock.sleep, start_utc=start)
+    records, actual, start_utc = res.records, res.actual_s, res.start_utc
     counts = vt.count_outcomes(records)
     assert counts["accepted"] == 3 * 4 * 2 and counts["failed"] == 0 and counts["unsent"] == 0
     verification = vt.verify(Borrowed2(client), "", records, cfg, start_utc)
@@ -189,7 +194,8 @@ def test_verification_reports_unknown_for_timed_out_athletes_and_failed_for_mism
     clock = FakeClock()
     cfg = vt.RunConfig(athletes=2, duration_s=2, rate_hz=1.0, workers=1)
     start = datetime(2026, 10, 25, 11, 59, 0, tzinfo=UTC)
-    records, _, start_utc = vt.run_load("http://test", cfg, make_client=lambda: Borrowed(client), clock=clock, sleep=clock.sleep, start_utc=start)
+    res = vt.run_load("http://test", cfg, make_client=lambda: Borrowed(client), clock=clock, sleep=clock.sleep, start_utc=start)
+    records, actual, start_utc = res.records, res.actual_s, res.start_utc
     # pretend athlete 1's second tracking request timed out: the backend did store it, so the count differs from "accepted" -> unknown, not failed
     rec = next(r for r in records if r.athlete == "fictional-athlete-01" and r.stream == "tracking" and r.tick == 1)
     rec.outcome, rec.status, rec.detail = "timeout", None, "ReadTimeout: acceptance unknown"
@@ -266,3 +272,104 @@ def test_backend_start_reports_an_early_exit(monkeypatch):
 def test_main_rejects_bad_arguments(capsys):
     assert vt.main(["--athletes", "0"], out=print) == 2
     assert vt.main(["--duration", "-1"], out=print) == 2
+
+
+# ---- overview reads and the interrupted scenario -----------------------------------------------------------------------
+
+def test_scenario_plan_is_deterministic_and_small():
+    plan = vt.scenario_plan("interrupted", 20, 30)
+    assert plan == vt.scenario_plan("interrupted", 20, 30)
+    assert sorted(plan.omitted) == [(i, t, "tracking") for i in (0, 1) for t in range(5, 10)]
+    assert plan.late == {(2, t, "physiological"): 12 for t in range(5, 10)}
+    assert plan.deliveries_at(12) == [(2, 9, "physiological"), (2, 8, "physiological"), (2, 7, "physiological"), (2, 6, "physiological"), (2, 5, "physiological")], "newest first, so the older ones arrive after newer ones"
+    assert sorted(plan.statuses) == [0, 10, 12] and plan.statuses[12] == plan.statuses[0]
+    assert vt.scenario_plan("healthy", 20, 30) == vt.Plan()
+    with pytest.raises(ValueError):
+        vt.scenario_plan("interrupted", 2, 30)
+    with pytest.raises(ValueError):
+        vt.scenario_plan("interrupted", 3, 12)
+    with pytest.raises(ValueError):
+        vt.scenario_plan("chaos", 20, 30)
+
+
+def test_scenario_accounting_distinguishes_omitted_from_unsent_and_keeps_late_timestamps():
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=3, duration_s=13, rate_hz=1.0, workers=1, read_interval_s=2.0)
+    seen = []
+
+    def handler(req):
+        seen.append((str(req.url.path), req.content))
+        if req.url.path.endswith("/live"):
+            return httpx.Response(200, json={"team_id": "fictional-team", "captured_at": START.isoformat(), "athletes": [{"athlete": {"id": vt.athlete_id(i), "name": "x", "jersey_number": i, "sport": "f", "team_id": "fictional-team"}, "physiological": None, "tracking": None, "physiological_age_seconds": None, "tracking_age_seconds": None, "devices": []} for i in range(3)]})
+        return httpx.Response(200, json={})
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START, plan=vt.scenario_plan("interrupted", 3, 13))
+    counts = vt.count_outcomes(res.records)
+    assert counts["expected"] == 3 * 13 * 2 and counts["omitted_by_scenario"] == 10 and counts["unsent"] == 0
+    assert counts["attempted"] == counts["expected"] - 10 and counts["accepted"] == counts["attempted"] and counts["delivered_late"] == 5
+    omitted = [r for r in res.records if r.outcome == "omitted"]
+    assert all(r.sent_s is None and r.plan == "omitted" and r.stream == "tracking" and r.athlete in ("fictional-athlete-01", "fictional-athlete-02") for r in omitted)
+    late = [r for r in res.records if r.plan == "late"]
+    assert len(late) == 5 and all(r.athlete == "fictional-athlete-03" and r.stream == "physiological" for r in late)
+    assert all(r.payload["timestamp"] == (START + timedelta(seconds=r.tick)).isoformat() for r in late), "a late delivery keeps its own tick's timestamp"
+    assert all(abs(r.scheduled_s - 12.0) < 1e-9 for r in late), "but is due at the delivery tick"
+    assert [x.payload["battery_percent"] for x in sorted(res.statuses, key=lambda x: (x.tick, x.athlete))] == [90.0] * 3 + [80.0] * 3 + [90.0] * 3
+    assert all(x.outcome == "accepted" for x in res.statuses)
+    assert [r.tick for r in res.reads] == [0, 2, 4, 6, 8, 10, 12] and all(r.outcome == "ok" and all(r.checks.values()) for r in res.reads)
+    assert vt.count_reads(res.reads) == {"expected": 7, "ok": 7, "failed": 0, "unsent": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "checks_failed": {}}
+    assert not any(path.endswith("/live") and b"fictional-athlete" in body for path, body in seen), "reads never send samples"
+
+
+def test_check_overview_detects_substitution_missing_athletes_negative_ages_and_backwards_timestamps():
+    ids = ["fictional-athlete-01", "fictional-athlete-02"]
+    row = lambda aid, sid, ts, age: {"athlete": {"id": aid}, "physiological": {"athlete_id": sid, "timestamp": ts, "device_id": "w"}, "tracking": None, "physiological_age_seconds": age, "tracking_age_seconds": None, "devices": [{"device_id": "w"}]}  # noqa: E731
+    prev = {}
+    ok = vt.check_overview({"athletes": [row(ids[0], ids[0], "2026-10-20T10:00:05Z", 1.0), row(ids[1], ids[1], "2026-10-20T10:00:05Z", 0.0)]}, ids, prev)
+    assert all(ok.values()), ok
+    bad = vt.check_overview({"athletes": [row(ids[0], ids[1], "2026-10-20T10:00:04Z", -1.0), {"athlete": {"id": "stranger"}, "physiological": None, "tracking": None, "physiological_age_seconds": None, "tracking_age_seconds": None, "devices": [{"device_id": "ghost"}]}]}, ids, prev)
+    assert bad["one_entry_per_registered_athlete"] is False and bad["samples_name_their_own_athlete"] is False and bad["ages_never_negative"] is False
+    assert bad["latest_timestamps_never_go_backwards"] is False, "10:00:04 after 10:00:05 for athlete 1"
+    assert bad["device_ids_match_samples"] is False
+
+
+def test_interrupted_scenario_end_to_end_against_the_app(client):
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=3, duration_s=13, rate_hz=1.0, workers=1, read_interval_s=2.0)
+    start = datetime(2026, 10, 25, 11, 58, 0, tzinfo=UTC)
+    setup = vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
+    assert setup["registered"] == 3 and setup["failed"] == 0
+    plan = vt.scenario_plan("interrupted", 3, 13)
+    res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start, plan=plan)
+    counts = vt.count_outcomes(res.records)
+    assert counts["failed"] == 0 and counts["unsent"] == 0 and counts["omitted_by_scenario"] == 10 and counts["delivered_late"] == 5
+    assert all(r.outcome == "ok" and all(r.checks.values()) for r in res.reads), [r.checks for r in res.reads]
+    v = vt.verify(Borrowed2(client), "", res.records, cfg, res.start_utc)
+    assert v["overall"]["failed"] == 0 and v["overall"]["unknown"] == 0
+    ov = vt.verify_overview(Borrowed2(client), "", res.records, res.statuses, cfg, plan)
+    assert ov["checks"] == {"one_entry_per_registered_athlete": True, "samples_name_their_own_athlete": True, "ages_never_negative": True, "latest_timestamps_never_go_backwards": True, "device_ids_match_samples": True,
+                            "latest_is_newest_accepted_timestamp": True, "older_late_arrival_did_not_replace_newer_latest": True, "paused_stream_absent_while_other_stream_continued": True, "device_status_is_newest_report_old_resend_ignored": True}, ov
+    # the late athlete's latest physiological reading is tick 12, not the tick-9 sample that arrived last
+    latest = client.get("/api/v1/athletes/fictional-athlete-03/physiological/latest").json()
+    assert latest["timestamp"] == (start + timedelta(seconds=12)).isoformat().replace("+00:00", "Z")
+    status = client.get("/api/v1/devices/fictional-wearable-01/status/latest").json()
+    assert status["battery_percent"] == 80.0 and status["timestamp"].startswith((start + timedelta(seconds=10)).isoformat()[:19])
+    report = vt.build_report(cfg, {"base_url": "x", "pid": 0, "db_path": "x", "command": [], "retention_cap": 300}, res.records, res.actual_s, res.start_utc, v, reads=res.reads, statuses=res.statuses, setup=setup, overview_verification=ov, plan=plan)
+    assert report["scenario"]["omitted_samples"] == 10 and report["requests"]["omitted_by_scenario"] == 10 and report["reads"]["ok"] == 7 and report["device_status_reports"]["accepted"] == 9
+    lines = []
+    vt.print_summary(report, lines.append)
+    assert any("Scenario interrupted: 10 samples left out on purpose" in l for l in lines) and any("Overview verification: all checks passed" in l for l in lines)
+
+
+class BorrowedAll:
+    """POST and GET against the TestClient for the run (samples, statuses and overview reads)."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def close(self):
+        pass
+
+    def post(self, url, json=None):
+        return self.client.post(url.replace("http://test", ""), json=json)
+
+    def get(self, url, params=None):
+        return self.client.get(url.replace("http://test", ""), params=params)

@@ -19,9 +19,23 @@ WHAT IT IS NOT
   machine shows how this software behaves under an 11-20 athlete load right now; the numbers are observations
   with the machine context noted, not thresholds, and no pass mark is invented for latency.
 
+  5. Registers the fictional athletes to a fictional team before the timed run (setup is reported separately) and,
+     during ingestion, reads the live team overview (GET /teams/{id}/live) at a fixed interval. Read latency is
+     tracked separately from write latency, and every overview is checked: one entry per registered athlete, every
+     entry's samples name that athlete (never another athlete's readings), ages never negative, and each athlete's
+     latest timestamps never going backwards between reads.
+  6. Optionally (--scenario interrupted) runs a small deterministic disturbance: two athletes' tracking streams are
+     paused for a few ticks (samples intentionally omitted, counted apart from anything the tool failed to send), one
+     athlete's physiological samples for those ticks are delivered late with their original recorded timestamps
+     after newer ones, and three athletes report device statuses, including an older report re-sent later. The
+     verification then checks that an older late arrival never replaces a newer latest reading, that stream recency
+     stays independent, and that the latest device status is the newest report.
+
 USAGE
-    python scripts/validate_team_scale.py                      # 20 athletes, ~15 s, 1 Hz
+    python scripts/validate_team_scale.py                      # 20 athletes, ~15 s, 1 Hz, overview read every 2 s
     python scripts/validate_team_scale.py --athletes 11 --duration 15
+    python scripts/validate_team_scale.py --athletes 20 --duration 60                       # healthy run with reads
+    python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted
     python scripts/validate_team_scale.py --report reports/my-run.json
 """
 
@@ -55,6 +69,8 @@ if str(SCRIPTS) not in sys.path:
 
 from simulate_athlete import heart_rate_at, motion_at  # noqa: E402  (deterministic fictional profiles)
 
+TEAM_ID = "fictional-team"
+DEFAULT_READ_INTERVAL_S = 2.0
 DEFAULT_ATHLETES = 20
 DEFAULT_DURATION_S = 15.0
 DEFAULT_RATE_HZ = 1.0
@@ -97,21 +113,120 @@ class RequestRecord:
     scheduled_s: float          # due time on the run's monotonic clock, seconds from start
     sent_s: float | None        # when the request was actually issued; None if never sent
     latency_s: float | None     # round trip measured in this process around client.post (connect + send + backend + response)
-    outcome: str                # accepted | http_error | timeout | connection_error | unsent
+    outcome: str                # accepted | http_error | timeout | connection_error | unsent | omitted
     status: int | None
     detail: str = ""
     payload: dict = field(default_factory=dict)
+    plan: str = "scheduled"     # scheduled | late (delivered at a later tick, original timestamp kept) | omitted (scenario left it out)
 
     @property
     def lateness_s(self) -> float | None:
         return None if self.sent_s is None else self.sent_s - self.scheduled_s
 
 
-def send_one(client: httpx.Client, base_url: str, stream: str, payload: dict, clock: Callable[[], float]) -> tuple[float, str, int | None, str]:
-    """POST one sample; returns (latency, outcome, status, detail). Never retries."""
+@dataclass
+class ReadRecord:
+    """One overview read during ingestion, with its latency and the consistency checks applied to the response."""
+    tick: int
+    scheduled_s: float
+    sent_s: float | None
+    latency_s: float | None
+    outcome: str                # ok | http_error | timeout | connection_error | unsent
+    status: int | None
+    checks: dict = field(default_factory=dict)
+    detail: str = ""
+
+
+@dataclass
+class StatusRecord:
+    """One fictional device-status report sent by the scenario."""
+    athlete: str
+    device_id: str
+    tick: int
+    payload: dict
+    outcome: str
+    status: int | None
+    latency_s: float | None = None
+    detail: str = ""
+
+
+# ---- scenario plan ------------------------------------------------------------------------------------------------
+
+@dataclass
+class Plan:
+    """What the scenario changes, keyed by (athlete index, tick, stream). Empty for the healthy run."""
+    name: str = "healthy"
+    omitted: set = field(default_factory=set)       # (i, tick, stream): intentionally not sent
+    late: dict = field(default_factory=dict)        # (i, tick, stream) -> delivery tick (original timestamp kept)
+    statuses: dict = field(default_factory=dict)    # delivery tick -> list of (i, status tick, battery)
+    paused_tracking: list = field(default_factory=list)
+    late_physiological: list = field(default_factory=list)
+    status_athletes: list = field(default_factory=list)
+    status_ticks: tuple = ()
+
+    def deliveries_at(self, tick: int) -> list[tuple[int, int, str]]:
+        return sorted([k for k, d in self.late.items() if d == tick], key=lambda k: (-k[1], k[0], k[2]))  # newest first, so older ones arrive after newer
+
+
+def scenario_plan(name: str, athletes: int, ticks: int) -> Plan:
+    """A small, reproducible disturbance; identical for the same arguments. Needs at least 3 athletes and 13 ticks."""
+    if name == "healthy":
+        return Plan()
+    if name != "interrupted":
+        raise ValueError(f"unknown scenario {name!r}")
+    if athletes < 3 or ticks < 13:
+        raise ValueError("the interrupted scenario needs at least 3 athletes and 13 ticks (13 s at 1 Hz)")
+    plan = Plan(name="interrupted")
+    pause = range(5, 10)                      # ticks 5..9
+    plan.paused_tracking = [0, 1]
+    plan.late_physiological = [2]
+    plan.status_athletes = [0, 1, 2]
+    plan.status_ticks = (0, 10)
+    for i in plan.paused_tracking:
+        for t in pause:
+            plan.omitted.add((i, t, "tracking"))
+    for i in plan.late_physiological:
+        for t in pause:
+            plan.late[(i, t, "physiological")] = 12   # delivered at tick 12, after the on-time ticks 10 and 11
+    plan.statuses = {0: [(i, 0, 90.0) for i in plan.status_athletes], 10: [(i, 10, 80.0) for i in plan.status_athletes], 12: [(i, 0, 90.0) for i in plan.status_athletes]}  # tick 12 re-sends the old report
+    return plan
+
+
+def status_payload(i: int, status_tick: int, battery: float, rate_hz: float, start_utc: datetime) -> dict:
+    return {"device_id": device_id(i, "physiological"), "timestamp": (start_utc + timedelta(seconds=status_tick / rate_hz)).isoformat(), "connected": True, "battery_percent": battery, "signal_quality": 0.9}
+
+
+# ---- overview reads ------------------------------------------------------------------------------------------------
+
+def check_overview(body: dict, expected_ids: list[str], previous_latest: dict) -> dict:
+    """Consistency checks on one team overview; updates previous_latest (athlete -> {stream: timestamp}) in place."""
+    rows = body.get("athletes", [])
+    ids = [r["athlete"]["id"] for r in rows]
+    checks = {
+        "one_entry_per_registered_athlete": sorted(ids) == sorted(expected_ids),
+        "samples_name_their_own_athlete": all((r["physiological"] is None or r["physiological"]["athlete_id"] == r["athlete"]["id"]) and (r["tracking"] is None or r["tracking"]["athlete_id"] == r["athlete"]["id"]) for r in rows),
+        "ages_never_negative": all((r["physiological_age_seconds"] is None or r["physiological_age_seconds"] >= 0) and (r["tracking_age_seconds"] is None or r["tracking_age_seconds"] >= 0) for r in rows),
+        "latest_timestamps_never_go_backwards": True,
+        "device_ids_match_samples": all(all(d["device_id"] in {x["device_id"] for x in (r["physiological"], r["tracking"]) if x and x.get("device_id")} for d in r.get("devices", [])) for r in rows),
+    }
+    for r in rows:
+        prev = previous_latest.setdefault(r["athlete"]["id"], {})
+        for stream in STREAMS:
+            sample = r[stream]
+            if sample is None:
+                continue
+            ts = datetime.fromisoformat(sample["timestamp"].replace("Z", "+00:00"))
+            if stream in prev and ts < prev[stream]:
+                checks["latest_timestamps_never_go_backwards"] = False
+            prev[stream] = max(ts, prev.get(stream, ts))
+    return checks
+
+
+def send_one(client: httpx.Client, base_url: str, stream: str, payload: dict, clock: Callable[[], float], path: str | None = None) -> tuple[float, str, int | None, str]:
+    """POST one sample (or, with `path`, any payload); returns (latency, outcome, status, detail). Never retries."""
     t0 = clock()
     try:
-        r = client.post(f"{base_url}/api/v1/samples/{stream}", json=payload)
+        r = client.post(f"{base_url}{path or '/api/v1/samples/' + stream}", json=payload)
     except httpx.TimeoutException as exc:
         return clock() - t0, "timeout", None, f"{type(exc).__name__}: acceptance unknown"
     except httpx.HTTPError as exc:
@@ -120,6 +235,24 @@ def send_one(client: httpx.Client, base_url: str, stream: str, payload: dict, cl
     if r.status_code == 200:
         return latency, "accepted", 200, ""
     return latency, "http_error", r.status_code, r.text[:200]
+
+
+def read_overview(client: httpx.Client, base_url: str, team_id: str, clock: Callable[[], float]) -> tuple[float, str, int | None, dict | None, str]:
+    """GET the team overview once; returns (latency, outcome, status, body or None, detail). Never retries."""
+    t0 = clock()
+    try:
+        r = client.get(f"{base_url}/api/v1/teams/{team_id}/live")
+    except httpx.TimeoutException as exc:
+        return clock() - t0, "timeout", None, None, type(exc).__name__
+    except httpx.HTTPError as exc:
+        return clock() - t0, "connection_error", None, None, type(exc).__name__
+    latency = clock() - t0
+    if r.status_code != 200:
+        return latency, "http_error", r.status_code, None, r.text[:200]
+    try:
+        return latency, "ok", 200, r.json(), ""
+    except ValueError:
+        return latency, "http_error", 200, None, "response was not JSON"
 
 
 # ---- the run ------------------------------------------------------------------------------------------------------
@@ -132,10 +265,27 @@ class RunConfig:
     timeout_s: float = DEFAULT_TIMEOUT_S
     workers: int = 8
     grace_s: float = 10.0       # after the last tick, how long to wait for outstanding requests before marking the rest unsent
+    read_interval_s: float = DEFAULT_READ_INTERVAL_S   # overview read every this many seconds of due time; 0 disables reads
+    scenario: str = "healthy"
+    team_id: str = TEAM_ID
 
     @property
     def ticks(self) -> int:
         return max(1, int(round(self.duration_s * self.rate_hz)))
+
+    @property
+    def read_every_ticks(self) -> int:
+        return 0 if self.read_interval_s <= 0 else max(1, int(round(self.read_interval_s * self.rate_hz)))
+
+
+@dataclass
+class RunResult:
+    records: list            # RequestRecord per (athlete, tick, stream), omitted ones included
+    reads: list              # ReadRecord per overview read
+    statuses: list           # StatusRecord per device-status report
+    actual_s: float
+    start_utc: datetime
+    plan: Plan
 
 
 def run_load(
@@ -146,33 +296,63 @@ def run_load(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     start_utc: datetime | None = None,
-) -> tuple[list[RequestRecord], float, datetime]:
-    """Send every scheduled sample; return (records, actual run duration in seconds, start time in UTC).
+    plan: Plan | None = None,
+) -> RunResult:
+    """Send every scheduled sample (and the scenario's late deliveries, statuses and overview reads) on a monotonic schedule.
 
-    Ticks are due at start + tick / rate on the monotonic clock. A tick's requests are handed to a small thread pool
-    when due (never earlier); lateness is how long after its due time a request was actually issued. Requests that
-    could not be issued before the deadline (last due time + grace) are recorded as unsent, never as successes.
+    Ticks are due at start + tick / rate. A tick's work is handed to a small thread pool when due (never earlier); lateness
+    is how long after its due time a request was actually issued. Work that could not be issued before the deadline (last
+    due time + grace) is recorded as unsent, never as a success. Samples the scenario leaves out are recorded as omitted,
+    apart from unsent ones. Late deliveries keep the timestamp of the tick they belong to; only their due time moves.
     """
     start_utc = start_utc or datetime.now(UTC)
+    plan = plan or Plan()
     records: list[RequestRecord] = []
+    reads: list[ReadRecord] = []
+    statuses: list[StatusRecord] = []
     lock = threading.Lock()
     make_client = make_client or (lambda: httpx.Client(timeout=cfg.timeout_s))
     client = make_client()
     start = clock()
     deadline = start + cfg.ticks / cfg.rate_hz + cfg.grace_s
+    expected_ids = [athlete_id(i) for i in range(cfg.athletes)]
+    previous_latest: dict = {}
 
-    def job(i: int, tick: int, due: float) -> None:
-        stamp = start_utc + timedelta(seconds=tick / cfg.rate_hz)
-        payloads = sample_payloads(i, tick, cfg.duration_s, cfg.rate_hz, stamp)
-        for stream in STREAMS:
-            if clock() > deadline:
-                rec = RequestRecord(athlete_id(i), stream, tick, due, None, None, "unsent", None, "deadline passed before this request was issued", payloads[stream])
-            else:
-                sent = clock()
-                latency, outcome, status, detail = send_one(client, base_url, stream, payloads[stream], clock)
-                rec = RequestRecord(athlete_id(i), stream, tick, due, sent - start, latency, outcome, status, detail, payloads[stream])
-            with lock:
-                records.append(rec)
+    def sample_job(i: int, tick: int, stream: str, due: float, kind: str) -> None:
+        stamp = start_utc + timedelta(seconds=tick / cfg.rate_hz)   # the sample's own tick, also for late deliveries
+        payload = sample_payloads(i, tick, cfg.duration_s, cfg.rate_hz, stamp)[stream]
+        if clock() > deadline:
+            rec = RequestRecord(athlete_id(i), stream, tick, due, None, None, "unsent", None, "deadline passed before this request was issued", payload, kind)
+        else:
+            sent = clock()
+            latency, outcome, status, detail = send_one(client, base_url, stream, payload, clock)
+            rec = RequestRecord(athlete_id(i), stream, tick, due, sent - start, latency, outcome, status, detail, payload, kind)
+        with lock:
+            records.append(rec)
+
+    def status_job(i: int, status_tick: int, battery: float, tick: int) -> None:
+        payload = status_payload(i, status_tick, battery, cfg.rate_hz, start_utc)
+        if clock() > deadline:
+            rec = StatusRecord(athlete_id(i), payload["device_id"], tick, payload, "unsent", None, None, "deadline passed")
+        else:
+            latency, outcome, status, detail = send_one(client, base_url, "", payload, clock, path="/api/v1/devices/status")
+            rec = StatusRecord(athlete_id(i), payload["device_id"], tick, payload, "accepted" if outcome == "accepted" else outcome, status, latency, detail)
+        with lock:
+            statuses.append(rec)
+
+    def read_job(tick: int, due: float) -> None:
+        if clock() > deadline:
+            rec = ReadRecord(tick, due, None, None, "unsent", None, {}, "deadline passed")
+        else:
+            sent = clock()
+            latency, outcome, status, body, detail = read_overview(client, base_url, cfg.team_id, clock)
+            checks = {}
+            if body is not None:
+                with lock:
+                    checks = check_overview(body, expected_ids, previous_latest)
+            rec = ReadRecord(tick, due, sent - start, latency, outcome, status, checks, detail)
+        with lock:
+            reads.append(rec)
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, cfg.workers)) as pool:
@@ -182,26 +362,42 @@ def run_load(
                 wait = due - clock()
                 if wait > 0:
                     sleep(wait)
+                rel = due - start
                 for i in range(cfg.athletes):
-                    futures.append(pool.submit(job, i, tick, due - start))
+                    for stream in STREAMS:
+                        key = (i, tick, stream)
+                        if key in plan.omitted:
+                            with lock:
+                                stamp = (start_utc + timedelta(seconds=tick / cfg.rate_hz)).isoformat()
+                                records.append(RequestRecord(athlete_id(i), stream, tick, rel, None, None, "omitted", None, "left out by the scenario on purpose", {"timestamp": stamp}, "omitted"))
+                        elif key in plan.late:
+                            continue   # delivered at its delivery tick below
+                        else:
+                            futures.append(pool.submit(sample_job, i, tick, stream, rel, "scheduled"))
+                for (i, sample_tick, stream) in plan.deliveries_at(tick):
+                    futures.append(pool.submit(sample_job, i, sample_tick, stream, rel, "late"))
+                for (i, status_tick, battery) in plan.statuses.get(tick, []):
+                    futures.append(pool.submit(status_job, i, status_tick, battery, tick))
+                if cfg.read_every_ticks and tick % cfg.read_every_ticks == 0:
+                    futures.append(pool.submit(read_job, tick, rel))
             for f in futures:
                 remaining = deadline - clock()
                 try:
                     f.result(timeout=max(0.0, remaining))
-                except Exception:  # noqa: BLE001  a worker that did not finish in time: its requests are recorded by the job as unsent or not at all
+                except Exception:  # noqa: BLE001  a worker that did not finish in time: its request is recorded by the job as unsent or not at all
                     pass
     finally:
         client.close()
     actual = clock() - start
-    # any (athlete, tick, stream) with no record at all was never issued
     seen = {(r.athlete, r.tick, r.stream) for r in records}
     for tick in range(cfg.ticks):
         for i in range(cfg.athletes):
             for stream in STREAMS:
                 if (athlete_id(i), tick, stream) not in seen:
-                    records.append(RequestRecord(athlete_id(i), stream, tick, tick / cfg.rate_hz, None, None, "unsent", None, "never issued", {}))
+                    records.append(RequestRecord(athlete_id(i), stream, tick, tick / cfg.rate_hz, None, None, "unsent", None, "never issued", {}, "late" if (i, tick, stream) in plan.late else "scheduled"))
     records.sort(key=lambda r: (r.tick, r.athlete, r.stream))
-    return records, actual, start_utc
+    reads.sort(key=lambda r: r.tick)
+    return RunResult(records, reads, statuses, actual, start_utc, plan)
 
 
 # ---- statistics ---------------------------------------------------------------------------------------------------
@@ -219,16 +415,36 @@ def summarize(values: list[float]) -> dict:
     return {"count": len(values), "p50": percentile(values, 50), "p95": percentile(values, 95), "max": max(values) if values else None, "mean": statistics.fmean(values) if values else None}
 
 
+def count_reads(reads: list[ReadRecord]) -> dict:
+    out = {"expected": len(reads), "ok": 0, "failed": 0, "unsent": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "checks_failed": {}}
+    for r in reads:
+        if r.outcome == "unsent":
+            out["unsent"] += 1
+        elif r.outcome == "ok":
+            out["ok"] += 1
+            for k, v in r.checks.items():
+                if v is False:
+                    out["checks_failed"][k] = out["checks_failed"].get(k, 0) + 1
+        else:
+            out["failed"] += 1; out[r.outcome] += 1
+    return out
+
+
 def count_outcomes(records: list[RequestRecord]) -> dict:
-    out: dict = {"expected": len(records), "attempted": 0, "accepted": 0, "failed": 0, "unsent": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "by_stream": {}, "http_status_counts": {}}
+    out: dict = {"expected": len(records), "attempted": 0, "accepted": 0, "failed": 0, "unsent": 0, "omitted_by_scenario": 0, "delivered_late": 0, "http_error": 0, "timeout": 0, "connection_error": 0, "by_stream": {}, "http_status_counts": {}}
     for s in STREAMS:
-        out["by_stream"][s] = {"expected": 0, "attempted": 0, "accepted": 0, "failed": 0, "unsent": 0, "timeout": 0}
+        out["by_stream"][s] = {"expected": 0, "attempted": 0, "accepted": 0, "failed": 0, "unsent": 0, "omitted_by_scenario": 0, "timeout": 0}
     for r in records:
         b = out["by_stream"][r.stream]
         b["expected"] += 1
+        if r.outcome == "omitted":
+            out["omitted_by_scenario"] += 1; b["omitted_by_scenario"] += 1
+            continue
         if r.outcome == "unsent":
             out["unsent"] += 1; b["unsent"] += 1
             continue
+        if r.plan == "late":
+            out["delivered_late"] += 1
         out["attempted"] += 1; b["attempted"] += 1
         if r.outcome == "accepted":
             out["accepted"] += 1; b["accepted"] += 1
@@ -310,6 +526,88 @@ def verify(client: httpx.Client, base_url: str, records: list[RequestRecord], cf
     return {"overall": overall, "per_athlete": per_athlete}
 
 
+def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRecord], statuses: list[StatusRecord], cfg: RunConfig, plan: Plan) -> dict:
+    """The final team overview against the accepted samples and the scenario: ordering, separation, recency, devices."""
+    expected_ids = [athlete_id(i) for i in range(cfg.athletes)]
+    checks: dict = {}
+    notes: list[str] = []
+    try:
+        body = client.get(f"{base_url}/api/v1/teams/{cfg.team_id}/live").json()
+    except Exception as exc:  # noqa: BLE001
+        return {"checks": {"read": False}, "notes": [f"overview read failed: {type(exc).__name__}: {exc}"]}
+    rows = {r["athlete"]["id"]: r for r in body.get("athletes", [])}
+    checks.update(check_overview(body, expected_ids, {}))
+    timed_out = {r.athlete for r in records if r.outcome == "timeout"}
+    # newest-timestamp ordering: the overview's latest per stream is the newest ACCEPTED timestamp, whatever order things arrived in
+    ordering_ok, recency_ok = True, True
+    for i in range(cfg.athletes):
+        a = athlete_id(i)
+        row = rows.get(a)
+        if row is None:
+            ordering_ok = False
+            continue
+        for s in STREAMS:
+            exp = expected_retained(records, a, s)
+            got = row[s]
+            if not exp:
+                if got is not None and a not in timed_out:
+                    ordering_ok = False
+                continue
+            if got is None or datetime.fromisoformat(got["timestamp"].replace("Z", "+00:00")) != datetime.fromisoformat(exp[-1].payload["timestamp"]):
+                if a not in timed_out:
+                    ordering_ok = False
+    checks["latest_is_newest_accepted_timestamp"] = ordering_ok
+    if plan.late:
+        late_ok = True
+        for (i, tick, s), _ in plan.late.items():
+            a = athlete_id(i); row = rows.get(a)
+            if row is None or row[s] is None:
+                late_ok = False; continue
+            latest_tick_ts = datetime.fromisoformat(row[s]["timestamp"].replace("Z", "+00:00"))
+            accepted = [r for r in records if r.athlete == a and r.stream == s and r.outcome == "accepted"]
+            newest_on_time = max((datetime.fromisoformat(r.payload["timestamp"]) for r in accepted if r.plan == "scheduled"), default=None)
+            if newest_on_time is not None and latest_tick_ts < newest_on_time:
+                late_ok = False
+        checks["older_late_arrival_did_not_replace_newer_latest"] = late_ok
+        notes.append(f"{len(plan.late)} samples were delivered late at tick 12 with their original timestamps")
+    if plan.omitted:
+        # independent stream recency: during the pause the paused stream's latest stayed older than the other stream's.
+        # Verified from the retained history: for paused athletes no tracking sample exists for the paused ticks while physiological ones do.
+        pause_ok = True
+        for i in plan.paused_tracking:
+            a = athlete_id(i)
+            try:
+                hist = client.get(f"{base_url}/api/v1/athletes/{a}/tracking/history?limit={RETENTION_CAP}").json()
+                phys_hist = client.get(f"{base_url}/api/v1/athletes/{a}/physiological/history?limit={RETENTION_CAP}").json()
+            except Exception:  # noqa: BLE001
+                pause_ok = False; continue
+            paused_ticks = sorted({t for (j, t, s) in plan.omitted if j == i and s == "tracking"})
+            iso = lambda t: datetime.fromisoformat(str(t).replace("Z", "+00:00"))  # noqa: E731  compare instants, not text
+            omitted_stamps = {iso(r.payload["timestamp"]) for r in records if r.athlete == a and r.stream == "tracking" and r.outcome == "omitted" and r.payload.get("timestamp")}
+            track_stamps = {iso(h["timestamp"]) for h in hist}
+            phys_stamps = {iso(h["timestamp"]) for h in phys_hist}
+            exp_phys = {iso(r.payload["timestamp"]) for r in records if r.athlete == a and r.stream == "physiological" and r.outcome == "accepted" and r.tick in paused_ticks}
+            if omitted_stamps & track_stamps or not exp_phys.issubset(phys_stamps):
+                pause_ok = False
+        checks["paused_stream_absent_while_other_stream_continued"] = pause_ok
+        notes.append(f"{len(plan.omitted)} tracking samples were left out on purpose for athletes {[athlete_id(i) for i in plan.paused_tracking]} (ticks 5-9)")
+    if plan.statuses:
+        dev_ok = True
+        for i in plan.status_athletes:
+            a = athlete_id(i); row = rows.get(a)
+            sent_ok = [x for x in statuses if x.athlete == a and x.outcome == "accepted"]
+            if not sent_ok:
+                continue   # nothing accepted: nothing to verify (reported in counts)
+            newest = max(sent_ok, key=lambda x: x.payload["timestamp"])
+            devs = {d["device_id"]: d for d in (row.get("devices", []) if row else [])}
+            d = devs.get(device_id(i, "physiological"))
+            if d is None or d["status"] is None or datetime.fromisoformat(d["status"]["timestamp"].replace("Z", "+00:00")) != datetime.fromisoformat(newest.payload["timestamp"]) or d["status"]["battery_percent"] != newest.payload["battery_percent"]:
+                dev_ok = False
+        checks["device_status_is_newest_report_old_resend_ignored"] = dev_ok
+        notes.append("device statuses were sent at ticks 0 and 10 and the tick-0 report was re-sent at tick 12")
+    return {"checks": checks, "notes": notes}
+
+
 # ---- isolated backend process ------------------------------------------------------------------------------------------
 
 def free_port() -> int:
@@ -371,11 +669,23 @@ def machine_context() -> dict:
     return {"platform": platform.platform(), "python": platform.python_version(), "machine": platform.machine(), "cpu_count": os.cpu_count()}
 
 
-def build_report(cfg: RunConfig, backend: dict, records: list[RequestRecord], actual_s: float, start_utc: datetime, verification: dict) -> dict:
+def build_report(cfg: RunConfig, backend: dict, records: list[RequestRecord], actual_s: float, start_utc: datetime, verification: dict,
+                 reads: list | None = None, statuses: list | None = None, setup: dict | None = None, overview_verification: dict | None = None, plan: Plan | None = None) -> dict:
+    reads = reads or []; statuses = statuses or []; plan = plan or Plan()
     sent = [r for r in records if r.sent_s is not None]
     latencies = [r.latency_s for r in sent if r.latency_s is not None]
     lateness = [r.lateness_s for r in sent if r.lateness_s is not None]
+    read_sent = [r for r in reads if r.sent_s is not None]
+    status_sent = [x for x in statuses if x.latency_s is not None]
     return {
+        "setup": setup or {},
+        "scenario": {"name": plan.name, "paused_tracking_athletes": [athlete_id(i) for i in plan.paused_tracking], "late_physiological_athletes": [athlete_id(i) for i in plan.late_physiological],
+                     "omitted_samples": len(plan.omitted), "late_deliveries": len(plan.late), "status_reports_planned": sum(len(v) for v in plan.statuses.values())},
+        "reads": {**count_reads(reads), "interval_s": cfg.read_interval_s, "team_id": cfg.team_id},
+        "read_latency_s": {**summarize([r.latency_s for r in read_sent if r.latency_s is not None]), "measured": "round trip in this process around one GET /teams/{id}/live during ingestion"},
+        "read_lateness_s": summarize([r.sent_s - r.scheduled_s for r in read_sent]),
+        "device_status_reports": {"sent": len(status_sent), "accepted": sum(1 for x in statuses if x.outcome == "accepted"), "failed": sum(1 for x in statuses if x.outcome not in ("accepted", "unsent")), "unsent": sum(1 for x in statuses if x.outcome == "unsent")},
+        "overview_verification": overview_verification or {},
         "tool": "validate_team_scale",
         "generated_at": datetime.now(UTC).isoformat(),
         "fictional_data": True,
@@ -384,7 +694,7 @@ def build_report(cfg: RunConfig, backend: dict, records: list[RequestRecord], ac
         "machine": machine_context(),
         "timing": {"requested_duration_s": cfg.duration_s, "actual_run_duration_s": actual_s, "run_start_utc": start_utc.isoformat()},
         "requests": count_outcomes(records),
-        "latency_s": {**summarize(latencies), "measured": "round trip in this process around one POST: connection reuse, serialisation, backend validation and SQLite write, response; not backend-internal time"},
+        "latency_s": {**summarize(latencies), "measured": "WRITE latency: round trip in this process around one sample POST: connection reuse, serialisation, backend validation and SQLite write, response; not backend-internal time"},
         "scheduling_lateness_s": {**summarize(lateness), "measured": "actual issue time minus due time on the monotonic clock; positive values mean the requested rate was not kept exactly"},
         "errors": [asdict(r) | {"payload": None} for r in records if r.outcome not in ("accepted", "unsent")][:200],
         "verification": verification,
@@ -392,6 +702,8 @@ def build_report(cfg: RunConfig, backend: dict, records: list[RequestRecord], ac
             "A short run on one machine; it does not establish sustained match-length behaviour or any production capacity.",
             "Latency is measured in the client process and includes connection and serialisation time; no latency pass threshold is defined.",
             "A timed-out request may or may not have been stored; the affected athlete's count checks are reported as unknown, not as passes.",
+            "Overview reads during ingestion are a few GETs per run from one client; they do not model many dashboards.",
+            "The interrupted scenario is a fixed, small disturbance (two paused tracking streams, one late physiological stream, three device statuses), not a fault-injection framework.",
             "All athletes, devices and values are fictional; this exercises software only, no hardware.",
         ],
     }
@@ -403,12 +715,26 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
     out("TEAM-SCALE VALIDATION (fictional athletes, isolated backend)")
     out(f"Backend: {report['backend']['base_url']} pid {report['backend']['pid']} db {report['backend']['db_path']}")
     out(f"Config: {c['athletes']} athletes · {c['rate_hz']:g} Hz per stream · {c['ticks']} ticks (last due at {(c['ticks'] - 1) / c['rate_hz']:.1f} s) · requested {t['requested_duration_s']:.1f} s · actual run {t['actual_run_duration_s']:.2f} s (start to last response) · timeout {c['request_timeout_s']:g} s")
-    out(f"Requests: expected {r['expected']} · attempted {r['attempted']} · accepted {r['accepted']} · failed {r['failed']} (http {r['http_error']}, timeout {r['timeout']}, connection {r['connection_error']}) · unsent {r['unsent']}")
+    out(f"Sample requests: expected {r['expected']} · attempted {r['attempted']} · accepted {r['accepted']} · failed {r['failed']} (http {r['http_error']}, timeout {r['timeout']}, connection {r['connection_error']}) · unsent {r['unsent']} · omitted by scenario {r['omitted_by_scenario']}")
     for s in STREAMS:
         b = r["by_stream"][s]
         out(f"  {s:14s} expected {b['expected']} · accepted {b['accepted']} · failed {b['failed']} · unsent {b['unsent']}")
-    out(f"Latency (client round trip per POST): p50 {f(lat['p50'])} · p95 {f(lat['p95'])} · max {f(lat['max'])} over {lat['count']} requests")
+    out(f"Write latency (client round trip per sample POST): p50 {f(lat['p50'])} · p95 {f(lat['p95'])} · max {f(lat['max'])} over {lat['count']} requests")
     out(f"Scheduling lateness (issue − due): p50 {f(late['p50'])} · p95 {f(late['p95'])} · max {f(late['max'])}")
+    rd, rl = report.get("reads", {}), report.get("read_latency_s", {})
+    if rd.get("expected"):
+        out(f"Overview reads (GET /teams/{rd['team_id']}/live every {rd['interval_s']:g} s): expected {rd['expected']} · ok {rd['ok']} · failed {rd['failed']} (timeout {rd['timeout']}) · unsent {rd['unsent']} · checks failed {rd['checks_failed'] or 'none'}")
+        out(f"Read latency: p50 {f(rl.get('p50'))} · p95 {f(rl.get('p95'))} · max {f(rl.get('max'))} over {rl.get('count')} reads")
+    sc, ds = report.get("scenario", {}), report.get("device_status_reports", {})
+    if sc.get("name") and sc["name"] != "healthy":
+        out(f"Scenario {sc['name']}: {sc['omitted_samples']} samples left out on purpose ({r['omitted_by_scenario']} counted as omitted, apart from {r['unsent']} unsent) · {sc['late_deliveries']} delivered late with original timestamps ({r['delivered_late']} delivered) · device status reports {ds.get('accepted')}/{ds.get('sent')} accepted")
+    ov = report.get("overview_verification", {})
+    if ov.get("checks"):
+        bad = [k for k, v in ov["checks"].items() if v is not True]
+        out("Overview verification: " + ("all checks passed" if not bad else "FAILED " + ", ".join(bad)) + " · " + "; ".join(ov.get("notes", [])))
+    st = report.get("setup", {})
+    if st:
+        out(f"Setup (before the timed run, not counted above): {st.get('registered')} athletes registered to team {st.get('team_id')} in {st.get('seconds', 0):.2f} s")
     out(f"Verification: {v['passed']} passed · {v['failed']} failed · {v['unknown']} unknown of {v['checked']} athletes · device ids distinct: {v['device_ids_distinct']} · athletes distinct: {v['athletes_distinct']}")
     for a in report["verification"]["per_athlete"]:
         if a["status"] != "passed":
@@ -420,6 +746,29 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
 
 # ---- command line -------------------------------------------------------------------------------------------------------
 
+def register_team(base_url: str, cfg: RunConfig, out: Callable[[str], None] = print, client: httpx.Client | None = None, clock: Callable[[], float] = time.monotonic) -> dict:
+    """Register the fictional athletes to the fictional team before the timed run. Reported apart from the measured traffic."""
+    own = client is None
+    client = client or httpx.Client(timeout=cfg.timeout_s)
+    t0 = clock(); registered = 0; existing = 0; failed = 0
+    try:
+        for i in range(cfg.athletes):
+            body = {"id": athlete_id(i), "name": f"Fictional Athlete {i + 1:02d}", "jersey_number": i + 1, "sport": "fictional", "team_id": cfg.team_id}
+            r = client.post(f"{base_url}/api/v1/athletes", json=body)
+            if r.status_code == 201:
+                registered += 1
+            elif r.status_code == 409:
+                existing += 1
+            else:
+                failed += 1
+    finally:
+        if own:
+            client.close()
+    seconds = clock() - t0
+    out(f"Setup: registered {registered} fictional athletes to team {cfg.team_id} ({existing} already present, {failed} failed) in {seconds:.2f} s; not part of the measured run.")
+    return {"team_id": cfg.team_id, "registered": registered, "already_present": existing, "failed": failed, "seconds": seconds}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--athletes", type=int, default=DEFAULT_ATHLETES, help=f"number of fictional athletes (default {DEFAULT_ATHLETES})")
@@ -429,6 +778,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=8, help="concurrent request workers (threads) (default 8)")
     p.add_argument("--report", type=Path, default=None, help="JSON report path (default reports/team-scale-<UTC time>.json, ignored by git)")
     p.add_argument("--port", type=int, default=None, help="port for the isolated backend (default: a free port)")
+    p.add_argument("--read-interval", type=float, default=DEFAULT_READ_INTERVAL_S, help=f"seconds between overview reads during ingestion; 0 disables them (default {DEFAULT_READ_INTERVAL_S:g})")
+    p.add_argument("--scenario", choices=("healthy", "interrupted"), default="healthy", help="healthy: every sample on time; interrupted: paused tracking streams, late physiological samples and device statuses for a few athletes (needs >= 3 athletes and >= 13 ticks)")
     return p
 
 
@@ -437,7 +788,12 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
     if args.athletes < 1 or args.duration <= 0 or args.rate <= 0 or args.timeout <= 0:
         out("athletes must be >= 1 and duration, rate and timeout must be positive")
         return 2
-    cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers)
+    cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers, read_interval_s=max(0.0, args.read_interval), scenario=args.scenario)
+    try:
+        plan = scenario_plan(cfg.scenario, cfg.athletes, cfg.ticks)
+    except ValueError as exc:
+        out(str(exc))
+        return 2
     report_path = args.report or (ROOT / "reports" / f"team-scale-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
     backend = IsolatedBackend(port=args.port)
     stopping = {"done": False}
@@ -453,18 +809,23 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
         out(f"Starting an isolated backend on port {backend.port} with database {backend.db_path} (the development backend is not involved)…")
         backend.start()
         backend_info = {"base_url": backend.base_url, "pid": backend.proc.pid if backend.proc else None, "db_path": str(backend.db_path), "command": backend.cmd, "retention_cap": RETENTION_CAP}
-        out(f"Sending {cfg.athletes} athletes × {cfg.ticks} ticks × 2 streams = {cfg.athletes * cfg.ticks * 2} fictional samples at {cfg.rate_hz:g} Hz…")
-        records, actual_s, start_utc = run_load(backend.base_url, cfg)
+        setup = register_team(backend.base_url, cfg, out)
+        out(f"Sending {cfg.athletes} athletes × {cfg.ticks} ticks × 2 streams = {cfg.athletes * cfg.ticks * 2} fictional samples at {cfg.rate_hz:g} Hz" + (f", scenario {cfg.scenario}" if cfg.scenario != "healthy" else "") + (f", overview read every {cfg.read_interval_s:g} s" if cfg.read_every_ticks else "") + "…")
+        result = run_load(backend.base_url, cfg, plan=plan)
+        records, actual_s, start_utc = result.records, result.actual_s, result.start_utc
         out("Reading back and verifying…")
         with httpx.Client(timeout=cfg.timeout_s) as client:
             verification = verify(client, backend.base_url, records, cfg, start_utc)
-        report = build_report(cfg, backend_info, records, actual_s, start_utc, verification)
+            overview_verification = verify_overview(client, backend.base_url, records, result.statuses, cfg, plan)
+        report = build_report(cfg, backend_info, records, actual_s, start_utc, verification, reads=result.reads, statuses=result.statuses, setup=setup, overview_verification=overview_verification, plan=plan)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
         print_summary(report, out)
         out(f"JSON report: {report_path}")
         v = report["verification"]["overall"]
-        return 0 if v["failed"] == 0 and report["requests"]["unsent"] == 0 else 1
+        ov_ok = all(x is not False for x in report["overview_verification"].get("checks", {}).values())
+        reads_ok = not report["reads"]["checks_failed"] and report["reads"]["unsent"] == 0
+        return 0 if v["failed"] == 0 and report["requests"]["unsent"] == 0 and ov_ok and reads_ok else 1
     finally:
         if not stopping["done"]:
             stopping["done"] = True
