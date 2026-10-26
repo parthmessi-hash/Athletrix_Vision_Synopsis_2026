@@ -277,19 +277,19 @@ def test_main_rejects_bad_arguments(capsys):
 # ---- overview reads and the interrupted scenario -----------------------------------------------------------------------
 
 def test_scenario_plan_is_deterministic_and_small():
-    plan = vt.scenario_plan("interrupted", 20, 30)
-    assert plan == vt.scenario_plan("interrupted", 20, 30)
+    plan = vt.scenario_plan("interrupted", 20, vt.RunConfig(athletes=20, duration_s=30))
+    assert plan == vt.scenario_plan("interrupted", 20, vt.RunConfig(athletes=20, duration_s=30))
     assert sorted(plan.omitted) == [(i, t, "tracking") for i in (0, 1) for t in range(5, 10)]
     assert plan.late == {(2, t, "physiological"): 12 for t in range(5, 10)}
     assert plan.deliveries_at(12) == [(2, 9, "physiological"), (2, 8, "physiological"), (2, 7, "physiological"), (2, 6, "physiological"), (2, 5, "physiological")], "newest first, so the older ones arrive after newer ones"
     assert sorted(plan.statuses) == [0, 10, 12] and plan.statuses[12] == plan.statuses[0]
-    assert vt.scenario_plan("healthy", 20, 30) == vt.Plan()
+    assert vt.scenario_plan("healthy", 20, vt.RunConfig(athletes=20, duration_s=30)) == vt.Plan()
     with pytest.raises(ValueError):
-        vt.scenario_plan("interrupted", 2, 30)
+        vt.scenario_plan("interrupted", 2, vt.RunConfig(athletes=2, duration_s=30))
     with pytest.raises(ValueError):
-        vt.scenario_plan("interrupted", 3, 12)
+        vt.scenario_plan("interrupted", 3, vt.RunConfig(athletes=3, duration_s=12))
     with pytest.raises(ValueError):
-        vt.scenario_plan("chaos", 20, 30)
+        vt.scenario_plan("chaos", 20, vt.RunConfig(athletes=20, duration_s=30))
 
 
 def test_scenario_accounting_distinguishes_omitted_from_unsent_and_keeps_late_timestamps():
@@ -302,7 +302,7 @@ def test_scenario_accounting_distinguishes_omitted_from_unsent_and_keeps_late_ti
         if req.url.path.endswith("/live"):
             return httpx.Response(200, json={"team_id": "fictional-team", "captured_at": START.isoformat(), "athletes": [{"athlete": {"id": vt.athlete_id(i), "name": "x", "jersey_number": i, "sport": "f", "team_id": "fictional-team"}, "physiological": None, "tracking": None, "physiological_age_seconds": None, "tracking_age_seconds": None, "devices": []} for i in range(3)]})
         return httpx.Response(200, json={})
-    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START, plan=vt.scenario_plan("interrupted", 3, 13))
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(handler), clock=clock, sleep=clock.sleep, start_utc=START, plan=vt.scenario_plan("interrupted", 3, vt.RunConfig(athletes=3, duration_s=13)))
     counts = vt.count_outcomes(res.records)
     assert counts["expected"] == 3 * 13 * 2 and counts["omitted_by_scenario"] == 10 and counts["unsent"] == 0
     assert counts["attempted"] == counts["expected"] - 10 and counts["accepted"] == counts["attempted"] and counts["delivered_late"] == 5
@@ -314,7 +314,7 @@ def test_scenario_accounting_distinguishes_omitted_from_unsent_and_keeps_late_ti
     assert all(abs(r.scheduled_s - 12.0) < 1e-9 for r in late), "but is due at the delivery tick"
     assert [x.payload["battery_percent"] for x in sorted(res.statuses, key=lambda x: (x.tick, x.athlete))] == [90.0] * 3 + [80.0] * 3 + [90.0] * 3
     assert all(x.outcome == "accepted" for x in res.statuses)
-    assert [r.tick for r in res.reads] == [0, 2, 4, 6, 8, 10, 12] and all(r.outcome == "ok" for r in res.reads)
+    assert [r.scheduled_s for r in res.reads] == [0, 2, 4, 6, 8, 10, 12] and all(r.outcome == "ok" for r in res.reads)
     # the mocked overview never shows samples, so during the pause the in-progress check must FAIL (nothing is current)
     assert [r.checks.get("paused_tracking_stale_while_physiological_current") for r in res.reads] == [None, None, None, False, False, None, None]
     counts_r = vt.count_reads(res.reads)
@@ -335,7 +335,7 @@ def test_check_overview_detects_substitution_missing_athletes_negative_ages_and_
 
 
 def test_pause_in_progress_check_only_applies_during_the_pause_and_sees_stale_tracking_with_current_physiological():
-    plan = vt.scenario_plan("interrupted", 3, 13)
+    plan = vt.scenario_plan("interrupted", 3, vt.RunConfig(athletes=3, duration_s=13))
     row = lambda i, trk_tick, phys_tick: {"athlete": {"id": vt.athlete_id(i)}, "tracking": {"timestamp": (START + timedelta(seconds=trk_tick)).isoformat()}, "physiological": {"timestamp": (START + timedelta(seconds=phys_tick)).isoformat()}}  # noqa: E731
     good = {"athletes": [row(0, 4, 7), row(1, 4, 8), row(2, 8, 8)]}
     assert vt.check_pause_in_progress(good, plan, 8, START, 1.0) is True
@@ -355,7 +355,7 @@ def test_overview_checks_depending_on_timed_out_requests_are_unknown_not_passed(
     cfg = vt.RunConfig(athletes=3, duration_s=13, rate_hz=1.0, workers=1, read_interval_s=0)
     start = datetime(2026, 10, 25, 11, 58, 0, tzinfo=UTC)
     vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
-    plan = vt.scenario_plan("interrupted", 3, 13)
+    plan = vt.scenario_plan("interrupted", 3, vt.RunConfig(athletes=3, duration_s=13))
     res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start, plan=plan)
     # pretend the late athlete's newest on-time sample and one paused athlete's physiological sample timed out (they were in fact stored)
     for r in res.records:
@@ -383,12 +383,12 @@ def test_interrupted_scenario_end_to_end_against_the_app(client):
     start = datetime(2026, 10, 25, 11, 58, 0, tzinfo=UTC)
     setup = vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
     assert setup["registered"] == 3 and setup["failed"] == 0
-    plan = vt.scenario_plan("interrupted", 3, 13)
+    plan = vt.scenario_plan("interrupted", 3, vt.RunConfig(athletes=3, duration_s=13))
     res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start, plan=plan)
     counts = vt.count_outcomes(res.records)
     assert counts["failed"] == 0 and counts["unsent"] == 0 and counts["omitted_by_scenario"] == 10 and counts["delivered_late"] == 5
     assert all(r.outcome == "ok" and all(v is True for v in r.checks.values()) for r in res.reads), [r.checks for r in res.reads]
-    in_pause = {r.tick: r.checks.get("paused_tracking_stale_while_physiological_current") for r in res.reads}
+    in_pause = {r.scheduled_s: r.checks.get("paused_tracking_stale_while_physiological_current") for r in res.reads}
     assert in_pause == {0: None, 2: None, 4: None, 6: True, 8: True, 10: None, 12: None}, "the pause was visible in the live overview while it was happening"
     assert vt.count_reads(res.reads)["checks_evaluated"]["paused_tracking_stale_while_physiological_current"] == 2
     v = vt.verify(Borrowed2(client), "", res.records, cfg, res.start_utc)
@@ -422,3 +422,66 @@ class BorrowedAll:
 
     def get(self, url, params=None):
         return self.client.get(url.replace("http://test", ""), params=params)
+
+
+# ---- different physiological and tracking rates --------------------------------------------------------------------------
+
+def test_rate_precedence_per_stream_option_overrides_rate():
+    cfg = vt.RunConfig(rate_hz=2.0)
+    assert cfg.rate_for("physiological") == 2.0 and cfg.rate_for("tracking") == 2.0
+    cfg = vt.RunConfig(rate_hz=2.0, tracking_rate_hz=10.0)
+    assert cfg.rate_for("physiological") == 2.0 and cfg.rate_for("tracking") == 10.0
+    cfg = vt.RunConfig(duration_s=4, physiological_rate_hz=1.0, tracking_rate_hz=5.0, athletes=3)
+    assert vt.stream_ticks(cfg, "physiological") == 4 and vt.stream_ticks(cfg, "tracking") == 20 and cfg.expected_samples == 3 * (4 + 20)
+    args = vt.build_parser().parse_args(["--rate", "2", "--tracking-rate", "10"])
+    assert (args.rate, args.physiological_rate, args.tracking_rate) == (2.0, None, 10.0)
+
+
+def test_unequal_rates_schedule_each_stream_on_its_own_grid_without_duplicating_measurements():
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=2, duration_s=3, physiological_rate_hz=1.0, tracking_rate_hz=5.0, workers=1, read_interval_s=0)
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(lambda req: httpx.Response(200, json={})), clock=clock, sleep=clock.sleep, start_utc=START)
+    phys = [r for r in res.records if r.stream == "physiological"]; trk = [r for r in res.records if r.stream == "tracking"]
+    assert len(phys) == 2 * 3 and len(trk) == 2 * 15 and all(r.outcome == "accepted" for r in res.records)
+    assert sorted({r.payload["timestamp"] for r in phys}) == [(START + timedelta(seconds=t)).isoformat() for t in range(3)], "physiological samples sit on the 1 Hz grid only"
+    assert sorted({r.payload["timestamp"] for r in trk}) == [(START + timedelta(seconds=t / 5)).isoformat() for t in range(15)], "tracking samples sit on the 5 Hz grid"
+    assert all("heart_rate_bpm" not in r.payload for r in trk) and all("speed_mps" not in r.payload for r in phys), "no measurement is duplicated onto the other stream's grid"
+    assert sorted({round(r.scheduled_s, 3) for r in trk}) == [round(t / 5, 3) for t in range(15)]
+    rp, rt = vt.stream_report(res.records, "physiological", 1.0, 2), vt.stream_report(res.records, "tracking", 5.0, 2)
+    assert rp["expected"] == 6 and rp["measurement_interval_s"] == 3.0 and abs(rp["delivered_rate_hz"] - 1.0) < 1e-9
+    assert rt["expected"] == 30 and abs(rt["measurement_interval_s"] - 3.0) < 1e-9 and abs(rt["delivered_rate_hz"] - 5.0) < 1e-9
+    assert rp["unknown_timeout"] == 0 and rp["omitted_by_scenario"] == 0 and rp["unsent"] == 0
+
+
+def test_interrupted_scenario_maps_onto_each_streams_grid_and_reads_keep_their_own_cadence():
+    cfg = vt.RunConfig(athletes=3, duration_s=13, physiological_rate_hz=1.0, tracking_rate_hz=10.0, workers=1, read_interval_s=2.0)
+    plan = vt.scenario_plan("interrupted", 3, cfg)
+    assert sorted({t for (i, t, s) in plan.omitted}) == list(range(50, 100)) and len(plan.omitted) == 100, "the 5-10 s pause is 50 tracking ticks at 10 Hz"
+    assert plan.late == {(2, t, "physiological"): 12 for t in range(5, 10)}
+    clock = FakeClock()
+    body = {"team_id": "fictional-team", "captured_at": START.isoformat(), "athletes": []}
+    res = vt.run_load("http://test", cfg, make_client=lambda: mock_client(lambda req: httpx.Response(200, json=body if str(req.url).endswith("/live") else {})), clock=clock, sleep=clock.sleep, start_utc=START, plan=plan)
+    counts = vt.count_outcomes(res.records)
+    assert counts["expected"] == 3 * (13 + 130) and counts["omitted_by_scenario"] == 100 and counts["delivered_late"] == 5 and counts["unsent"] == 0
+    assert [r.scheduled_s for r in res.reads] == [0, 2, 4, 6, 8, 10, 12], "overview reads keep their 2 s cadence whatever the sample rates"
+    assert [x.tick for x in sorted(res.statuses, key=lambda x: x.tick)][::3] == [0, 10, 12], "device statuses keep their own cadence in seconds"
+    late = [r for r in res.records if r.plan == "late"]
+    assert all(abs(r.scheduled_s - 12.0) < 1e-9 and r.payload["timestamp"] == (START + timedelta(seconds=r.tick)).isoformat() for r in late)
+
+
+def test_unequal_rates_end_to_end_with_window_and_summary_on_each_grid(client):
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=2, duration_s=3, physiological_rate_hz=1.0, tracking_rate_hz=10.0, workers=1, read_interval_s=0)
+    start = datetime(2026, 10, 25, 11, 58, 0, tzinfo=UTC)
+    vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
+    res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start)
+    assert vt.count_outcomes(res.records)["accepted"] == 2 * (3 + 30)
+    v = vt.verify(Borrowed2(client), "", res.records, cfg, res.start_utc)
+    assert v["overall"]["failed"] == 0 and v["overall"]["unknown"] == 0, v
+    a = v["per_athlete"][0]
+    assert a["retained"]["physiological"] == {"retained": 3, "span_s": 2.0, "capped": False} and a["retained"]["tracking"] == {"retained": 30, "span_s": 2.9, "capped": False}
+    report = vt.build_report(cfg, {"base_url": "x", "pid": 0, "db_path": "x", "command": [], "retention_cap": 300}, res.records, res.actual_s, res.start_utc, v)
+    assert report["streams"]["tracking"]["requested_rate_hz"] == 10.0 and report["retained_spans"]["tracking"]["rows"] == [30, 30]
+    lines = []
+    vt.print_summary(report, lines.append)
+    assert any("tracking       requested 10 Hz" in l for l in lines) and any("retained per athlete: 30-30 rows spanning 2.9-2.9 s" in l for l in lines)

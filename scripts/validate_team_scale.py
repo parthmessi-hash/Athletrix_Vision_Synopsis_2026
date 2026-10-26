@@ -31,8 +31,14 @@ WHAT IT IS NOT
      verification then checks that an older late arrival never replaces a newer latest reading, that stream recency
      stays independent, and that the latest device status is the newest report.
 
+  7. Each stream has its own monotonic schedule and rate (--physiological-rate / --tracking-rate, or --rate for
+     both). Samples are generated only on their own stream's grid: a 10 Hz tracking stream never duplicates
+     physiological measurements, and every sample carries the timestamp of its own tick. Overview reads and the
+     scenario's device-status reports keep their own cadence, in seconds, independent of the sample rates.
+
 USAGE
     python scripts/validate_team_scale.py                      # 20 athletes, ~15 s, 1 Hz, overview read every 2 s
+    python scripts/validate_team_scale.py --athletes 20 --duration 40 --physiological-rate 1 --tracking-rate 10
     python scripts/validate_team_scale.py --athletes 11 --duration 15
     python scripts/validate_team_scale.py --athletes 20 --duration 60                       # healthy run with reads
     python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted
@@ -167,52 +173,74 @@ class Plan:
     def deliveries_at(self, tick: int) -> list[tuple[int, int, str]]:
         return sorted([k for k, d in self.late.items() if d == tick], key=lambda k: (-k[1], k[0], k[2]))  # newest first, so older ones arrive after newer
 
+    @property
+    def delivery_ticks(self) -> set:
+        return set(self.late.values())
 
-def scenario_plan(name: str, athletes: int, ticks: int) -> Plan:
-    """A small, reproducible disturbance; identical for the same arguments. Needs at least 3 athletes and 13 ticks."""
+
+PAUSE_WINDOW_S = (5.0, 10.0)      # tracking paused for samples due in [5 s, 10 s)
+LATE_DELIVERY_S = 12.0            # late physiological samples (due in the pause window) are delivered at 12 s
+STATUS_REPORT_S = (0.0, 10.0)     # device statuses reported at these seconds; the first one is re-sent at LATE_DELIVERY_S
+
+
+def stream_ticks(cfg: "RunConfig", stream: str) -> int:
+    return max(1, int(round(cfg.duration_s * cfg.rate_for(stream))))
+
+
+def ticks_in(cfg: "RunConfig", stream: str, lo_s: float, hi_s: float) -> list[int]:
+    """Ticks of a stream whose due time lies in [lo_s, hi_s)."""
+    rate = cfg.rate_for(stream)
+    return [t for t in range(stream_ticks(cfg, stream)) if lo_s <= t / rate < hi_s]
+
+
+def tick_at(cfg: "RunConfig", stream: str, seconds: float) -> int:
+    return int(round(seconds * cfg.rate_for(stream)))
+
+
+def scenario_plan(name: str, athletes: int, cfg: "RunConfig") -> Plan:
+    """A small, reproducible disturbance defined in seconds and mapped onto each stream's own grid; identical for the same arguments.
+
+    Needs at least 3 athletes and a run of at least 13 s (so the late delivery at 12 s and the status re-send happen).
+    """
     if name == "healthy":
         return Plan()
     if name != "interrupted":
         raise ValueError(f"unknown scenario {name!r}")
-    if athletes < 3 or ticks < 13:
-        raise ValueError("the interrupted scenario needs at least 3 athletes and 13 ticks (13 s at 1 Hz)")
+    if athletes < 3 or cfg.duration_s < 13:
+        raise ValueError("the interrupted scenario needs at least 3 athletes and a duration of at least 13 s")
     plan = Plan(name="interrupted")
-    pause = range(5, 10)                      # ticks 5..9
     plan.paused_tracking = [0, 1]
     plan.late_physiological = [2]
     plan.status_athletes = [0, 1, 2]
-    plan.status_ticks = (0, 10)
+    plan.status_ticks = STATUS_REPORT_S
     for i in plan.paused_tracking:
-        for t in pause:
+        for t in ticks_in(cfg, "tracking", *PAUSE_WINDOW_S):
             plan.omitted.add((i, t, "tracking"))
+    late_tick = tick_at(cfg, "physiological", LATE_DELIVERY_S)
     for i in plan.late_physiological:
-        for t in pause:
-            plan.late[(i, t, "physiological")] = 12   # delivered at tick 12, after the on-time ticks 10 and 11
-    plan.statuses = {0: [(i, 0, 90.0) for i in plan.status_athletes], 10: [(i, 10, 80.0) for i in plan.status_athletes], 12: [(i, 0, 90.0) for i in plan.status_athletes]}  # tick 12 re-sends the old report
+        for t in ticks_in(cfg, "physiological", *PAUSE_WINDOW_S):
+            plan.late[(i, t, "physiological")] = late_tick
+    plan.statuses = {STATUS_REPORT_S[0]: [(i, STATUS_REPORT_S[0], 90.0) for i in plan.status_athletes], STATUS_REPORT_S[1]: [(i, STATUS_REPORT_S[1], 80.0) for i in plan.status_athletes], LATE_DELIVERY_S: [(i, STATUS_REPORT_S[0], 90.0) for i in plan.status_athletes]}  # keyed by delivery second
     return plan
 
 
-def status_payload(i: int, status_tick: int, battery: float, rate_hz: float, start_utc: datetime) -> dict:
-    return {"device_id": device_id(i, "physiological"), "timestamp": (start_utc + timedelta(seconds=status_tick / rate_hz)).isoformat(), "connected": True, "battery_percent": battery, "signal_quality": 0.9}
+def status_payload(i: int, status_s: float, battery: float, start_utc: datetime) -> dict:
+    return {"device_id": device_id(i, "physiological"), "timestamp": (start_utc + timedelta(seconds=status_s)).isoformat(), "connected": True, "battery_percent": battery, "signal_quality": 0.9}
 
 
 # ---- overview reads ------------------------------------------------------------------------------------------------
 
-def pause_window(plan: "Plan") -> tuple[int, int] | None:
-    """(first, last) paused tick of the scenario's tracking pause, or None when nothing is paused."""
-    ticks = sorted({t for (_, t, s) in plan.omitted if s == "tracking"})
-    return (ticks[0], ticks[-1]) if ticks else None
-
-
-def check_pause_in_progress(body: dict, plan: "Plan", tick: int, start_utc: datetime, rate_hz: float) -> bool | None:
+def check_pause_in_progress(body: dict, plan: "Plan", at_s: float, start_utc: datetime, physiological_rate_hz: float) -> bool | None:
     """While the tracking pause is in progress, a paused athlete's tracking reading must be from before the pause while the
-    physiological reading is current (at most one tick old). None when the read falls outside the window where this is decidable."""
-    window = pause_window(plan)
-    if window is None or not (window[0] < tick <= window[1]):
+    physiological reading is current (at most one physiological tick old). None when the read is outside the decidable window."""
+    if not plan.paused_tracking:
+        return None
+    lo, hi = PAUSE_WINDOW_S
+    if not (lo < at_s < hi):          # at hi the first post-pause tracking tick is due, so the pause is no longer decidable
         return None
     rows = {r["athlete"]["id"]: r for r in body.get("athletes", [])}
-    stale_before = start_utc + timedelta(seconds=window[0] / rate_hz)       # tracking must be older than the first paused tick
-    current_after = start_utc + timedelta(seconds=(tick - 1) / rate_hz)     # physiological must be at least this recent
+    stale_before = start_utc + timedelta(seconds=lo)                              # tracking must be older than the pause start
+    current_after = start_utc + timedelta(seconds=at_s - 1.0 / physiological_rate_hz)  # physiological must be at least this recent
     for i in plan.paused_tracking:
         row = rows.get(athlete_id(i))
         if row is None or row["tracking"] is None or row["physiological"] is None:
@@ -294,14 +322,22 @@ class RunConfig:
     read_interval_s: float = DEFAULT_READ_INTERVAL_S   # overview read every this many seconds of due time; 0 disables reads
     scenario: str = "healthy"
     team_id: str = TEAM_ID
+    physiological_rate_hz: float | None = None   # None: use rate_hz
+    tracking_rate_hz: float | None = None        # None: use rate_hz
+
+    def rate_for(self, stream: str) -> float:
+        """The stream's own rate: the explicit per-stream option when given, otherwise --rate."""
+        v = self.physiological_rate_hz if stream == "physiological" else self.tracking_rate_hz
+        return self.rate_hz if v is None else v
 
     @property
     def ticks(self) -> int:
-        return max(1, int(round(self.duration_s * self.rate_hz)))
+        """Physiological ticks (kept for callers that think in one grid; use stream_ticks for the tracking grid)."""
+        return stream_ticks(self, "physiological")
 
     @property
-    def read_every_ticks(self) -> int:
-        return 0 if self.read_interval_s <= 0 else max(1, int(round(self.read_interval_s * self.rate_hz)))
+    def expected_samples(self) -> int:
+        return self.athletes * sum(stream_ticks(self, s) for s in STREAMS)
 
 
 @dataclass
@@ -324,12 +360,14 @@ def run_load(
     start_utc: datetime | None = None,
     plan: Plan | None = None,
 ) -> RunResult:
-    """Send every scheduled sample (and the scenario's late deliveries, statuses and overview reads) on a monotonic schedule.
+    """Send every scheduled sample (and the scenario's late deliveries, statuses and overview reads) on monotonic schedules.
 
-    Ticks are due at start + tick / rate. A tick's work is handed to a small thread pool when due (never earlier); lateness
-    is how long after its due time a request was actually issued. Work that could not be issued before the deadline (last
-    due time + grace) is recorded as unsent, never as a success. Samples the scenario leaves out are recorded as omitted,
-    apart from unsent ones. Late deliveries keep the timestamp of the tick they belong to; only their due time moves.
+    Each stream has its own grid: tick t of a stream is due at start + t / rate_for(stream) and carries that instant as
+    its timestamp. Overview reads are due every read_interval_s and statuses at their scenario seconds, independently of
+    the sample rates. Work is handed to a small thread pool when due (never earlier); lateness is how long after its due
+    time a request was actually issued. Work that could not be issued before the deadline (last due time + grace) is
+    recorded as unsent, never as a success. Samples the scenario leaves out are recorded as omitted, apart from unsent
+    ones. Late deliveries keep the timestamp of the tick they belong to; only their due time moves.
     """
     start_utc = start_utc or datetime.now(UTC)
     plan = plan or Plan()
@@ -339,14 +377,42 @@ def run_load(
     lock = threading.Lock()
     make_client = make_client or (lambda: httpx.Client(timeout=cfg.timeout_s))
     client = make_client()
-    start = clock()
-    deadline = start + cfg.ticks / cfg.rate_hz + cfg.grace_s
     expected_ids = [athlete_id(i) for i in range(cfg.athletes)]
     previous_latest: dict = {}
+    rates = {stream: cfg.rate_for(stream) for stream in STREAMS}
+
+    # ---- the schedule: (due_s, order, kind, payload) sorted by due time; samples first at equal instants ----
+    events: list[tuple[float, int, str, tuple]] = []
+    for stream in STREAMS:
+        for tick in range(stream_ticks(cfg, stream)):
+            due = tick / rates[stream]
+            for i in range(cfg.athletes):
+                key = (i, tick, stream)
+                if key in plan.omitted:
+                    events.append((due, 0, "omitted", (i, tick, stream)))
+                elif key in plan.late:
+                    continue   # delivered at its delivery tick below
+                else:
+                    events.append((due, 0, "sample", (i, tick, stream, "scheduled")))
+    for (i, tick, stream), delivery_tick in plan.late.items():
+        events.append((delivery_tick / rates[stream], 1, "sample", (i, tick, stream, "late")))
+    for second, items in plan.statuses.items():
+        for (i, status_s, battery) in items:
+            events.append((float(second), 2, "status", (i, status_s, battery)))
+    if cfg.read_interval_s > 0:
+        n_reads = int(cfg.duration_s // cfg.read_interval_s) + 1
+        for k in range(n_reads):
+            due = k * cfg.read_interval_s
+            if due < cfg.duration_s:
+                events.append((due, 3, "read", (k,)))
+    events.sort(key=lambda e: (e[0], e[1]))
+    last_due = max((e[0] for e in events), default=0.0)
+    start = clock()
+    deadline = start + last_due + cfg.grace_s
 
     def sample_job(i: int, tick: int, stream: str, due: float, kind: str) -> None:
-        stamp = start_utc + timedelta(seconds=tick / cfg.rate_hz)   # the sample's own tick, also for late deliveries
-        payload = sample_payloads(i, tick, cfg.duration_s, cfg.rate_hz, stamp)[stream]
+        stamp = start_utc + timedelta(seconds=tick / rates[stream])   # the sample's own tick, also for late deliveries
+        payload = sample_payloads(i, tick, cfg.duration_s, rates[stream], stamp)[stream]
         if clock() > deadline:
             rec = RequestRecord(athlete_id(i), stream, tick, due, None, None, "unsent", None, "deadline passed before this request was issued", payload, kind)
         else:
@@ -356,19 +422,19 @@ def run_load(
         with lock:
             records.append(rec)
 
-    def status_job(i: int, status_tick: int, battery: float, tick: int) -> None:
-        payload = status_payload(i, status_tick, battery, cfg.rate_hz, start_utc)
+    def status_job(i: int, status_s: float, battery: float, due: float) -> None:
+        payload = status_payload(i, status_s, battery, start_utc)
         if clock() > deadline:
-            rec = StatusRecord(athlete_id(i), payload["device_id"], tick, payload, "unsent", None, None, "deadline passed")
+            rec = StatusRecord(athlete_id(i), payload["device_id"], int(due), payload, "unsent", None, None, "deadline passed")
         else:
             latency, outcome, status, detail = send_one(client, base_url, "", payload, clock, path="/api/v1/devices/status")
-            rec = StatusRecord(athlete_id(i), payload["device_id"], tick, payload, "accepted" if outcome == "accepted" else outcome, status, latency, detail)
+            rec = StatusRecord(athlete_id(i), payload["device_id"], int(due), payload, "accepted" if outcome == "accepted" else outcome, status, latency, detail)
         with lock:
             statuses.append(rec)
 
-    def read_job(tick: int, due: float) -> None:
+    def read_job(k: int, due: float) -> None:
         if clock() > deadline:
-            rec = ReadRecord(tick, due, None, None, "unsent", None, {}, "deadline passed")
+            rec = ReadRecord(k, due, None, None, "unsent", None, {}, "deadline passed")
         else:
             sent = clock()
             latency, outcome, status, body, detail = read_overview(client, base_url, cfg.team_id, clock)
@@ -376,39 +442,33 @@ def run_load(
             if body is not None:
                 with lock:
                     checks = check_overview(body, expected_ids, previous_latest)
-                in_pause = check_pause_in_progress(body, plan, tick, start_utc, cfg.rate_hz)
+                in_pause = check_pause_in_progress(body, plan, due, start_utc, rates["physiological"])
                 if in_pause is not None:
                     checks["paused_tracking_stale_while_physiological_current"] = in_pause
-            rec = ReadRecord(tick, due, sent - start, latency, outcome, status, checks, detail)
+            rec = ReadRecord(k, due, sent - start, latency, outcome, status, checks, detail)
         with lock:
             reads.append(rec)
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, cfg.workers)) as pool:
             futures = []
-            for tick in range(cfg.ticks):
-                due = start + tick / cfg.rate_hz
-                wait = due - clock()
+            for due, _order, kind, args in events:
+                wait = start + due - clock()
                 if wait > 0:
                     sleep(wait)
-                rel = due - start
-                for i in range(cfg.athletes):
-                    for stream in STREAMS:
-                        key = (i, tick, stream)
-                        if key in plan.omitted:
-                            with lock:
-                                stamp = (start_utc + timedelta(seconds=tick / cfg.rate_hz)).isoformat()
-                                records.append(RequestRecord(athlete_id(i), stream, tick, rel, None, None, "omitted", None, "left out by the scenario on purpose", {"timestamp": stamp}, "omitted"))
-                        elif key in plan.late:
-                            continue   # delivered at its delivery tick below
-                        else:
-                            futures.append(pool.submit(sample_job, i, tick, stream, rel, "scheduled"))
-                for (i, sample_tick, stream) in plan.deliveries_at(tick):
-                    futures.append(pool.submit(sample_job, i, sample_tick, stream, rel, "late"))
-                for (i, status_tick, battery) in plan.statuses.get(tick, []):
-                    futures.append(pool.submit(status_job, i, status_tick, battery, tick))
-                if cfg.read_every_ticks and tick % cfg.read_every_ticks == 0:
-                    futures.append(pool.submit(read_job, tick, rel))
+                if kind == "omitted":
+                    i, tick, stream = args
+                    with lock:
+                        stamp = (start_utc + timedelta(seconds=tick / rates[stream])).isoformat()
+                        records.append(RequestRecord(athlete_id(i), stream, tick, due, None, None, "omitted", None, "left out by the scenario on purpose", {"timestamp": stamp}, "omitted"))
+                elif kind == "sample":
+                    i, tick, stream, plan_kind = args
+                    futures.append(pool.submit(sample_job, i, tick, stream, due, plan_kind))
+                elif kind == "status":
+                    i, status_s, battery = args
+                    futures.append(pool.submit(status_job, i, status_s, battery, due))
+                else:
+                    futures.append(pool.submit(read_job, args[0], due))
             for f in futures:
                 remaining = deadline - clock()
                 try:
@@ -419,12 +479,12 @@ def run_load(
         client.close()
     actual = clock() - start
     seen = {(r.athlete, r.tick, r.stream) for r in records}
-    for tick in range(cfg.ticks):
-        for i in range(cfg.athletes):
-            for stream in STREAMS:
+    for stream in STREAMS:
+        for tick in range(stream_ticks(cfg, stream)):
+            for i in range(cfg.athletes):
                 if (athlete_id(i), tick, stream) not in seen:
-                    records.append(RequestRecord(athlete_id(i), stream, tick, tick / cfg.rate_hz, None, None, "unsent", None, "never issued", {}, "late" if (i, tick, stream) in plan.late else "scheduled"))
-    records.sort(key=lambda r: (r.tick, r.athlete, r.stream))
+                    records.append(RequestRecord(athlete_id(i), stream, tick, tick / rates[stream], None, None, "unsent", None, "never issued", {}, "late" if (i, tick, stream) in plan.late else "scheduled"))
+    records.sort(key=lambda r: (r.scheduled_s, r.athlete, r.stream, r.tick))
     reads.sort(key=lambda r: r.tick)
     return RunResult(records, reads, statuses, actual, start_utc, plan)
 
@@ -458,6 +518,29 @@ def count_reads(reads: list[ReadRecord]) -> dict:
         else:
             out["failed"] += 1; out[r.outcome] += 1
     return out
+
+
+def stream_report(records: list[RequestRecord], stream: str, requested_rate_hz: float, athletes: int) -> dict:
+    """Per-stream accounting, delivered rate per athlete over the stream's own schedule span, lateness and latency."""
+    mine = [r for r in records if r.stream == stream]
+    sent = [r for r in mine if r.sent_s is not None]
+    accepted = [r for r in mine if r.outcome == "accepted"]
+    dues = [r.scheduled_s for r in mine if r.plan != "late"]
+    interval = (max(dues) - min(dues) + 1.0 / requested_rate_hz) if dues else 0.0   # the schedule span: first due to one period after the last due
+    return {
+        "requested_rate_hz": requested_rate_hz,
+        "expected": len(mine), "attempted": len(sent), "accepted": len(accepted),
+        "failed": sum(1 for r in mine if r.outcome in ("http_error", "connection_error")),
+        "unknown_timeout": sum(1 for r in mine if r.outcome == "timeout"),
+        "omitted_by_scenario": sum(1 for r in mine if r.outcome == "omitted"),
+        "unsent": sum(1 for r in mine if r.outcome == "unsent"),
+        "delivered_late": sum(1 for r in mine if r.plan == "late" and r.outcome == "accepted"),
+        "measurement_interval_s": interval,
+        "delivered_rate_hz": (len(accepted) / interval / max(1, athletes)) if interval > 0 else None,
+        "delivered_rate_note": "accepted samples per athlete divided by the stream's schedule span (first due time to one period after the last due); omitted, failed and unsent samples lower it",
+        "latency_s": summarize([r.latency_s for r in sent if r.latency_s is not None]),
+        "scheduling_lateness_s": summarize([r.lateness_s for r in sent if r.lateness_s is not None]),
+    }
 
 
 def count_outcomes(records: list[RequestRecord]) -> dict:
@@ -510,6 +593,7 @@ def verify(client: httpx.Client, base_url: str, records: list[RequestRecord], cf
         timed_out = any(r.athlete == a and r.outcome == "timeout" for r in records)
         checks: dict[str, bool | None] = {}
         notes: list[str] = []
+        spans: dict = {}
         try:
             retained = client.get(f"{base_url}/api/v1/athletes/{a}/retained-data").json()
             exp = {s: expected_retained(records, a, s) for s in STREAMS}
@@ -523,15 +607,23 @@ def verify(client: httpx.Client, base_url: str, records: list[RequestRecord], cf
                     seen_devices.setdefault(a, set()).add(latest["device_id"])
                     history = client.get(f"{base_url}/api/v1/athletes/{a}/{s}/history?limit={RETENTION_CAP}").json()
                     checks[f"{s}_history_only_this_athlete"] = all(h["athlete_id"] == a for h in history)
+            spans = {}
+            for s in STREAMS:
+                lo, hi = retained[s]["earliest_timestamp"], retained[s]["latest_timestamp"]
+                spans[s] = {"retained": retained[s]["sample_count"], "span_s": (datetime.fromisoformat(hi.replace("Z", "+00:00")) - datetime.fromisoformat(lo.replace("Z", "+00:00"))).total_seconds() if lo and hi else None,
+                            "capped": retained[s]["sample_count"] >= RETENTION_CAP}
+            notes.append("retained: " + "; ".join(f"{s} {v['retained']} rows spanning {v['span_s']} s" + (" (at the 300-row cap)" if v["capped"] else "") for s, v in spans.items()))
             if exp["physiological"] or exp["tracking"]:
                 last_ts = max((r.payload["timestamp"] for s in STREAMS for r in exp[s]), key=lambda t: datetime.fromisoformat(t))
-                window_s = min(300, max(1, int(cfg.ticks / cfg.rate_hz) + 1))
+                window_s = min(300, max(1, int(cfg.duration_s) + 1))
+                end_dt = datetime.fromisoformat(last_ts)
+                in_window = {s: [r for r in exp[s] if datetime.fromisoformat(r.payload["timestamp"]) >= end_dt - timedelta(seconds=window_s)] for s in STREAMS}  # each stream on its own grid, after its own cap
                 win = client.get(f"{base_url}/api/v1/athletes/{a}/window", params={"seconds": window_s, "end": last_ts}).json()
-                checks["window_has_both_streams"] = len(win["physiological_samples"]) == len(exp["physiological"]) and len(win["tracking_samples"]) == len(exp["tracking"])
+                checks["window_has_both_streams"] = len(win["physiological_samples"]) == len(in_window["physiological"]) and len(win["tracking_samples"]) == len(in_window["tracking"])
                 summary = client.get(f"{base_url}/api/v1/athletes/{a}/summary", params={"seconds": window_s, "end": last_ts}).json()
                 p, t = summary["physiological"], summary["tracking"]
-                hrs = [r.payload["heart_rate_bpm"] for r in exp["physiological"]]
-                speeds = [r.payload["speed_mps"] for r in exp["tracking"]]
+                hrs = [r.payload["heart_rate_bpm"] for r in in_window["physiological"]]
+                speeds = [r.payload["speed_mps"] for r in in_window["tracking"]]
                 checks["summary_counts"] = p["sample_count"] == len(hrs) and p["heart_rate_count"] == len(hrs) and t["sample_count"] == len(speeds)
                 checks["summary_heart_rate_mean"] = (p["heart_rate_mean_bpm"] is None and not hrs) or (hrs and abs(p["heart_rate_mean_bpm"] - statistics.fmean(hrs)) < 1e-6)
                 checks["summary_speed_peak"] = (t["speed_peak_mps"] is None and not speeds) or (speeds and abs(t["speed_peak_mps"] - max(speeds)) < 1e-9)
@@ -548,7 +640,7 @@ def verify(client: httpx.Client, base_url: str, records: list[RequestRecord], cf
                     checks[k] = None
         status = "unknown" if any(v is None for v in checks.values()) and not any(v is False for v in checks.values()) else ("failed" if any(v is False for v in checks.values()) else "passed")
         overall["checked"] += 1; overall[status] += 1
-        per_athlete.append({"athlete_id": a, "status": status, "checks": checks, "notes": notes})
+        per_athlete.append({"athlete_id": a, "status": status, "checks": checks, "notes": notes, "retained": spans})
     # athletes and devices separate: every athlete's latest samples name its own ids (checked above) and no device id is shared
     all_devices = [d for ds in seen_devices.values() for d in ds]
     overall["device_ids_distinct"] = len(all_devices) == len(set(all_devices))
@@ -608,7 +700,7 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
             if newest_on_time is not None and latest_tick_ts < newest_on_time:
                 late_ok = False
         checks["older_late_arrival_did_not_replace_newer_latest"] = settle(late_ok, late_uncertain)
-        notes.append(f"{len(plan.late)} samples were delivered late at tick 12 with their original timestamps")
+        notes.append(f"{len(plan.late)} physiological samples were delivered late at {LATE_DELIVERY_S:g} s with their original timestamps")
     if plan.omitted:
         # independent stream recency, settled from the retained history after the run: for paused athletes no tracking sample
         # exists for the paused ticks while their physiological samples for those ticks do. The in-progress view is checked
@@ -634,7 +726,7 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
             elif not exp_phys.issubset(phys_stamps) and a not in timed_out:
                 pause_ok = False
         checks["paused_stream_absent_while_other_stream_continued"] = settle(pause_ok, pause_uncertain)
-        notes.append(f"{len(plan.omitted)} tracking samples were left out on purpose for athletes {[athlete_id(i) for i in plan.paused_tracking]} (ticks 5-9)")
+        notes.append(f"{len(plan.omitted)} tracking samples were left out on purpose for athletes {[athlete_id(i) for i in plan.paused_tracking]} (due between {PAUSE_WINDOW_S[0]:g} s and {PAUSE_WINDOW_S[1]:g} s)")
     if plan.statuses:
         dev_ok, dev_uncertain, dev_checked = True, False, 0
         for i in plan.status_athletes:
@@ -653,7 +745,7 @@ def verify_overview(client: httpx.Client, base_url: str, records: list[RequestRe
                 if not dev_uncertain:
                     dev_ok = False
         checks["device_status_is_newest_report_old_resend_ignored"] = settle(dev_ok, dev_uncertain) if dev_checked else None
-        notes.append("device statuses were sent at ticks 0 and 10 and the tick-0 report was re-sent at tick 12")
+        notes.append(f"device statuses were sent at {STATUS_REPORT_S[0]:g} s and {STATUS_REPORT_S[1]:g} s and the first report was re-sent at {LATE_DELIVERY_S:g} s")
     if unknown_notes:
         notes.extend(unknown_notes)
     return {"checks": checks, "notes": notes}
@@ -740,7 +832,11 @@ def build_report(cfg: RunConfig, backend: dict, records: list[RequestRecord], ac
         "tool": "validate_team_scale",
         "generated_at": datetime.now(UTC).isoformat(),
         "fictional_data": True,
-        "config": {"athletes": cfg.athletes, "requested_duration_s": cfg.duration_s, "rate_hz": cfg.rate_hz, "ticks": cfg.ticks, "request_timeout_s": cfg.timeout_s, "workers": cfg.workers, "grace_s": cfg.grace_s, "source": SOURCE},
+        "config": {"athletes": cfg.athletes, "requested_duration_s": cfg.duration_s, "rate_hz": cfg.rate_hz, "physiological_rate_hz": cfg.rate_for("physiological"), "tracking_rate_hz": cfg.rate_for("tracking"),
+                   "ticks": {s: stream_ticks(cfg, s) for s in STREAMS}, "request_timeout_s": cfg.timeout_s, "workers": cfg.workers, "grace_s": cfg.grace_s, "source": SOURCE,
+                   "retention_cap_note": "the newest-300 cap is a row count per stream, not a duration: at 10 Hz it spans 30 s, at 1 Hz 300 s"},
+        "streams": {s: stream_report(records, s, cfg.rate_for(s), cfg.athletes) for s in STREAMS},
+        "retained_spans": {s: {"rows": [a["retained"][s]["retained"] for a in verification.get("per_athlete", []) if a.get("retained")], "span_s": [a["retained"][s]["span_s"] for a in verification.get("per_athlete", []) if a.get("retained")]} for s in STREAMS},
         "backend": backend,
         "machine": machine_context(),
         "timing": {"requested_duration_s": cfg.duration_s, "actual_run_duration_s": actual_s, "run_start_utc": start_utc.isoformat()},
@@ -765,11 +861,16 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
     f = lambda x: "n/a" if x is None else f"{x * 1000:.1f} ms"  # noqa: E731
     out("TEAM-SCALE VALIDATION (fictional athletes, isolated backend)")
     out(f"Backend: {report['backend']['base_url']} pid {report['backend']['pid']} db {report['backend']['db_path']}")
-    out(f"Config: {c['athletes']} athletes · {c['rate_hz']:g} Hz per stream · {c['ticks']} ticks (last due at {(c['ticks'] - 1) / c['rate_hz']:.1f} s) · requested {t['requested_duration_s']:.1f} s · actual run {t['actual_run_duration_s']:.2f} s (start to last response) · timeout {c['request_timeout_s']:g} s")
+    out(f"Config: {c['athletes']} athletes · physiological {c['physiological_rate_hz']:g} Hz ({c['ticks']['physiological']} ticks) · tracking {c['tracking_rate_hz']:g} Hz ({c['ticks']['tracking']} ticks) · requested {t['requested_duration_s']:.1f} s · actual run {t['actual_run_duration_s']:.2f} s (start to last response) · timeout {c['request_timeout_s']:g} s")
     out(f"Sample requests: expected {r['expected']} · attempted {r['attempted']} · accepted {r['accepted']} · failed {r['failed']} (http {r['http_error']}, timeout {r['timeout']}, connection {r['connection_error']}) · unsent {r['unsent']} · omitted by scenario {r['omitted_by_scenario']}")
     for s in STREAMS:
-        b = r["by_stream"][s]
-        out(f"  {s:14s} expected {b['expected']} · accepted {b['accepted']} · failed {b['failed']} · unsent {b['unsent']}")
+        b = report["streams"][s]
+        rs = report.get("retained_spans", {}).get(s, {})
+        spans = [x for x in rs.get("span_s", []) if x is not None]
+        out(f"  {s:14s} requested {b['requested_rate_hz']:g} Hz · expected {b['expected']} · attempted {b['attempted']} · accepted {b['accepted']} · failed {b['failed']} · unknown (timeout) {b['unknown_timeout']} · omitted by scenario {b['omitted_by_scenario']} · unsent {b['unsent']}")
+        out(f"  {'':14s} delivered {b['delivered_rate_hz'] if b['delivered_rate_hz'] is None else round(b['delivered_rate_hz'], 3)} Hz over a {b['measurement_interval_s']:.1f} s schedule span · latency p50 {f(b['latency_s']['p50'])} p95 {f(b['latency_s']['p95'])} max {f(b['latency_s']['max'])} · lateness p50 {f(b['scheduling_lateness_s']['p50'])} p95 {f(b['scheduling_lateness_s']['p95'])} max {f(b['scheduling_lateness_s']['max'])}")
+        if rs.get("rows"):
+            out(f"  {'':14s} retained per athlete: {min(rs['rows'])}-{max(rs['rows'])} rows spanning {min(spans):.1f}-{max(spans):.1f} s" + (" (at the 300-row cap: a count, not a duration)" if max(rs['rows']) >= RETENTION_CAP else ""))
     out(f"Write latency (client round trip per sample POST): p50 {f(lat['p50'])} · p95 {f(lat['p95'])} · max {f(lat['max'])} over {lat['count']} requests")
     out(f"Scheduling lateness (issue − due): p50 {f(late['p50'])} · p95 {f(late['p95'])} · max {f(late['max'])}")
     rd, rl = report.get("reads", {}), report.get("read_latency_s", {})
@@ -778,7 +879,7 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
         out(f"Read latency: p50 {f(rl.get('p50'))} · p95 {f(rl.get('p95'))} · max {f(rl.get('max'))} over {rl.get('count')} reads")
     sc, ds = report.get("scenario", {}), report.get("device_status_reports", {})
     if sc.get("name") and sc["name"] != "healthy":
-        out(f"Scenario {sc['name']}: {sc['omitted_samples']} samples left out on purpose ({r['omitted_by_scenario']} counted as omitted, apart from {r['unsent']} unsent) · {sc['late_deliveries']} delivered late with original timestamps ({r['delivered_late']} delivered) · device status reports {ds.get('accepted')}/{ds.get('sent')} accepted")
+        out(f"Scenario {sc['name']}: {sc['omitted_samples']} samples left out on purpose ({r['omitted_by_scenario']} counted as omitted, apart from {r['unsent']} unsent and {r['timeout']} unknown) · {sc['late_deliveries']} delivered late with original timestamps ({r['delivered_late']} delivered) · device status reports {ds.get('accepted')}/{ds.get('sent')} accepted")
     ov = report.get("overview_verification", {})
     if ov.get("checks"):
         failed = [k for k, v in ov["checks"].items() if v is False]
@@ -828,7 +929,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--athletes", type=int, default=DEFAULT_ATHLETES, help=f"number of fictional athletes (default {DEFAULT_ATHLETES})")
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION_S, help=f"approximate run length in seconds (default {DEFAULT_DURATION_S:g})")
-    p.add_argument("--rate", type=float, default=DEFAULT_RATE_HZ, help=f"samples per second per athlete per stream (default {DEFAULT_RATE_HZ:g})")
+    p.add_argument("--rate", type=float, default=DEFAULT_RATE_HZ, help=f"samples per second per athlete for both streams (default {DEFAULT_RATE_HZ:g}); a per-stream option below overrides it for that stream")
+    p.add_argument("--physiological-rate", type=float, default=None, help="physiological samples per second per athlete (overrides --rate for this stream)")
+    p.add_argument("--tracking-rate", type=float, default=None, help="tracking samples per second per athlete (overrides --rate for this stream)")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help=f"per-request timeout in seconds (default {DEFAULT_TIMEOUT_S:g})")
     p.add_argument("--workers", type=int, default=8, help="concurrent request workers (threads) (default 8)")
     p.add_argument("--report", type=Path, default=None, help="JSON report path (default reports/team-scale-<UTC time>.json, ignored by git)")
@@ -840,12 +943,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -> int:
     args = build_parser().parse_args(argv)
-    if args.athletes < 1 or args.duration <= 0 or args.rate <= 0 or args.timeout <= 0:
-        out("athletes must be >= 1 and duration, rate and timeout must be positive")
+    if args.athletes < 1 or args.duration <= 0 or args.rate <= 0 or args.timeout <= 0 or any(v is not None and v <= 0 for v in (args.physiological_rate, args.tracking_rate)):
+        out("athletes must be >= 1 and duration, rates and timeout must be positive")
         return 2
-    cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers, read_interval_s=max(0.0, args.read_interval), scenario=args.scenario)
+    cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers, read_interval_s=max(0.0, args.read_interval), scenario=args.scenario,
+                    physiological_rate_hz=args.physiological_rate, tracking_rate_hz=args.tracking_rate)
     try:
-        plan = scenario_plan(cfg.scenario, cfg.athletes, cfg.ticks)
+        plan = scenario_plan(cfg.scenario, cfg.athletes, cfg)
     except ValueError as exc:
         out(str(exc))
         return 2
@@ -865,7 +969,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
         backend.start()
         backend_info = {"base_url": backend.base_url, "pid": backend.proc.pid if backend.proc else None, "db_path": str(backend.db_path), "command": backend.cmd, "retention_cap": RETENTION_CAP}
         setup = register_team(backend.base_url, cfg, out)
-        out(f"Sending {cfg.athletes} athletes × {cfg.ticks} ticks × 2 streams = {cfg.athletes * cfg.ticks * 2} fictional samples at {cfg.rate_hz:g} Hz" + (f", scenario {cfg.scenario}" if cfg.scenario != "healthy" else "") + (f", overview read every {cfg.read_interval_s:g} s" if cfg.read_every_ticks else "") + "…")
+        out(f"Sending {cfg.expected_samples} fictional samples for {cfg.athletes} athletes (physiological {cfg.rate_for('physiological'):g} Hz, tracking {cfg.rate_for('tracking'):g} Hz)" + (f", scenario {cfg.scenario}" if cfg.scenario != "healthy" else "") + (f", overview read every {cfg.read_interval_s:g} s" if cfg.read_interval_s > 0 else "") + "…")
         result = run_load(backend.base_url, cfg, plan=plan)
         records, actual_s, start_utc = result.records, result.actual_s, result.start_utc
         out("Reading back and verifying…")

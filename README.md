@@ -869,8 +869,11 @@ python scripts/validate_team_scale.py                          # 20 athletes, ~1
 python scripts/validate_team_scale.py --athletes 11 --duration 15
 python scripts/validate_team_scale.py --athletes 20 --duration 60                        # healthy run with concurrent reads
 python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted # paused and late streams
+python scripts/validate_team_scale.py --athletes 20 --duration 40 --physiological-rate 1 --tracking-rate 10   # unequal rates
+python scripts/validate_team_scale.py --athletes 20 --duration 20 --physiological-rate 1 --tracking-rate 4 --scenario interrupted
 python scripts/validate_team_scale.py --athletes 20 --report reports/my-run.json
-#   flags: --athletes N (default 20) --duration S (default 15) --rate HZ (default 1) --timeout S (default 5)
+#   flags: --athletes N (default 20) --duration S (default 15) --rate HZ (default 1, both streams)
+#          --physiological-rate HZ / --tracking-rate HZ (each overrides --rate for its stream) --timeout S (default 5)
 #          --workers N (default 8 request threads) --port P (default: a free port) --report PATH
 #          --read-interval S (overview read during ingestion, default 2; 0 disables) --scenario healthy|interrupted
 #   exit 0 when every verification and overview check passed and nothing was left unsent; 1 otherwise; 2 for bad arguments
@@ -885,14 +888,34 @@ that athlete and no other, ages never negative, latest timestamps never
 going backwards between reads, and device ids matching the samples. Read
 latency is reported separately from write latency.
 
-`--scenario interrupted` adds a small, fixed disturbance (it needs at least
-3 athletes and 13 ticks): the tracking streams of the first two athletes are
-paused for ticks 5 to 9 (those samples are counted as *omitted by
+**Different rates per stream.** `--physiological-rate` and
+`--tracking-rate` give each stream its own rate; `--rate` sets both, and a
+per-stream option overrides it for that stream. Each stream runs on its own
+monotonic grid (tick t of a stream is due at t divided by that stream's
+rate and carries that instant as its timestamp), so a 10 Hz tracking stream
+never duplicates physiological measurements onto its grid. Overview reads
+(every `--read-interval` seconds) and the scenario's device-status reports
+keep their own cadence in seconds. The report lists, per stream, the
+requested rate, expected / attempted / accepted / failed / unknown (timed
+out) / intentionally omitted / unsent requests, the delivered rate per
+athlete with the schedule span it was measured over, scheduling lateness
+and request latency, and the retained row count with the actual retained
+timestamp span per athlete. The newest-300 cap is a row count per stream,
+not a duration: at 10 Hz the retained tracking history spans about 30 s
+while a 1 Hz physiological history of the same run spans the whole run,
+and the verification accounts for the cap, duplicate-instant replacement,
+the live overview selection and the recorded window and summary on each
+stream's own grid.
+
+`--scenario interrupted` adds a small, fixed disturbance defined in
+seconds and mapped onto each stream's grid (it needs at least 3 athletes
+and 13 s): the tracking streams of the first two athletes are paused for
+samples due between 5 s and 10 s (those samples are counted as *omitted by
 scenario*, apart from anything the tool failed to send), the third
-athlete's physiological samples for ticks 5 to 9 are delivered at tick 12,
+athlete's physiological samples due in that window are delivered at 12 s,
 newest first, with their original recorded timestamps, and the first three
-athletes report a device status at ticks 0 and 10 with the tick-0 report
-re-sent at tick 12. The verification then also checks that the overview's
+athletes report a device status at 0 s and 10 s with the first report
+re-sent at 12 s. The verification then also checks that the overview's
 latest reading per stream is the newest accepted timestamp (so an older
 late arrival never replaced a newer one), that the paused samples are
 absent while the other stream's samples for those ticks are present, and

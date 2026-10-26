@@ -33,7 +33,7 @@ Terms used throughout:
 | History | The newest 300 samples per athlete per stream (a count, not a time span). |
 | Window | Both streams for one athlete between `window_start` and one captured backend instant `window_end`. |
 | Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
-| Team-scale validation | `scripts/validate_team_scale.py`: starts an isolated backend, registers N fictional athletes to a fictional team, sends 1 Hz samples concurrently while reading the team overview every 2 s, reports write and read latency, scheduling lateness and counts (omitted-by-scenario apart from unsent), verifies retained data, overview consistency (no substituted readings, newest-timestamp ordering, paused-stream recency checked on the reads taken during the pause) and device statuses, with timeout-dependent checks reported as unknown rather than passed; `--scenario interrupted` adds a fixed paused/late-stream disturbance. Observations on one machine, not a capacity claim. |
+| Team-scale validation | `scripts/validate_team_scale.py`: starts an isolated backend, registers N fictional athletes to a fictional team, sends samples concurrently on independent per-stream grids (`--rate`, or `--physiological-rate` / `--tracking-rate`) while reading the team overview every 2 s, reports write and read latency, scheduling lateness and counts (omitted-by-scenario apart from unsent), verifies retained data, overview consistency (no substituted readings, newest-timestamp ordering, paused-stream recency checked on the reads taken during the pause) and device statuses, with timeout-dependent checks reported as unknown rather than passed; `--scenario interrupted` adds a fixed paused/late-stream disturbance. Observations on one machine, not a capacity claim. |
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm, plus explicitly mapped optional physiological fields) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
@@ -126,6 +126,8 @@ curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/effort-review?effort_start
 python scripts/validate_team_scale.py --athletes 11 --duration 15
 python scripts/validate_team_scale.py --athletes 20 --duration 60                          # healthy, overview read every 2 s
 python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted   # paused/late streams + device statuses
+python scripts/validate_team_scale.py --athletes 20 --duration 40 --physiological-rate 1 --tracking-rate 10   # unequal rates, crosses the tracking cap
+python scripts/validate_team_scale.py --athletes 20 --duration 20 --physiological-rate 1 --tracking-rate 4 --scenario interrupted
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
 
 # 3h. live team overview: every registered athlete on a team, newest retained reading per stream with its age
@@ -369,6 +371,11 @@ Implemented today is listed above; the following are **not** implemented:
   moment ("last reported connected" with its age); the engine and
   dashboard never infer connection or disconnection from samples arriving
   or stopping, and the 60 s "outdated" mark is a display rule.
+- The newest-300 retention cap is a row count per stream, not a duration:
+  a 10 Hz tracking stream keeps about 30 s while a 1 Hz physiological
+  stream keeps 300 s. The validation report shows each stream's retained
+  rows and timestamp span so the difference is visible. A synthetic 10 Hz
+  tracking stream is not a camera integration.
 - The team-scale validation tool measures a short run on one machine with
   fictional athletes. Its latency figures are client-side round trips with
   no pass threshold, and 15 s runs do not establish sustained match-length
