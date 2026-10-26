@@ -1,11 +1,13 @@
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import AwareDatetime
 
 from app.core import clock
 from app.core.config import get_settings
 from app.core.effort import BEFORE_SECONDS, AFTER_SECONDS, EffortRequestError, parse_effort_timestamp, review_effort
+from app.core.export import export_filename, export_records, to_jsonl
+from app.db import get_database
 from app.core.summary import summarize_window
 from app.models import Athlete, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
 from app.store.athletes import athlete_registry
@@ -211,3 +213,42 @@ def get_effort_review(athlete_id: str, effort_start: str | None = EFFORT_START, 
         )
     except EffortRequestError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ---- export of retained samples (JSON Lines interchange format) --------------
+
+JSONL_MEDIA_TYPE = "application/x-ndjson"
+
+
+@router.get(
+    "/{athlete_id}/retained-samples.jsonl",
+    responses={200: {"content": {JSONL_MEDIA_TYPE: {}}, "description": "JSON Lines file: one {type, sample} record per line, oldest first"},
+               404: {"description": "Neither stream has retained samples for this athlete"}},
+)
+def export_retained_samples(athlete_id: str) -> Response:
+    """Download every sample the engine currently retains for the athlete, both streams, as replayable JSON Lines.
+
+    A snapshot of retained rows (newest 300 per stream), read from both tables under one lock, sorted by recorded instant
+    with physiological before tracking at equal instants, and written exactly as stored (offsets, ids, sources, optional
+    measurements, nulls, zeros, confidences). Nothing is rebased or invented; rows already trimmed by the cap are gone.
+    Not a database backup: no roster, device status, configuration or other athletes.
+    """
+    captured_at = clock.utc_now()
+    with get_database().read():  # one consistent read of both streams (the lock is re-entrant for the store reads)
+        physiological = physiological_history_store.recent(athlete_id, MAX_HISTORY_SAMPLES)
+        tracking = tracking_history_store.recent(athlete_id, MAX_HISTORY_SAMPLES)
+    if not physiological and not tracking:
+        raise HTTPException(status_code=404, detail=f"No retained samples for athlete '{athlete_id}' in either stream; nothing to export")
+    records = export_records(physiological, tracking)
+    filename = export_filename(athlete_id, captured_at)
+    return Response(
+        content=to_jsonl(records),
+        media_type=JSONL_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Athletrix-Record-Count": str(len(records)),
+            "X-Athletrix-Physiological-Count": str(len(physiological)),
+            "X-Athletrix-Tracking-Count": str(len(tracking)),
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Record-Count, X-Athletrix-Physiological-Count, X-Athletrix-Tracking-Count",
+        },
+    )

@@ -30,6 +30,7 @@ app/
                      # GET  /api/v1/athletes/{id}/window?seconds=60, /summary?seconds=60
                      # GET  /api/v1/athletes/{id}/retained-data (per-stream count and UTC range of retained rows)
                      # GET  /api/v1/athletes/{id}/effort-review?effort_start=..&effort_end=.. (manually selected effort)
+                     # GET  /api/v1/athletes/{id}/retained-samples.jsonl (replayable export of retained samples)
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -702,6 +703,51 @@ What the response does and does not say:
   recommendation is produced, and none should be read into the numbers: a
   heart-rate difference between periods on its own does not show recovery or
   any change in condition.
+
+### Exporting retained samples for replay (`retained-samples.jsonl`)
+
+`GET /api/v1/athletes/{id}/retained-samples.jsonl` downloads every sample
+the engine currently retains for one athlete, both streams, in the JSON
+Lines interchange format above, so it can be replayed into another local
+Athletrix database with `scripts/replay_samples.py`.
+
+```bash
+# export from one backend, replay into another (second backend on port 8010 with its own DATABASE_PATH)
+curl -fsS -o athlete-1.jsonl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/retained-samples.jsonl"
+python scripts/replay_samples.py athlete-1.jsonl --dry-run
+python scripts/replay_samples.py athlete-1.jsonl --url http://127.0.0.1:8010
+```
+
+What the export is:
+
+- Both streams are read under one lock, so the file is one consistent
+  snapshot. Records are sorted by recorded instant; at equal instants the
+  physiological record comes before the tracking record, which makes the
+  order deterministic (an athlete has at most one row per instant per
+  stream).
+- Every record is written exactly as stored: timestamps with their recorded
+  offsets (`2026-10-20T12:00:02+02:00` stays so), athlete and device ids,
+  sources (a tracking row without one exports `"source": null`), optional
+  physiological measurements, nulls, real zeros and confidences. Nothing is
+  rebased to the current time and nothing is invented.
+- The response is `application/x-ndjson` with a `Content-Disposition`
+  download name of the form
+  `athletrix-retained-samples-<athlete>-<UTC capture time>.jsonl` and
+  `X-Athletrix-Record-Count`, `-Physiological-Count` and `-Tracking-Count`
+  headers. If neither stream has retained samples the response is a 404
+  with the reason; nothing else is exported.
+
+What it is not: **a snapshot of retained samples is not a recording archive
+or a database backup.** Only the newest 300 samples per stream exist, so a
+record already removed by the cap cannot be recovered by exporting. The
+file holds samples for the one athlete only: no roster, device status,
+configuration, credentials or other athletes. Replaying it into a database
+that already has samples for the same athlete replaces equal-instant rows
+and leaves the rest, under the same retention rule.
+
+The dashboard's Recorded mode has a **Download retained samples** button
+next to Find retained data that saves this file directly on the computer
+running the browser; nothing is uploaded anywhere.
 
 ### Historical timestamps stay historical
 

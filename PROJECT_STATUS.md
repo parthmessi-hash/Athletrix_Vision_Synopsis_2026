@@ -37,6 +37,7 @@ Terms used throughout:
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
 | Effort review | `GET /athletes/{id}/effort-review?effort_start&effort_end`: a manually selected 1-120 s period described by the tracking summary during it and heart-rate figures before [start-10 s, start), during [start, end] and after (end, end+30 s] (capped at backend time). Not sprint detection, not an effort classification. |
+| Retained-samples export | `GET /athletes/{id}/retained-samples.jsonl`: both streams of one athlete as replayable JSON Lines, written as stored. A snapshot of retained rows, not an archive. |
 | Retained data | `GET /athletes/{id}/retained-data`: per stream, the count of rows currently stored and the UTC recorded timestamps of the oldest and newest, plus the 300 cap. Describes retained rows only, not coverage, sessions or an archive; the dashboard's Find retained data / Review latest retained buttons use it. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
@@ -119,6 +120,11 @@ curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=<la
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/effort-review?effort_start=2026-10-20T10:00:01Z&effort_end=2026-10-20T10:00:04Z"
 #    both bounds ISO 8601 with timezone (no epochs, no naive values); 1 s <= duration <= 120 s; end not after backend time
 
+# 3f. export every retained sample for an athlete (both streams) and replay it into another local database
+curl -fsS -o athlete-1.jsonl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/retained-samples.jsonl"
+python scripts/replay_samples.py athlete-1.jsonl --url http://127.0.0.1:8010      # a second backend with its own DATABASE_PATH
+#    dashboard: Recorded -> Download retained samples (saved on this computer, uploaded nowhere)
+
 # 4. frontend, from the Athletrix_Web folder
 python3 -m http.server 3000
 ```
@@ -159,6 +165,7 @@ Endpoints, all under `/api/v1`:
 | `GET /athletes/{id}/window?seconds=60[&end=...]` | Both streams in the `seconds` (1-300) before `end`, plus `tracking_rules`. Without `end`: live, one captured backend `window_end`. With `end` (ISO 8601 with timezone, not after backend time, `+` encoded as `%2B`): recorded review ending at that exact instant. Invalid, naive or future `end` is a 422. |
 | `GET /athletes/{id}/summary?seconds=60[&end=...]` | Descriptive metrics over the same window selection; ages are relative to `window_end` (in a review: seconds before the selected end) |
 | `GET /athletes/{id}/effort-review?effort_start=...&effort_end=...` | Descriptive review of a manually selected effort (ISO timestamps with timezone, 1-120 s, end not in the future; 422 otherwise). Movement = tracking summary over the effort; heart rate for three non-overlapping periods; `follow_up_elapsed` says only whether 30 s have passed. No interpolation, extrapolation, recovery or fatigue inference. |
+| `GET /athletes/{id}/retained-samples.jsonl` | Download of every retained sample for the athlete, both streams, as replayable JSON Lines (`application/x-ndjson`, attachment filename, record-count headers): one consistent read, oldest first with physiological before tracking at equal instants, written as stored. 404 when neither stream has rows. A snapshot of retained rows, not an archive or backup. |
 | `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and the cap. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):
@@ -198,7 +205,7 @@ The page resolves a mode on load (`resolveEngineMode` in `index.html`):
 
 | Mode | When | Behaviour |
 |------|------|-----------|
-| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). Each card's source badge is derived from the data it shows: the two latest-reading cards from that sample's own `source`/`device_id`, the summary and timeline cards from their response's `sources` breakdown ("Reported source: simulated", "Reported source: wearable", "Mixed sources: camera 1, wearable 3, not reported 2", "Source not reported", "No samples", "Source information unavailable"); badges are cleared on athlete, mode and review-time changes. Browser-generated demonstration panels keep their own "Browser demo · fictional data" labels. In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. In Recorded mode a **Selected effort review** card calls `effort-review` only on Review effort / Refresh and shows the engine's movement figures, the before/during/after heart-rate comparison with per-period bounds, first/last samples and sources, the applied rules and the follow-up flag with its "elapsed time is not completeness" wording; results are invalidated on input edits, athlete and mode changes. |
+| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). Each card's source badge is derived from the data it shows: the two latest-reading cards from that sample's own `source`/`device_id`, the summary and timeline cards from their response's `sources` breakdown ("Reported source: simulated", "Reported source: wearable", "Mixed sources: camera 1, wearable 3, not reported 2", "Source not reported", "No samples", "Source information unavailable"); badges are cleared on athlete, mode and review-time changes. Browser-generated demonstration panels keep their own "Browser demo · fictional data" labels. In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. **Download retained samples** in the same block fetches `retained-samples.jsonl` on click and saves it through a browser download link (nothing uploaded); a 404 is shown as "no retained samples", errors can be retried, and a response for an earlier athlete, mode or request is never saved. In Recorded mode a **Selected effort review** card calls `effort-review` only on Review effort / Refresh and shows the engine's movement figures, the before/during/after heart-rate comparison with per-period bounds, first/last samples and sources, the applied rules and the follow-up flag with its "elapsed time is not completeness" wording; results are invalidated on input edits, athlete and mode changes. |
 | `public` | any other hostname (the published site), or `?engine=0`, or `engineMode: "public"` | Shows an explanation card with the local startup steps. **No request is made to the engine.** |
 
 Polling: live cards every 1 s, summary and timeline every 5 s, only while the
@@ -337,6 +344,11 @@ Implemented today is listed above; the following are **not** implemented:
   evidence of recovery or of a change in condition. Its 10 s / 30 s periods
   are engineering defaults, `follow_up_elapsed` only reports elapsed time,
   and the 300-sample cap can leave any period partial or empty.
+- The retained-samples export is a snapshot of what is stored at that
+  moment for one athlete: newest 300 per stream, written as stored. It is
+  not a recording archive or a database backup; rows the cap has already
+  removed cannot be recovered, and the roster, device status and
+  configuration are not part of it.
 - Recorded clocks are not synchronized or corrected. A heart-rate file and a
   tracking file replayed for the same athlete line up on the dashboard only
   as far as their recorded timestamps already agree; the fictional fixtures
@@ -404,6 +416,8 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/window?seconds=60&end=2
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60&end=2026-10-20T10:00:04Z"  # expect tracking: peak 6.0, 10.5 m over 2.0 s, 2 excluded, high speed 1.5 s / 8.25 m
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/summary?seconds=60"                            # expect 0 samples in both streams (historical)
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/retained-data"                                 # expect 5 + 5 rows, both ranges 10:00:00Z..10:00:04Z, cap 300
+curl -fsS -o /tmp/athlete-3.jsonl "http://127.0.0.1:8010/api/v1/athletes/athlete-3/retained-samples.jsonl"  # expect 10 lines, oldest first
+python scripts/replay_samples.py /tmp/athlete-3.jsonl --dry-run                                            # expect a valid file: 5 physiological, 5 tracking
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_start=2026-10-20T10:00:01Z&effort_end=2026-10-20T10:00:04Z"
 #    expect movement 4 samples, peak 6.0, 10.5 m over 2.0 s (1 excluded), high speed 1.5 s / 8.25 m; heart rate before 1 sample (112),
 #    during 4 samples / 3 measurements mean 117.833 peak 120.5, after 0 samples; follow_up_elapsed true
