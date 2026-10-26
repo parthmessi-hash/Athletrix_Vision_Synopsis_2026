@@ -990,6 +990,38 @@ Recorded rows are never trimmed by the rolling caps and survive restarts;
 samples for athletes outside the selection never enter; the live endpoints
 and rolling retention behave exactly as before.
 
+### Reviewing and exporting a recording
+
+Session-scoped endpoints read **only that recording's samples** for one of
+its athletes: no fallback to the rolling history or to another recording, and
+no retention cap. They reuse the rolling endpoints' calculations and rules
+unchanged (window selection with inclusive bounds and one captured backend
+time, the summary, the effort review's periods and distance rules, source
+breakdowns, null handling, the 300 s window limit and the 1 to 120 s effort
+limits):
+
+```bash
+R=http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1
+curl "$R/recorded-data"                                                  # per stream: count and recorded-timestamp bounds in this recording
+curl "$R/window?seconds=60&end=2026-10-26T20:30:00Z"                     # RecordingWindow: samples + session_availability
+curl "$R/summary?seconds=60&end=2026-10-26T20:30:00Z"                    # RecordingSummary
+curl "$R/effort-review?effort_start=2026-10-26T20:10:00Z&effort_end=2026-10-26T20:10:20Z"
+curl -OJ "$R/recorded-samples.jsonl"                                     # replayable export of every recorded sample, both streams
+```
+
+Each response names the recording (`recording`: id, name, status, start and
+stop times on the backend's clock) separately from the samples' own recorded
+timestamps and from the requested analysis period, and carries
+`session_availability` (per stream: recorded count and bounds, selected count
+and bounds; no cap, because none applies) instead of the rolling
+`availability` block, which is null here. Unknown recordings, athletes
+outside the recording's roster and empty exports are 404s. The export uses
+the same `{type, sample}` JSON Lines format as the rolling export, written
+as stored, with a safe filename
+(`athletrix-recording-<id>-<athlete>-<UTC capture time>.jsonl`) and the
+record-count headers plus `X-Athletrix-Recording-Id`; roster and session
+metadata stay in the recording detail rather than in the file.
+
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 
 ```bash

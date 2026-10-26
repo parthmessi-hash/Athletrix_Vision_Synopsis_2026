@@ -4,6 +4,9 @@ from pydantic import AwareDatetime, Field, field_validator
 
 from app.models.athlete import Athlete
 from app.models.common import AthletrixModel
+from app.models.effort import EffortReview
+from app.models.summary import AthleteSummary
+from app.models.window import AthleteWindow
 
 
 class RecordingStart(AthletrixModel):
@@ -74,3 +77,79 @@ class ActiveRecording(AthletrixModel):
     """The recording currently active on this backend, or null."""
 
     recording: Recording | None = None
+
+
+class RecordingRef(AthletrixModel):
+    """Which recording a session response belongs to, with its own start and stop times (the backend's clock).
+
+    These are when the recording ran, not when the samples were measured: the samples carry their own recorded
+    timestamps, and a request's analysis period is a third, separate thing.
+    """
+
+    id: str
+    name: str
+    status: Literal["active", "stopped"]
+    started_at: AwareDatetime
+    stopped_at: AwareDatetime | None = None
+
+
+class SessionStreamAvailability(AthletrixModel):
+    """What one recording holds for an athlete in one stream, against what a request selected from it.
+
+    No retention cap applies to a recording, so there is none here. `recorded_*` describe the rows the recording
+    holds now; `selected_*` describe the samples the request chose for its period (the count equals the number of
+    samples in the accompanying result). Bounds are not coverage, and an absence says nothing about why.
+    """
+
+    recorded_count: int = Field(..., ge=0)
+    recorded_earliest: AwareDatetime | None = None
+    recorded_latest: AwareDatetime | None = None
+    selected_count: int = Field(..., ge=0)
+    selected_first: AwareDatetime | None = None
+    selected_last: AwareDatetime | None = None
+
+
+class SessionWindowAvailability(AthletrixModel):
+    physiological: SessionStreamAvailability
+    tracking: SessionStreamAvailability
+
+
+class SessionHeartRateAvailability(AthletrixModel):
+    before: SessionStreamAvailability
+    during: SessionStreamAvailability
+    after: SessionStreamAvailability
+
+
+class SessionEffortAvailability(AthletrixModel):
+    movement: SessionStreamAvailability
+    heart_rate: SessionHeartRateAvailability
+
+
+class RecordedData(AthletrixModel):
+    """Per stream: count and recorded-timestamp bounds of one athlete's samples in one recording."""
+
+    recording: RecordingRef
+    athlete: Athlete
+    physiological: RecordedStream
+    tracking: RecordedStream
+
+
+class RecordingWindow(AthleteWindow):
+    """A window over one recording's samples only. `availability` (rolling caps) is null; see `session_availability`."""
+
+    recording: RecordingRef
+    session_availability: SessionWindowAvailability
+
+
+class RecordingSummary(AthleteSummary):
+    """The summary over one recording's samples only, same calculations and rules as the rolling summary."""
+
+    recording: RecordingRef
+    session_availability: SessionWindowAvailability
+
+
+class RecordingEffortReview(EffortReview):
+    """An effort review over one recording's samples only, same calculations, boundaries and rules as the rolling review."""
+
+    recording: RecordingRef
+    session_availability: SessionEffortAvailability

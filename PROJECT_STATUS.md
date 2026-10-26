@@ -146,6 +146,8 @@ python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-
 curl -s -X POST http://127.0.0.1:8000/api/v1/recordings -H 'content-type: application/json' -d '{"name":"Tuesday practice","athlete_ids":["athlete-1","athlete-2"]}'
 curl -s http://127.0.0.1:8000/api/v1/recordings/active
 curl -s -X POST "http://127.0.0.1:8000/api/v1/recordings/<id>/stop"
+curl -s "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/summary?seconds=60&end=<UTC time>"     # session review
+curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/recorded-samples.jsonl"            # export
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
 
 # 3h. live team overview: every registered athlete on a team, newest retained reading per stream with its age
@@ -186,6 +188,10 @@ Timestamps must be ISO 8601 with a timezone.
 | `Recording` | `id`, `name`, `status` (`active` or `stopped`), `started_at`, `stopped_at` or null, `athlete_ids`, `athletes` (roster snapshot) |
 | `RecordingDetail` | `Recording` plus `recorded`: per athlete, `physiological` and `tracking` (`RecordedStream`: `sample_count`, `earliest_timestamp`, `latest_timestamp`) |
 | `ActiveRecording` | `recording` or null |
+| `RecordingRef` | `id`, `name`, `status`, `started_at`, `stopped_at`: the recording a session response belongs to |
+| `SessionStreamAvailability` | `recorded_count`, `recorded_earliest`, `recorded_latest`, `selected_count`, `selected_first`, `selected_last` (no cap) |
+| `RecordedData` | `recording`, `athlete`, `physiological`, `tracking` (`RecordedStream`) |
+| `RecordingWindow`, `RecordingSummary`, `RecordingEffortReview` | The rolling `AthleteWindow`, `AthleteSummary` and `EffortReview` shapes plus `recording` and `session_availability` (`availability` is null: no cap applies) |
 | `StreamAvailability` | `max_samples`, `retained_count`, `retained_earliest`, `retained_latest`, `at_cap`, `selected_count`, `selected_first`, `selected_last`: what is retained for one stream against what one request selected from it. Carried as `availability` (`WindowAvailability`: `physiological`, `tracking`) on `AthleteWindow` and `AthleteSummary`, and as `EffortAvailability` (`movement`, `heart_rate.before/during/after`) on `EffortReview`. Read with the samples; no expected count, coverage fraction or reason for absence is implied; `at_cap` is the only evidence of removal. |
 
 Endpoints, all under `/api/v1`:
@@ -209,6 +215,7 @@ Endpoints, all under `/api/v1`:
 | `POST /recordings` | Start a recording for registered athletes (201); 422 naming unknown ids or an invalid selection, nothing created; 409 while another is active |
 | `GET /recordings`, `GET /recordings/active`, `GET /recordings/{id}` | All recordings newest first; the active one or null; detail with roster snapshot and recorded counts and bounds per athlete and stream (404 unknown) |
 | `POST /recordings/{id}/stop` | Stop at backend time now; an already stopped recording is returned unchanged |
+| `GET /recordings/{id}/athletes/{aid}/recorded-data`, `.../window`, `.../summary`, `.../effort-review`, `.../recorded-samples.jsonl` | Session review over that recording's samples only (no rolling fallback, no cap): same query rules and calculations as the rolling endpoints, with `session_availability`; export in the replay-compatible format with a safe filename. 404 for unknown recordings, athletes outside the roster, or nothing to export |
 | `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and that stream's cap; both streams under one read. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):

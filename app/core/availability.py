@@ -8,7 +8,17 @@ database read. Nothing here estimates expected counts, rates, coverage or the re
 from collections.abc import Sequence
 
 from app.models.availability import StreamAvailability
+from app.models.recording import SessionStreamAvailability
 from app.store.samples import Retention
+
+
+def session_stream_availability(recorded: Retention, selected: Sequence) -> SessionStreamAvailability:
+    """Describe a recording's rows for one stream (`recorded`) against `selected`, the request's samples; no cap exists."""
+    stamps = sorted(s.timestamp for s in selected)
+    return SessionStreamAvailability(
+        recorded_count=recorded.count, recorded_earliest=recorded.earliest, recorded_latest=recorded.latest,
+        selected_count=len(stamps), selected_first=stamps[0] if stamps else None, selected_last=stamps[-1] if stamps else None,
+    )
 
 
 def stream_availability(retention: Retention, max_samples: int, selected: Sequence) -> StreamAvailability:

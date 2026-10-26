@@ -11,7 +11,10 @@ from app.models.common import Posture, SampleSource
 from app.models.device import DeviceStatus
 from app.models.effort import EffortReview, EffortRules, HeartRatePeriod, HeartRatePeriods
 from app.models.physiological import PhysiologicalSample
-from app.models.recording import ActiveRecording, RecordedAthlete, RecordedStream, Recording, RecordingDetail, RecordingStart
+from app.models.recording import (
+    ActiveRecording, RecordedAthlete, RecordedData, RecordedStream, Recording, RecordingDetail, RecordingEffortReview, RecordingRef, RecordingStart, RecordingSummary, RecordingWindow,
+    SessionEffortAvailability, SessionHeartRateAvailability, SessionStreamAvailability, SessionWindowAvailability,
+)
 from app.models.retained import RetainedData, StreamRetention
 from app.models.sources import SourceBreakdown, WindowSources
 from app.models.team import ReportedDevice, TeamAthleteLive, TeamLive
@@ -45,6 +48,15 @@ __all__ = [
     "RecordedStream",
     "Recording",
     "RecordingDetail",
+    "RecordedData",
+    "RecordingEffortReview",
+    "RecordingRef",
+    "RecordingSummary",
+    "RecordingWindow",
+    "SessionEffortAvailability",
+    "SessionHeartRateAvailability",
+    "SessionStreamAvailability",
+    "SessionWindowAvailability",
     "RecordingStart",
     "ReportedDevice",
     "RetainedData",
