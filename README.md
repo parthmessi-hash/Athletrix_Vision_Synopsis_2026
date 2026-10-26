@@ -37,7 +37,7 @@ app/
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
   scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers),
-                     # replay_samples.py (recorded JSONL replay), validate_team_scale.py (isolated
+                     # replay_samples.py (recorded JSONL replay), demo_launcher.py (one-command isolated demo), validate_team_scale.py (isolated
                      # multi-athlete load check), convert_heart_rate_csv.py and
                      # convert_tracking_csv.py (CSV adapters), examples/fictional_replay.jsonl,
                      # examples/fictional_heart_rate.csv, examples/fictional_physiology.csv, examples/fictional_tracking.csv
@@ -855,6 +855,46 @@ recorded times. Consequences, by design:
   timestamps would make recorded data look live and break the "recorded time
   only" guarantee of the window and summary; if a demo needs live-looking
   data, use the simulator.
+
+## One-command isolated demo (`scripts/demo_launcher.py`)
+
+```bash
+python scripts/demo_launcher.py                                              # frontend folder guessed next to this repository
+python scripts/demo_launcher.py --frontend "/path/to/Athletrix_Web" --athletes 4 --duration 90 --device-status
+python scripts/demo_launcher.py --exit-after-demo                             # stop when data generation ends
+#   flags: --frontend DIR --athletes N (default 4) --duration S (default 90) --device-status
+#          --backend-port P / --frontend-port P (default: free ports; an occupied port is an error, never taken over)
+#          --exit-after-demo; exit 0 normal, 1 startup failure or a failed sample, 2 bad arguments or missing frontend
+```
+
+The launcher starts a throwaway demo without touching the normal setup:
+a fresh temporary SQLite database and its own `uvicorn app.main:app` on a
+free localhost port; a copy of the frontend folder (without `.git`) served
+by `python -m http.server` on a second free port, with that copy's
+`index.html` pointed at the demo backend (the repository's files are never
+edited and `.env` is never read or changed); a clearly fictional multi-sport
+roster on team `demo-team` registered through the API; and, in-process, one
+physiological and one tracking sample per athlete per second from the
+simulator's deterministic profile (plus a fictional device-status report
+every 5 s with `--device-status`) for the bounded duration. It prints the
+dashboard URL (`http://localhost:<port>/#demo`) and short instructions.
+
+When data generation ends it says so; nothing more is sent, nothing is
+rebased or replayed to look live, the live cards show the retained readings
+as "stopped updating", and Recorded mode still works. The servers stay up
+until Ctrl-C (or stop at once with `--exit-after-demo`). On exit, failure or
+Ctrl-C the launcher stops only the two processes it started and removes
+only its temporary folder (frontend copy, database). CORS is configured only
+for its own backend and only for its own frontend port. Startup failures,
+a missing frontend folder and occupied ports are reported and leave nothing
+running.
+
+Offline: the engine dashboard depends on no remote script or asset. The
+only external references in `index.html` are Google Fonts stylesheets,
+which are cosmetic; with every external origin blocked in the browser the
+page falls back to system fonts and the engine-connected cards, team
+overview, summary and timeline keep working. The rest of the marketing
+site was not tested offline.
 
 ## Team-scale validation (`scripts/validate_team_scale.py`)
 

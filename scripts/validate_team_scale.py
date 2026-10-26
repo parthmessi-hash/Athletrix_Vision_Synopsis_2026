@@ -762,8 +762,9 @@ def free_port() -> int:
 class IsolatedBackend:
     """Starts uvicorn for app.main:app on a free port with a fresh temporary database; stops exactly that process."""
 
-    def __init__(self, port: int | None = None, log_level: str = "warning") -> None:
+    def __init__(self, port: int | None = None, log_level: str = "warning", cors_origins: list[str] | None = None) -> None:
         self.port = port or free_port()
+        self.cors_origins = cors_origins or ["http://localhost:3000"]
         self.tmp = tempfile.TemporaryDirectory(prefix="athletrix-team-scale-")
         self.db_path = Path(self.tmp.name) / "isolated.db"
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -772,7 +773,7 @@ class IsolatedBackend:
         self.log_path = Path(self.tmp.name) / "backend.log"
 
     def start(self, ready_timeout_s: float = 20.0) -> None:
-        env = {**os.environ, "DATABASE_PATH": str(self.db_path), "CORS_ORIGINS": "http://localhost:3000"}
+        env = {**os.environ, "DATABASE_PATH": str(self.db_path), "CORS_ORIGINS": ",".join(self.cors_origins)}  # only this isolated backend's CORS
         self.proc = subprocess.Popen(self.cmd, cwd=str(ROOT), env=env, stdout=open(self.log_path, "w"), stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + ready_timeout_s
         with httpx.Client(timeout=1.0) as c:
