@@ -932,6 +932,44 @@ recorded times. Consequences, by design:
   only" guarantee of the window and summary; if a demo needs live-looking
   data, use the simulator.
 
+## Explicit local recordings (`recordings` endpoints)
+
+An explicitly started recording preserves the samples accepted for a fixed
+set of registered athletes in its own SQLite tables, independently of the
+rolling retention caps, so a practice or match can be reviewed locally later.
+It is local storage on this machine: nothing is uploaded, nothing is deleted
+automatically, and there is no automatic recording.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/recordings -H 'content-type: application/json' \
+     -d '{"name":"Tuesday practice","athlete_ids":["athlete-1","athlete-2"]}'      # 201: active recording
+curl http://127.0.0.1:8000/api/v1/recordings/active                                   # {"recording": {...}} or {"recording": null}
+curl http://127.0.0.1:8000/api/v1/recordings                                          # all recordings, newest start first
+curl http://127.0.0.1:8000/api/v1/recordings/<id>                                     # detail: roster snapshot + recorded counts per athlete and stream
+curl -X POST http://127.0.0.1:8000/api/v1/recordings/<id>/stop                        # stopped (a second stop returns the same state)
+```
+
+Rules of this first version:
+
+- A recording has a generated id (`rec-<UTC start>-<6 hex>`), a user-provided
+  name, the selected athlete ids in the order given, backend UTC `started_at`
+  and `stopped_at`, and a status of `active` or `stopped`.
+- The whole selection is validated before anything is created: an
+  unregistered id is a 422 naming every unknown id, a blank name, an empty or
+  duplicated selection is a 422, and nothing is created in those cases. The
+  selected athletes' roster details are snapshotted into the recording and
+  stay with it even if the registry changes later.
+- Only one recording can be active on a backend at a time; a second start is
+  a 409 naming the active one. The database enforces this too.
+- Starting records samples accepted from then on; it never copies the rolling
+  history that already exists. Stopping an already stopped recording returns
+  its existing state with its original stop time.
+- **An active recording survives a backend restart and stays active until it
+  is stopped explicitly.** The dashboard shows the active recording in a
+  persistent indicator for that reason.
+- There is no deletion, no cloud upload and no background pruning, so
+  recordings consume local disk until an explicit management feature exists.
+
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 
 ```bash

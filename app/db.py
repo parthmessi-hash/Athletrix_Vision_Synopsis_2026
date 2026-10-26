@@ -10,6 +10,9 @@ Design
     with different offsets compare equal and ORDER BY / BETWEEN work lexically.
   - Each sample row also keeps the validated model as JSON (`payload`), so nulls, zeros and the
     original timestamp offset round-trip exactly.
+  - Explicit local recordings (`recordings`, `recording_athletes`, `recording_*_samples`) keep accepted
+    samples for selected athletes outside the rolling caps; a partial unique index allows one active
+    recording at a time. The tables are created on open like the others and never pruned.
 Supported local setup: a single uvicorn process (the default; `--reload` is fine). The schema is
 created automatically when the database is first opened.
 """
@@ -49,6 +52,36 @@ CREATE TABLE IF NOT EXISTS tracking_samples (
     ts_utc     TEXT NOT NULL,
     payload    TEXT NOT NULL,
     PRIMARY KEY (athlete_id, ts_utc)
+);
+CREATE TABLE IF NOT EXISTS recordings (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    stopped_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS recordings_one_active ON recordings (stopped_at IS NULL) WHERE stopped_at IS NULL;
+CREATE TABLE IF NOT EXISTS recording_athletes (
+    recording_id  TEXT NOT NULL,
+    athlete_id    TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    jersey_number INTEGER NOT NULL,
+    sport         TEXT NOT NULL,
+    team_id       TEXT NOT NULL,
+    PRIMARY KEY (recording_id, athlete_id)
+);
+CREATE TABLE IF NOT EXISTS recording_physiological_samples (
+    recording_id TEXT NOT NULL,
+    athlete_id   TEXT NOT NULL,
+    ts_utc       TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    PRIMARY KEY (recording_id, athlete_id, ts_utc)
+);
+CREATE TABLE IF NOT EXISTS recording_tracking_samples (
+    recording_id TEXT NOT NULL,
+    athlete_id   TEXT NOT NULL,
+    ts_utc       TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    PRIMARY KEY (recording_id, athlete_id, ts_utc)
 );
 """
 

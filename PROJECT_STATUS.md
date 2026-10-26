@@ -43,6 +43,7 @@ Terms used throughout:
 | Live team overview | `GET /teams/{id}/live` and the dashboard's team card: every registered athlete on a team with the newest retained reading per stream and its age; the 5 s "stopped updating" label is a display rule, not a judgment. |
 | Retained-samples export | `GET /athletes/{id}/retained-samples.jsonl`: both streams of one athlete as replayable JSON Lines, written as stored. A snapshot of retained rows, not an archive. |
 | Retained data | `GET /athletes/{id}/retained-data`: per stream, the count of rows currently stored, the UTC recorded timestamps of the oldest and newest, and that stream's cap (`max_samples`). Describes retained rows only, not coverage, sessions or an archive; the dashboard's Find retained data / Review latest retained buttons use it. |
+| Recording | An explicitly started local recording (`POST /recordings`): a generated id, a name, a fixed roster snapshot of selected registered athletes, backend UTC start and stop times, status active or stopped. One active at a time; survives restarts until stopped. Not automatic, never uploaded, never pruned. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
 
@@ -140,6 +141,11 @@ python scripts/validate_team_scale.py --athletes 20 --duration 60 --physiologica
 # 3j. retention comparison: the same 20-athlete, 1 Hz / 10 Hz, 60 s scenario on two isolated backends (A: 300/300, B: 300/3000),
 #     an early effort (5-15 s) reviewed under both, export + replay into a third isolated backend; report under reports/ (ignored)
 python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000 --effort-start 5 --effort-end 15
+
+# 3k. explicit local recording: start for registered athletes, inspect, stop (one active at a time; survives restarts until stopped)
+curl -s -X POST http://127.0.0.1:8000/api/v1/recordings -H 'content-type: application/json' -d '{"name":"Tuesday practice","athlete_ids":["athlete-1","athlete-2"]}'
+curl -s http://127.0.0.1:8000/api/v1/recordings/active
+curl -s -X POST "http://127.0.0.1:8000/api/v1/recordings/<id>/stop"
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
 
 # 3h. live team overview: every registered athlete on a team, newest retained reading per stream with its age
@@ -176,6 +182,10 @@ Timestamps must be ISO 8601 with a timezone.
 | `AthleteLive` | `athlete_id`, `captured_at`, `registered`, `athlete` or null, `physiological`, `tracking` or null, ages, `physiological_newest_ahead_seconds`, `tracking_newest_ahead_seconds`, `devices` |
 | `TeamLive` | `team_id`, `captured_at`, `athletes` (`TeamAthleteLive`: `athlete`, `physiological`, `tracking` or null, `physiological_age_seconds`, `tracking_age_seconds`, `devices`: `ReportedDevice` with `device_id`, `streams`, `status` or null, `status_age_seconds`) |
 | `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `max_samples` (that stream's cap), `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (the shared cap when both are equal, null when they differ; kept for older consumers) |
+| `RecordingStart` | `name` (1-120 characters, not blank), `athlete_ids` (distinct, registered) |
+| `Recording` | `id`, `name`, `status` (`active` or `stopped`), `started_at`, `stopped_at` or null, `athlete_ids`, `athletes` (roster snapshot) |
+| `RecordingDetail` | `Recording` plus `recorded`: per athlete, `physiological` and `tracking` (`RecordedStream`: `sample_count`, `earliest_timestamp`, `latest_timestamp`) |
+| `ActiveRecording` | `recording` or null |
 | `StreamAvailability` | `max_samples`, `retained_count`, `retained_earliest`, `retained_latest`, `at_cap`, `selected_count`, `selected_first`, `selected_last`: what is retained for one stream against what one request selected from it. Carried as `availability` (`WindowAvailability`: `physiological`, `tracking`) on `AthleteWindow` and `AthleteSummary`, and as `EffortAvailability` (`movement`, `heart_rate.before/during/after`) on `EffortReview`. Read with the samples; no expected count, coverage fraction or reason for absence is implied; `at_cap` is the only evidence of removal. |
 
 Endpoints, all under `/api/v1`:
@@ -196,6 +206,9 @@ Endpoints, all under `/api/v1`:
 | `GET /athletes/{id}/live` | Coherent single-athlete snapshot on the team overview's selection: one captured instant, newest retained sample per stream at or before it, ages, `*_newest_ahead_seconds` for a stored sample not yet current, device associations with explicit skew. Registration not required (`registered: false`, never 404). The `latest` endpoints keep newest-stored semantics. |
 | `GET /teams/{team_id}/live` | One snapshot of every athlete registered with the team id (sorted by jersey then id) with the newest retained sample per stream at or before one captured instant and its age (never negative; samples after the instant excluded). Unknown team: empty list. Each athlete also carries `devices`: the ids named by those newest samples (deduplicated) with each id's latest DeviceStatus report, age and `status_ahead_seconds` (explicit clock skew for a report timestamped after the captured instant; age 0, never negative, never presented as current), read in one query; a reported association, not a verified identity. |
 | `GET /athletes/{id}/retained-samples.jsonl` | Download of every retained sample for the athlete, both streams, as replayable JSON Lines (`application/x-ndjson`, attachment filename, record-count headers): one consistent read, oldest first with physiological before tracking at equal instants, written as stored. 404 when neither stream has rows. A snapshot of retained rows, not an archive or backup. |
+| `POST /recordings` | Start a recording for registered athletes (201); 422 naming unknown ids or an invalid selection, nothing created; 409 while another is active |
+| `GET /recordings`, `GET /recordings/active`, `GET /recordings/{id}` | All recordings newest first; the active one or null; detail with roster snapshot and recorded counts and bounds per athlete and stream (404 unknown) |
+| `POST /recordings/{id}/stop` | Stop at backend time now; an already stopped recording is returned unchanged |
 | `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and that stream's cap; both streams under one read. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):
@@ -239,6 +252,11 @@ limits separate from the retention caps, deliberately unchanged by them),
   minutes at 1 Hz and 30 s at 10 Hz; 3000 tracking samples is about five minutes
   only at 10 Hz. There is no match or season storage; the export is a snapshot
   of retained rows, not an archive.
+- Explicit recordings live in `recordings`, `recording_athletes` and
+  `recording_*_samples` tables in the same file (created on open, never
+  pruned); an active recording is persisted state and stays active across
+  restarts until stopped. Recordings consume local disk until an explicit
+  management feature exists.
 - `data/` and `*.db*` are git-ignored. Tests never touch it: every test uses its
   own temporary file (`tests/conftest.py`); the fallback `DATABASE_PATH` folder
   the suite sets as a safeguard belongs to that test process and is removed
@@ -423,6 +441,9 @@ Implemented today is listed above; the following are **not** implemented:
   no pass threshold, and 15 s runs do not establish sustained match-length
   behaviour; a timed-out request leaves acceptance unknown and is reported
   as such.
+- Recordings are a first version: one active at a time, no deletion, no
+  upload, no automatic start, no management of disk use; an active recording
+  survives a restart until stopped explicitly.
 - The `availability` block and the dashboard's Available data lines describe
   retained rows against a request's selection only. They never call a period
   complete, never derive an expected count or coverage from a rate, never
