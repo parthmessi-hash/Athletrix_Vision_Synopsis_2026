@@ -1,7 +1,7 @@
 """GET /athletes/{id}/retained-data: counts and UTC recorded time bounds of the rows currently retained per stream.
 
 The endpoint reads persisted rows only. It describes what is retained now (after equal-instant replacement and the
-newest-300 trim), never coverage, sessions or evicted records.
+newest-N trim under each stream's cap, default 300), never coverage, sessions or evicted records.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -33,7 +33,7 @@ def post(client, path, base, ts, athlete_id="ath-1", **extra):
     assert r.status_code == 200, r.text
 
 
-EMPTY = {"sample_count": 0, "earliest_timestamp": None, "latest_timestamp": None}
+EMPTY = {"sample_count": 0, "max_samples": MAX_HISTORY_SAMPLES, "earliest_timestamp": None, "latest_timestamp": None}
 
 
 # ---- empty and single-stream -------------------------------------------------------------------------------
@@ -55,14 +55,14 @@ def test_single_physiological_stream(client, physiological_payload):
     post(client, PHYS, physiological_payload, at(4))
     post(client, PHYS, physiological_payload, at(2))
     body = retained(client)
-    assert body["physiological"] == {"sample_count": 3, "earliest_timestamp": "2026-10-20T10:00:00Z", "latest_timestamp": "2026-10-20T10:00:04Z"}
+    assert body["physiological"] == {"sample_count": 3, "max_samples": MAX_HISTORY_SAMPLES, "earliest_timestamp": "2026-10-20T10:00:00Z", "latest_timestamp": "2026-10-20T10:00:04Z"}
     assert body["tracking"] == EMPTY, "the other stream stays empty; nothing is inferred across streams"
 
 
 def test_single_tracking_stream_and_one_sample_has_equal_bounds(client, tracking_payload):
     post(client, TRACK, tracking_payload, at(7))
     body = retained(client)
-    assert body["tracking"] == {"sample_count": 1, "earliest_timestamp": "2026-10-20T10:00:07Z", "latest_timestamp": "2026-10-20T10:00:07Z"}
+    assert body["tracking"] == {"sample_count": 1, "max_samples": MAX_HISTORY_SAMPLES, "earliest_timestamp": "2026-10-20T10:00:07Z", "latest_timestamp": "2026-10-20T10:00:07Z"}
     assert body["physiological"] == EMPTY
 
 
@@ -116,7 +116,7 @@ def test_equal_instant_replacement_does_not_inflate_the_count(client, physiologi
     post(client, PHYS, physiological_payload, "2026-10-20T12:00:00+02:00", heart_rate_bpm=101)   # same instant, other offset
     post(client, PHYS, physiological_payload, at(0), heart_rate_bpm=102)
     p = retained(client)["physiological"]
-    assert p == {"sample_count": 1, "earliest_timestamp": "2026-10-20T10:00:00Z", "latest_timestamp": "2026-10-20T10:00:00Z"}
+    assert p == {"sample_count": 1, "max_samples": MAX_HISTORY_SAMPLES, "earliest_timestamp": "2026-10-20T10:00:00Z", "latest_timestamp": "2026-10-20T10:00:00Z"}
     assert client.get("/api/v1/athletes/ath-1/physiological/latest").json()["heart_rate_bpm"] == 102
 
 

@@ -61,8 +61,8 @@ class EffortReview(AthletrixModel):
     high-speed rules as the summary endpoint; excluded intervals are never bridged and nothing is
     extrapolated). Heart rate is described for three non-overlapping periods. Recorded timestamps are used as
     stored, without device-clock correction between streams and without any automatic estimate of the lag
-    between physical effort and heart-rate response. Only retained samples (newest 300 per athlete per
-    stream) can be reviewed, so any period may be partially populated or empty.
+    between physical effort and heart-rate response. Only retained samples (the newest per athlete up to each
+    stream's configured cap) can be reviewed, so any period may be partially populated or empty.
 
     `follow_up_elapsed` only says whether the full after-period lies at or before the captured backend time.
     It does not say that samples for that period were received, retained or complete.

@@ -51,7 +51,7 @@ USAGE
 
 Then replay `out.jsonl` with scripts/replay_samples.py. The recorded timestamps
 stay historical: they will not appear in the dashboard's live window, and only
-the newest 300 samples per athlete per stream are retained. Recorded clocks are
+only the newest samples per athlete up to each stream's retention cap (default 300) are retained. Recorded clocks are
 not synchronized or corrected: a tracking CSV and a heart-rate CSV line up in a
 review only as far as their recorded timestamps already do.
 

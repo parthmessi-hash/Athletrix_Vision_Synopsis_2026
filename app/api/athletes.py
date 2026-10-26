@@ -12,14 +12,17 @@ from app.db import get_database
 from app.core.summary import summarize_window
 from app.models import Athlete, AthleteLive, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
 from app.store.athletes import athlete_registry
-from app.store.history import MAX_HISTORY_SAMPLES
+from app.store.history import retention_caps
 from app.store.physiological import latest_physiological_store, physiological_history_store
 from app.store.tracking import latest_tracking_store, tracking_history_store
 
 router = APIRouter(prefix="/athletes", tags=["athletes"])
 
-# Longest window that may be requested, in seconds. Matches the history cap at one sample per second.
+# Longest window that may be requested, in seconds. An API limit on one request, separate from the retention caps.
 MAX_WINDOW_SECONDS = 300
+# Most samples one history request returns. A page-size limit on one request, separate from the retention caps:
+# a stream whose cap is larger is read in full through the retained-samples export, not through history.
+MAX_HISTORY_QUERY_LIMIT = 300
 
 
 # ---- registry --------------------------------------------------------------
@@ -67,7 +70,7 @@ def get_latest_physiological(athlete_id: str) -> PhysiologicalSample:
 @router.get("/{athlete_id}/physiological/history", response_model=list[PhysiologicalSample])
 def get_physiological_history(
     athlete_id: str,
-    limit: int = Query(60, ge=1, le=MAX_HISTORY_SAMPLES, description="Newest samples to return"),
+    limit: int = Query(60, ge=1, le=MAX_HISTORY_QUERY_LIMIT, description="Newest samples to return (page size; the export returns every retained sample)"),
 ) -> list[PhysiologicalSample]:
     """The newest `limit` physiological samples for an athlete, oldest to newest. Empty list if none."""
     return physiological_history_store.recent(athlete_id, limit)
@@ -85,7 +88,7 @@ def get_latest_tracking(athlete_id: str) -> TrackingSample:
 @router.get("/{athlete_id}/tracking/history", response_model=list[TrackingSample])
 def get_tracking_history(
     athlete_id: str,
-    limit: int = Query(60, ge=1, le=MAX_HISTORY_SAMPLES, description="Newest samples to return"),
+    limit: int = Query(60, ge=1, le=MAX_HISTORY_QUERY_LIMIT, description="Newest samples to return (page size; the export returns every retained sample)"),
 ) -> list[TrackingSample]:
     """The newest `limit` tracking samples for an athlete, oldest to newest. Empty list if none."""
     return tracking_history_store.recent(athlete_id, limit)
@@ -119,19 +122,22 @@ def get_athlete_live(athlete_id: str) -> AthleteLive:
 
 @router.get("/{athlete_id}/retained-data", response_model=RetainedData)
 def get_retained_data(athlete_id: str) -> RetainedData:
-    """Per stream: how many samples are currently retained for the athlete and the UTC recorded timestamps of the oldest and newest.
+    """Per stream: how many samples are currently retained for the athlete, the UTC recorded timestamps of the oldest and newest, and that stream's cap.
 
-    Reads the persisted rows as they are now. Ranges bound the retained records only: they do not show continuous
-    coverage, and a count of 0 (or an unknown athlete id) says nothing about whether data was never sent or has been
-    removed by the newest-300 retention rule. Streams can cover different times.
+    Reads the persisted rows as they are now, both streams under one read. Ranges bound the retained records only: they
+    do not show continuous coverage, and a count of 0 (or an unknown athlete id) says nothing about whether data was never
+    sent or has been removed by the newest-N retention rule. Streams can cover different times and have their own caps
+    (`max_samples`); `max_samples_per_stream` is kept for older consumers and is null when the two caps differ.
     """
-    phys = physiological_history_store.retention(athlete_id)
-    track = tracking_history_store.retention(athlete_id)
+    caps = retention_caps()
+    with get_database().read():
+        phys = physiological_history_store.retention(athlete_id)
+        track = tracking_history_store.retention(athlete_id)
     return RetainedData(
         athlete_id=athlete_id,
-        physiological=StreamRetention(sample_count=phys.count, earliest_timestamp=phys.earliest, latest_timestamp=phys.latest),
-        tracking=StreamRetention(sample_count=track.count, earliest_timestamp=track.earliest, latest_timestamp=track.latest),
-        max_samples_per_stream=MAX_HISTORY_SAMPLES,
+        physiological=StreamRetention(sample_count=phys.count, earliest_timestamp=phys.earliest, latest_timestamp=phys.latest, max_samples=caps["physiological"]),
+        tracking=StreamRetention(sample_count=track.count, earliest_timestamp=track.earliest, latest_timestamp=track.latest, max_samples=caps["tracking"]),
+        max_samples_per_stream=caps["physiological"] if caps["physiological"] == caps["tracking"] else None,
     )
 
 
@@ -171,8 +177,8 @@ def select_window(athlete_id: str, seconds: int, min_confidence: float, end: dat
     tolerance. Recorded review (`end` given, timezone-aware, not in the future):
     that exact instant is the end and the start is `seconds` before it. The
     selection, inclusive boundaries, ordering and `tracking_rules` are the same in
-    both cases; only the retained samples (newest 300 per athlete per stream) can
-    be reviewed. Reads the stores directly. `min_confidence` is the configured
+    both cases; only the retained samples (the newest rows per athlete up to each
+    stream's configured cap) can be reviewed. Reads the stores directly. `min_confidence` is the configured
     DISTANCE_MIN_CONFIDENCE, echoed in `tracking_rules` so the response is
     self-contained.
     """
@@ -253,15 +259,17 @@ JSONL_MEDIA_TYPE = "application/x-ndjson"
 def export_retained_samples(athlete_id: str) -> Response:
     """Download every sample the engine currently retains for the athlete, both streams, as replayable JSON Lines.
 
-    A snapshot of retained rows (newest 300 per stream), read from both tables under one lock, sorted by recorded instant
-    with physiological before tracking at equal instants, and written exactly as stored (offsets, ids, sources, optional
-    measurements, nulls, zeros, confidences). Nothing is rebased or invented; rows already trimmed by the cap are gone.
+    A snapshot of every retained row (up to each stream's configured cap, whatever it is), read from both tables under one
+    lock, sorted by recorded instant with physiological before tracking at equal instants, and written exactly as stored
+    (offsets, ids, sources, optional measurements, nulls, zeros, confidences). Nothing is rebased or invented; rows already
+    trimmed by a cap are gone. The `X-Athletrix-Physiological-Cap` and `-Tracking-Cap` headers carry the caps in force.
     Not a database backup: no roster, device status, configuration or other athletes.
     """
     captured_at = clock.utc_now()
+    caps = retention_caps()
     with get_database().read():  # one consistent read of both streams (the lock is re-entrant for the store reads)
-        physiological = physiological_history_store.recent(athlete_id, MAX_HISTORY_SAMPLES)
-        tracking = tracking_history_store.recent(athlete_id, MAX_HISTORY_SAMPLES)
+        physiological = physiological_history_store.all(athlete_id)
+        tracking = tracking_history_store.all(athlete_id)
     if not physiological and not tracking:
         raise HTTPException(status_code=404, detail=f"No retained samples for athlete '{athlete_id}' in either stream; nothing to export")
     records = export_records(physiological, tracking)
@@ -274,6 +282,8 @@ def export_retained_samples(athlete_id: str) -> Response:
             "X-Athletrix-Record-Count": str(len(records)),
             "X-Athletrix-Physiological-Count": str(len(physiological)),
             "X-Athletrix-Tracking-Count": str(len(tracking)),
-            "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Record-Count, X-Athletrix-Physiological-Count, X-Athletrix-Tracking-Count",
+            "X-Athletrix-Physiological-Cap": str(caps["physiological"]),
+            "X-Athletrix-Tracking-Cap": str(caps["tracking"]),
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Record-Count, X-Athletrix-Physiological-Count, X-Athletrix-Tracking-Count, X-Athletrix-Physiological-Cap, X-Athletrix-Tracking-Cap",
         },
     )

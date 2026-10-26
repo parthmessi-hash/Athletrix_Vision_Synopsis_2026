@@ -2,7 +2,10 @@
 
 One table per stream. Latest-sample reads and history reads come from the same rows, so they can
 never disagree. Within a single transaction an insert replaces any row with the same UTC instant
-(equal-timestamp => most recent arrival wins) and then trims the oldest rows beyond the cap.
+(equal-timestamp => most recent arrival wins) and then trims the oldest rows beyond the stream's cap.
+Each stream has its own configured cap (see app/store/history.py), resolved when a sample is written,
+so the two streams never need to share one; an explicit `max_samples` pins a store to a fixed cap
+(tests and tools). The cap is applied only by writes: opening a database prunes nothing.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import Generic, Protocol, TypeVar
 from pydantic import BaseModel
 
 from app.db import Database, get_database, to_utc_iso
-from app.store.history import MAX_HISTORY_SAMPLES
+from app.store.history import retention_cap
 
 
 class _AthleteSample(Protocol):
@@ -34,13 +37,24 @@ class Retention(NamedTuple):
 
 
 class SampleStore(Generic[S]):
-    def __init__(self, table: str, model: type[S], max_samples: int = MAX_HISTORY_SAMPLES, db: Database | None = None) -> None:
+    def __init__(self, table: str, model: type[S], max_samples: int | None = None, db: Database | None = None) -> None:
         if table not in ("physiological_samples", "tracking_samples"):
             raise ValueError(f"unknown sample table {table!r}")
+        if max_samples is not None and (not isinstance(max_samples, int) or isinstance(max_samples, bool) or max_samples < 1):
+            raise ValueError(f"max_samples must be a positive integer, got {max_samples!r}")
         self._table = table
         self._model = model
-        self._max = max_samples
+        self._max = max_samples   # None: the stream's configured cap, read at each write
         self._db = db
+
+    @property
+    def stream(self) -> str:
+        return "physiological" if self._table == "physiological_samples" else "tracking"
+
+    @property
+    def max_samples(self) -> int:
+        """The cap this store trims to: the explicit one it was built with, else the stream's configured cap."""
+        return self._max if self._max is not None else retention_cap(self.stream)
 
     @property
     def db(self) -> Database:
@@ -51,10 +65,15 @@ class SampleStore(Generic[S]):
 
     # ---- writes -----------------------------------------------------------
     def add(self, sample: S) -> None:
-        """Insert (or replace an equal-instant row) and trim to the cap, atomically."""
+        """Insert (or replace an equal-instant row) and trim to the stream's cap, atomically.
+
+        The trim keeps the newest `max_samples` rows by recorded timestamp for this athlete and stream only; other
+        athletes and the other stream are untouched. This is the only place a cap is applied.
+        """
         athlete_id = sample.athlete_id  # type: ignore[attr-defined]
         ts = to_utc_iso(sample.timestamp)  # type: ignore[attr-defined]
         t = self._table
+        cap = self.max_samples
         with self.db.transaction() as c:
             c.execute(
                 f"INSERT INTO {t} (athlete_id, ts_utc, payload) VALUES (?, ?, ?) "
@@ -64,7 +83,7 @@ class SampleStore(Generic[S]):
             c.execute(
                 f"DELETE FROM {t} WHERE athlete_id = ? AND rowid IN "
                 f"(SELECT rowid FROM {t} WHERE athlete_id = ? ORDER BY ts_utc DESC LIMIT -1 OFFSET ?)",
-                (athlete_id, athlete_id, self._max),
+                (athlete_id, athlete_id, cap),
             )
 
     def upsert(self, sample: S) -> S:
@@ -97,6 +116,12 @@ class SampleStore(Generic[S]):
         with self.db.read() as c:
             rows = c.execute(f"SELECT payload FROM {self._table} WHERE athlete_id = ? ORDER BY ts_utc DESC LIMIT ?", (athlete_id, limit)).fetchall()
         return [self._row(r) for r in reversed(rows)]
+
+    def all(self, athlete_id: str) -> list[S]:
+        """Every retained sample for the athlete, oldest to newest, whatever the cap is."""
+        with self.db.read() as c:
+            rows = c.execute(f"SELECT payload FROM {self._table} WHERE athlete_id = ? ORDER BY ts_utc ASC", (athlete_id,)).fetchall()
+        return [self._row(r) for r in rows]
 
     def between(self, athlete_id: str, start: datetime, end: datetime) -> list[S]:
         """Samples with start <= timestamp <= end (compared in UTC), oldest to newest."""

@@ -56,7 +56,7 @@ USAGE
 
 Then replay `out.jsonl` with scripts/replay_samples.py. The recorded timestamps
 stay historical: they will not appear in the dashboard's live window, and only
-the newest 300 samples per athlete per stream are retained.
+only the newest samples per athlete up to each stream's retention cap (default 300) are retained.
 
 EXIT CODES: 0 converted (or a valid dry run); 1 invalid input, output file
 already present, or unreadable file; 2 bad command-line arguments.

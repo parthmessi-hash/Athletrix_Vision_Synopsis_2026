@@ -479,9 +479,31 @@ def test_unequal_rates_end_to_end_with_window_and_summary_on_each_grid(client):
     v = vt.verify(Borrowed2(client), "", res.records, cfg, res.start_utc)
     assert v["overall"]["failed"] == 0 and v["overall"]["unknown"] == 0, v
     a = v["per_athlete"][0]
-    assert a["retained"]["physiological"] == {"retained": 3, "span_s": 2.0, "capped": False} and a["retained"]["tracking"] == {"retained": 30, "span_s": 2.9, "capped": False}
+    assert a["retained"]["physiological"] == {"retained": 3, "span_s": 2.0, "cap": 300, "capped": False} and a["retained"]["tracking"] == {"retained": 30, "span_s": 2.9, "cap": 300, "capped": False}
     report = vt.build_report(cfg, {"base_url": "x", "pid": 0, "db_path": "x", "command": [], "retention_cap": 300}, res.records, res.actual_s, res.start_utc, v)
     assert report["streams"]["tracking"]["requested_rate_hz"] == 10.0 and report["retained_spans"]["tracking"]["rows"] == [30, 30]
     lines = []
     vt.print_summary(report, lines.append)
     assert any("tracking       requested 10 Hz" in l for l in lines) and any("retained per athlete: 30-30 rows spanning 2.9-2.9 s" in l for l in lines)
+
+
+# ---- per-stream retention caps for the isolated backend --------------------------------------------------------------
+
+def test_isolated_backend_caps_go_only_into_its_own_environment():
+    b = vt.IsolatedBackend(port=1, retention_caps={"tracking": 3000})
+    assert b.environment() == {"TRACKING_RETENTION_SAMPLES": "3000"}
+    assert vt.IsolatedBackend(port=1).environment() == {}, "no caps: the backend's own defaults"
+    for bad in ({"tracking": 0}, {"tracking": 2.5}, {"tracking": True}, {"devices": 5}):
+        with pytest.raises(ValueError):
+            vt.IsolatedBackend(port=1, retention_caps=bad)
+    assert not (ROOT / ".env").exists() or "RETENTION" not in (ROOT / ".env").read_text(), "the tool never writes .env"
+
+
+def test_expected_retained_and_cli_use_each_streams_cap():
+    recs = [vt.RequestRecord("a", "tracking", t, float(t), float(t), 0.001, "accepted", 200, payload={"timestamp": (datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=t)).isoformat()}) for t in range(10)]
+    assert [r.tick for r in vt.expected_retained(recs, "a", "tracking", 4)] == [6, 7, 8, 9]
+    assert len(vt.expected_retained(recs, "a", "tracking")) == 10, "default cap 300 keeps all ten"
+    args = vt.build_parser().parse_args(["--tracking-cap", "3000"])
+    cfg = vt.RunConfig(physiological_cap=args.physiological_cap, tracking_cap=args.tracking_cap)
+    assert cfg.retention_caps == {"physiological": 300, "tracking": 3000} and cfg.cap_for("tracking") == 3000
+    assert vt.main(["--tracking-cap", "0"], out=lambda s: None) == 2, "rejected before any backend is started"

@@ -38,7 +38,7 @@ reports exactly what was submitted, what failed and what was not sent. Nothing
 is retried or skipped silently.
 
 Because timestamps are preserved, replayed recordings stay historical: the
-backend's newest-timestamp rules, 300-sample retention per athlete per stream,
+backend's newest-timestamp rules, per-stream retention caps per athlete (default 300),
 and the frontend's rolling 60-second window all apply to the recorded times.
 
 USAGE (backend must already be running)

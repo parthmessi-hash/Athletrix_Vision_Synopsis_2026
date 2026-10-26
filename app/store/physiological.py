@@ -2,11 +2,11 @@
 
 from app.db import Database
 from app.models import PhysiologicalSample
-from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.samples import SampleStore
 
 
-def PhysiologicalStore(max_samples: int = MAX_HISTORY_SAMPLES, db: Database | None = None) -> SampleStore[PhysiologicalSample]:
+def PhysiologicalStore(max_samples: int | None = None, db: Database | None = None) -> SampleStore[PhysiologicalSample]:
+    """A physiological store; `max_samples` pins a fixed cap, otherwise the configured PHYSIOLOGICAL_RETENTION_SAMPLES applies at each write."""
     return SampleStore("physiological_samples", PhysiologicalSample, max_samples, db)
 
 
@@ -15,7 +15,7 @@ def LatestPhysiologicalStore(db: Database | None = None) -> SampleStore[Physiolo
 
 
 def PhysiologicalHistoryStore(max_samples: int | None = None, db: Database | None = None) -> SampleStore[PhysiologicalSample]:
-    return PhysiologicalStore(MAX_HISTORY_SAMPLES if max_samples is None else max_samples, db)
+    return PhysiologicalStore(max_samples, db)
 
 
 physiological_store = PhysiologicalStore()

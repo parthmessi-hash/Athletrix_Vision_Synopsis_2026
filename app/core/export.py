@@ -1,6 +1,6 @@
 """Export of an athlete's retained samples in the JSON Lines interchange format replayed by scripts/replay_samples.py.
 
-A snapshot of what the engine retains right now for one athlete (newest 300 per stream): not a recording archive, not
+A snapshot of what the engine retains right now for one athlete (every row up to each stream's cap): not a recording archive, not
 a database backup, and nothing already trimmed by the retention cap can come back. Records are written exactly as
 stored (timestamps with their recorded offsets, identifiers, sources, optional measurements, nulls, zeros,
 confidences) and nothing is rebased or invented.

@@ -8,7 +8,8 @@ WHAT IT DOES
      request records when it was due, when it was actually sent, how long the round trip took and how it
      ended. Failures are counted, never retried, and never replaced by invented successes.
   3. Reads back what the backend retained and checks it against the samples that were accepted: per-athlete
-     counts (with the newest-300 cap), latest timestamps, athlete and device separation, both streams in one
+     counts (under each stream's cap, default 300; --physiological-cap / --tracking-cap start the isolated
+     backend with other caps through its own environment, never .env), the reported caps, latest timestamps, athlete and device separation, both streams in one
      window, and a recorded summary over the run against the accepted samples. A request that timed out has
      an unknown outcome (the backend may or may not have stored it), so the affected athlete's checks are
      reported as unknown rather than forced to pass or fail.
@@ -39,6 +40,7 @@ WHAT IT IS NOT
 USAGE
     python scripts/validate_team_scale.py                      # 20 athletes, ~15 s, 1 Hz, overview read every 2 s
     python scripts/validate_team_scale.py --athletes 20 --duration 40 --physiological-rate 1 --tracking-rate 10
+    python scripts/validate_team_scale.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000
     python scripts/validate_team_scale.py --athletes 11 --duration 15
     python scripts/validate_team_scale.py --athletes 20 --duration 60                       # healthy run with reads
     python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted
@@ -81,9 +83,12 @@ DEFAULT_ATHLETES = 20
 DEFAULT_DURATION_S = 15.0
 DEFAULT_RATE_HZ = 1.0
 DEFAULT_TIMEOUT_S = 5.0
-RETENTION_CAP = 300
+DEFAULT_RETENTION_CAP = 300          # the backend's default per-stream cap; --physiological-cap / --tracking-cap set the isolated backend's own
+RETENTION_CAP = DEFAULT_RETENTION_CAP  # kept for older callers: the default, not necessarily a run's configured cap
+HISTORY_QUERY_LIMIT = 300            # the history endpoint's page-size limit, separate from the retention caps
 STREAMS = ("physiological", "tracking")
 SOURCE = "simulated"
+MAX_WINDOW_S = 300                   # the window endpoint's longest request, separate from the retention caps
 
 
 # ---- fictional athletes and samples -----------------------------------------------------------------------
@@ -324,6 +329,15 @@ class RunConfig:
     team_id: str = TEAM_ID
     physiological_rate_hz: float | None = None   # None: use rate_hz
     tracking_rate_hz: float | None = None        # None: use rate_hz
+    physiological_cap: int = DEFAULT_RETENTION_CAP   # retention caps the isolated backend is started with (and verified against)
+    tracking_cap: int = DEFAULT_RETENTION_CAP
+
+    def cap_for(self, stream: str) -> int:
+        return self.physiological_cap if stream == "physiological" else self.tracking_cap
+
+    @property
+    def retention_caps(self) -> dict[str, int]:
+        return {s: self.cap_for(s) for s in STREAMS}
 
     def rate_for(self, stream: str) -> float:
         """The stream's own rate: the explicit per-stream option when given, otherwise --rate."""
@@ -576,11 +590,11 @@ def count_outcomes(records: list[RequestRecord]) -> dict:
 UNCERTAIN_WHEN_TIMED_OUT = {"window_has_both_streams", "summary_counts", "summary_heart_rate_mean", "summary_speed_peak", "summary_sources_simulated"}
 
 
-def expected_retained(records: list[RequestRecord], athlete: str, stream: str) -> list[RequestRecord]:
-    """Accepted samples for the athlete and stream, newest 300 by timestamp (what the backend should retain)."""
+def expected_retained(records: list[RequestRecord], athlete: str, stream: str, cap: int = DEFAULT_RETENTION_CAP) -> list[RequestRecord]:
+    """Accepted samples for the athlete and stream, the newest `cap` by timestamp (what the backend should retain under that stream's cap)."""
     acc = [r for r in records if r.athlete == athlete and r.stream == stream and r.outcome == "accepted"]
     acc.sort(key=lambda r: r.payload["timestamp"])
-    return acc[-RETENTION_CAP:]
+    return acc[-cap:]
 
 
 def verify(client: httpx.Client, base_url: str, records: list[RequestRecord], cfg: RunConfig, start_utc: datetime) -> dict:
@@ -596,26 +610,27 @@ def verify(client: httpx.Client, base_url: str, records: list[RequestRecord], cf
         spans: dict = {}
         try:
             retained = client.get(f"{base_url}/api/v1/athletes/{a}/retained-data").json()
-            exp = {s: expected_retained(records, a, s) for s in STREAMS}
+            exp = {s: expected_retained(records, a, s, cfg.cap_for(s)) for s in STREAMS}
             for s in STREAMS:
                 got = retained[s]["sample_count"]
                 checks[f"{s}_retained_count"] = got == len(exp[s])
+                checks[f"{s}_reported_cap"] = retained[s].get("max_samples") == cfg.cap_for(s)   # the backend reports the cap it was started with
                 if exp[s]:
                     latest = client.get(f"{base_url}/api/v1/athletes/{a}/{s}/latest").json()
                     checks[f"{s}_latest_timestamp"] = datetime.fromisoformat(latest["timestamp"].replace("Z", "+00:00")) == datetime.fromisoformat(exp[s][-1].payload["timestamp"])
                     checks[f"{s}_latest_athlete_and_device"] = latest["athlete_id"] == a and latest["device_id"] == device_id(i, s)
                     seen_devices.setdefault(a, set()).add(latest["device_id"])
-                    history = client.get(f"{base_url}/api/v1/athletes/{a}/{s}/history?limit={RETENTION_CAP}").json()
+                    history = client.get(f"{base_url}/api/v1/athletes/{a}/{s}/history?limit={min(cfg.cap_for(s), HISTORY_QUERY_LIMIT)}").json()
                     checks[f"{s}_history_only_this_athlete"] = all(h["athlete_id"] == a for h in history)
             spans = {}
             for s in STREAMS:
                 lo, hi = retained[s]["earliest_timestamp"], retained[s]["latest_timestamp"]
                 spans[s] = {"retained": retained[s]["sample_count"], "span_s": (datetime.fromisoformat(hi.replace("Z", "+00:00")) - datetime.fromisoformat(lo.replace("Z", "+00:00"))).total_seconds() if lo and hi else None,
-                            "capped": retained[s]["sample_count"] >= RETENTION_CAP}
-            notes.append("retained: " + "; ".join(f"{s} {v['retained']} rows spanning {v['span_s']} s" + (" (at the 300-row cap)" if v["capped"] else "") for s, v in spans.items()))
+                            "cap": cfg.cap_for(s), "capped": retained[s]["sample_count"] >= cfg.cap_for(s)}
+            notes.append("retained: " + "; ".join(f"{s} {v['retained']} rows spanning {v['span_s']} s" + (f" (at the {v['cap']}-row cap)" if v["capped"] else "") for s, v in spans.items()))
             if exp["physiological"] or exp["tracking"]:
                 last_ts = max((r.payload["timestamp"] for s in STREAMS for r in exp[s]), key=lambda t: datetime.fromisoformat(t))
-                window_s = min(300, max(1, int(cfg.duration_s) + 1))
+                window_s = min(MAX_WINDOW_S, max(1, int(cfg.duration_s) + 1))   # the window endpoint's own limit, not a retention cap
                 end_dt = datetime.fromisoformat(last_ts)
                 in_window = {s: [r for r in exp[s] if datetime.fromisoformat(r.payload["timestamp"]) >= end_dt - timedelta(seconds=window_s)] for s in STREAMS}  # each stream on its own grid, after its own cap
                 win = client.get(f"{base_url}/api/v1/athletes/{a}/window", params={"seconds": window_s, "end": last_ts}).json()
@@ -762,9 +777,13 @@ def free_port() -> int:
 class IsolatedBackend:
     """Starts uvicorn for app.main:app on a free port with a fresh temporary database; stops exactly that process."""
 
-    def __init__(self, port: int | None = None, log_level: str = "warning", cors_origins: list[str] | None = None) -> None:
+    def __init__(self, port: int | None = None, log_level: str = "warning", cors_origins: list[str] | None = None, retention_caps: dict[str, int] | None = None) -> None:
         self.port = port or free_port()
         self.cors_origins = cors_origins or ["http://localhost:3000"]
+        self.retention_caps = dict(retention_caps or {})   # per-stream caps for this backend only, passed as environment variables; .env is untouched
+        for stream, cap in self.retention_caps.items():
+            if stream not in STREAMS or isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+                raise ValueError(f"retention cap for {stream!r} must be a positive integer, got {cap!r}")
         self.tmp = tempfile.TemporaryDirectory(prefix="athletrix-team-scale-")
         self.db_path = Path(self.tmp.name) / "isolated.db"
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -773,7 +792,7 @@ class IsolatedBackend:
         self.log_path = Path(self.tmp.name) / "backend.log"
 
     def start(self, ready_timeout_s: float = 20.0) -> None:
-        env = {**os.environ, "DATABASE_PATH": str(self.db_path), "CORS_ORIGINS": ",".join(self.cors_origins)}  # only this isolated backend's CORS
+        env = {**os.environ, "DATABASE_PATH": str(self.db_path), "CORS_ORIGINS": ",".join(self.cors_origins), **self.environment()}  # only this isolated backend's CORS and caps
         self.proc = subprocess.Popen(self.cmd, cwd=str(ROOT), env=env, stdout=open(self.log_path, "w"), stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + ready_timeout_s
         with httpx.Client(timeout=1.0) as c:
@@ -788,6 +807,10 @@ class IsolatedBackend:
                 time.sleep(0.1)
         self.stop()
         raise RuntimeError(f"backend on port {self.port} did not become ready within {ready_timeout_s} s; see {self.log_path}")
+
+    def environment(self) -> dict[str, str]:
+        """The retention settings this backend is started with (empty: the backend's own defaults)."""
+        return {f"{stream.upper()}_RETENTION_SAMPLES": str(cap) for stream, cap in self.retention_caps.items()}
 
     def stop(self) -> None:
         p = self.proc
@@ -835,7 +858,8 @@ def build_report(cfg: RunConfig, backend: dict, records: list[RequestRecord], ac
         "fictional_data": True,
         "config": {"athletes": cfg.athletes, "requested_duration_s": cfg.duration_s, "rate_hz": cfg.rate_hz, "physiological_rate_hz": cfg.rate_for("physiological"), "tracking_rate_hz": cfg.rate_for("tracking"),
                    "ticks": {s: stream_ticks(cfg, s) for s in STREAMS}, "request_timeout_s": cfg.timeout_s, "workers": cfg.workers, "grace_s": cfg.grace_s, "source": SOURCE,
-                   "retention_cap_note": "the newest-300 cap is a row count per stream, not a duration: at 10 Hz it spans 30 s, at 1 Hz 300 s"},
+                   "retention_caps": cfg.retention_caps,
+                   "retention_cap_note": "each cap is a row count per stream, not a duration: 300 rows span 30 s at 10 Hz and 300 s at 1 Hz; 3000 rows span about five minutes only at 10 Hz"},
         "streams": {s: stream_report(records, s, cfg.rate_for(s), cfg.athletes) for s in STREAMS},
         "retained_spans": {s: {"rows": [a["retained"][s]["retained"] for a in verification.get("per_athlete", []) if a.get("retained")], "span_s": [a["retained"][s]["span_s"] for a in verification.get("per_athlete", []) if a.get("retained")]} for s in STREAMS},
         "backend": backend,
@@ -862,7 +886,8 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
     f = lambda x: "n/a" if x is None else f"{x * 1000:.1f} ms"  # noqa: E731
     out("TEAM-SCALE VALIDATION (fictional athletes, isolated backend)")
     out(f"Backend: {report['backend']['base_url']} pid {report['backend']['pid']} db {report['backend']['db_path']}")
-    out(f"Config: {c['athletes']} athletes · physiological {c['physiological_rate_hz']:g} Hz ({c['ticks']['physiological']} ticks) · tracking {c['tracking_rate_hz']:g} Hz ({c['ticks']['tracking']} ticks) · requested {t['requested_duration_s']:.1f} s · actual run {t['actual_run_duration_s']:.2f} s (start to last response) · timeout {c['request_timeout_s']:g} s")
+    caps = c.get("retention_caps", {})
+    out(f"Config: {c['athletes']} athletes · physiological {c['physiological_rate_hz']:g} Hz ({c['ticks']['physiological']} ticks, cap {caps.get('physiological', DEFAULT_RETENTION_CAP)}) · tracking {c['tracking_rate_hz']:g} Hz ({c['ticks']['tracking']} ticks, cap {caps.get('tracking', DEFAULT_RETENTION_CAP)}) · requested {t['requested_duration_s']:.1f} s · actual run {t['actual_run_duration_s']:.2f} s (start to last response) · timeout {c['request_timeout_s']:g} s")
     out(f"Sample requests: expected {r['expected']} · attempted {r['attempted']} · accepted {r['accepted']} · failed {r['failed']} (http {r['http_error']}, timeout {r['timeout']}, connection {r['connection_error']}) · unsent {r['unsent']} · omitted by scenario {r['omitted_by_scenario']}")
     for s in STREAMS:
         b = report["streams"][s]
@@ -871,7 +896,8 @@ def print_summary(report: dict, out: Callable[[str], None] = print) -> None:
         out(f"  {s:14s} requested {b['requested_rate_hz']:g} Hz · expected {b['expected']} · attempted {b['attempted']} · accepted {b['accepted']} · failed {b['failed']} · unknown (timeout) {b['unknown_timeout']} · omitted by scenario {b['omitted_by_scenario']} · unsent {b['unsent']}")
         out(f"  {'':14s} delivered {b['delivered_rate_hz'] if b['delivered_rate_hz'] is None else round(b['delivered_rate_hz'], 3)} Hz over a {b['measurement_interval_s']:.1f} s schedule span · latency p50 {f(b['latency_s']['p50'])} p95 {f(b['latency_s']['p95'])} max {f(b['latency_s']['max'])} · lateness p50 {f(b['scheduling_lateness_s']['p50'])} p95 {f(b['scheduling_lateness_s']['p95'])} max {f(b['scheduling_lateness_s']['max'])}")
         if rs.get("rows"):
-            out(f"  {'':14s} retained per athlete: {min(rs['rows'])}-{max(rs['rows'])} rows spanning {min(spans):.1f}-{max(spans):.1f} s" + (" (at the 300-row cap: a count, not a duration)" if max(rs['rows']) >= RETENTION_CAP else ""))
+            cap = c.get("retention_caps", {}).get(s, DEFAULT_RETENTION_CAP)
+            out(f"  {'':14s} retained per athlete: {min(rs['rows'])}-{max(rs['rows'])} rows spanning {min(spans):.1f}-{max(spans):.1f} s" + (f" (at the {cap}-row cap: a count, not a duration)" if max(rs['rows']) >= cap else f" (cap {cap} rows)"))
     out(f"Write latency (client round trip per sample POST): p50 {f(lat['p50'])} · p95 {f(lat['p95'])} · max {f(lat['max'])} over {lat['count']} requests")
     out(f"Scheduling lateness (issue − due): p50 {f(late['p50'])} · p95 {f(late['p95'])} · max {f(late['max'])}")
     rd, rl = report.get("reads", {}), report.get("read_latency_s", {})
@@ -933,6 +959,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rate", type=float, default=DEFAULT_RATE_HZ, help=f"samples per second per athlete for both streams (default {DEFAULT_RATE_HZ:g}); a per-stream option below overrides it for that stream")
     p.add_argument("--physiological-rate", type=float, default=None, help="physiological samples per second per athlete (overrides --rate for this stream)")
     p.add_argument("--tracking-rate", type=float, default=None, help="tracking samples per second per athlete (overrides --rate for this stream)")
+    p.add_argument("--physiological-cap", type=int, default=DEFAULT_RETENTION_CAP, help=f"newest physiological samples the isolated backend keeps per athlete (default {DEFAULT_RETENTION_CAP}; its own environment only, .env is untouched)")
+    p.add_argument("--tracking-cap", type=int, default=DEFAULT_RETENTION_CAP, help=f"newest tracking samples the isolated backend keeps per athlete (default {DEFAULT_RETENTION_CAP}; a count, not a time span: 3000 is about five minutes only at 10 Hz)")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help=f"per-request timeout in seconds (default {DEFAULT_TIMEOUT_S:g})")
     p.add_argument("--workers", type=int, default=8, help="concurrent request workers (threads) (default 8)")
     p.add_argument("--report", type=Path, default=None, help="JSON report path (default reports/team-scale-<UTC time>.json, ignored by git)")
@@ -947,15 +975,18 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
     if args.athletes < 1 or args.duration <= 0 or args.rate <= 0 or args.timeout <= 0 or any(v is not None and v <= 0 for v in (args.physiological_rate, args.tracking_rate)):
         out("athletes must be >= 1 and duration, rates and timeout must be positive")
         return 2
+    if args.physiological_cap < 1 or args.tracking_cap < 1:
+        out("retention caps must be positive integers")
+        return 2
     cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers, read_interval_s=max(0.0, args.read_interval), scenario=args.scenario,
-                    physiological_rate_hz=args.physiological_rate, tracking_rate_hz=args.tracking_rate)
+                    physiological_rate_hz=args.physiological_rate, tracking_rate_hz=args.tracking_rate, physiological_cap=args.physiological_cap, tracking_cap=args.tracking_cap)
     try:
         plan = scenario_plan(cfg.scenario, cfg.athletes, cfg)
     except ValueError as exc:
         out(str(exc))
         return 2
     report_path = args.report or (ROOT / "reports" / f"team-scale-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
-    backend = IsolatedBackend(port=args.port)
+    backend = IsolatedBackend(port=args.port, retention_caps=cfg.retention_caps)
     stopping = {"done": False}
 
     def on_signal(signum, _frame):  # stop only the backend we started, then exit
@@ -966,9 +997,9 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
 
     previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
-        out(f"Starting an isolated backend on port {backend.port} with database {backend.db_path} (the development backend is not involved)…")
+        out(f"Starting an isolated backend on port {backend.port} with database {backend.db_path} and retention caps physiological {cfg.physiological_cap} / tracking {cfg.tracking_cap} (the development backend is not involved)…")
         backend.start()
-        backend_info = {"base_url": backend.base_url, "pid": backend.proc.pid if backend.proc else None, "db_path": str(backend.db_path), "command": backend.cmd, "retention_cap": RETENTION_CAP}
+        backend_info = {"base_url": backend.base_url, "pid": backend.proc.pid if backend.proc else None, "db_path": str(backend.db_path), "command": backend.cmd, "retention_caps": cfg.retention_caps, "retention_cap": cfg.physiological_cap if cfg.physiological_cap == cfg.tracking_cap else None}
         setup = register_team(backend.base_url, cfg, out)
         out(f"Sending {cfg.expected_samples} fictional samples for {cfg.athletes} athletes (physiological {cfg.rate_for('physiological'):g} Hz, tracking {cfg.rate_for('tracking'):g} Hz)" + (f", scenario {cfg.scenario}" if cfg.scenario != "healthy" else "") + (f", overview read every {cfg.read_interval_s:g} s" if cfg.read_interval_s > 0 else "") + "…")
         result = run_load(backend.base_url, cfg, plan=plan)

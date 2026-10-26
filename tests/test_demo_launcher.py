@@ -141,9 +141,10 @@ def test_feed_team_counts_failures_without_retrying_or_inventing_successes():
 class FakeBackend:
     instances = []
 
-    def __init__(self, port=None, log_level="warning", cors_origins=None):
+    def __init__(self, port=None, log_level="warning", cors_origins=None, retention_caps=None):
         self.port = port or 50000
         self.cors_origins = cors_origins
+        self.retention_caps = dict(retention_caps or {})
         self.db_path = Path("/tmp/fake.db")
         self.proc = None
         self.started = False
@@ -245,3 +246,13 @@ def test_demo_temporary_folder_is_created_and_removed(mocked):
     demo.cleanup()
     assert not demo.tmp_path.exists() and FakeBackend.instances[-1].cleaned
     demo.cleanup()  # idempotent
+
+
+def test_main_passes_explicit_caps_only_to_the_demo_backend(mocked):
+    lines = []
+    assert dl.main(["--frontend", str(mocked), "--duration", "1", "--exit-after-demo", "--tracking-cap", "3000"], out=lines.append) == 0
+    assert FakeBackend.instances[-1].retention_caps == {"tracking": 3000}
+    assert any("Retention caps for this demo backend only" in l and "tracking 3000" in l for l in lines)
+    assert dl.main(["--frontend", str(mocked), "--duration", "1", "--exit-after-demo"], out=lambda s: None) == 0
+    assert FakeBackend.instances[-1].retention_caps == {}, "no option: the backend's own defaults"
+    assert dl.main(["--frontend", str(mocked), "--physiological-cap", "0"], out=lines.append) == 2

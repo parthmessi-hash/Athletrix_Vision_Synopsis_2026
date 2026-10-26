@@ -24,6 +24,7 @@ USAGE
     python scripts/demo_launcher.py                                  # frontend folder guessed next to this repository
     python scripts/demo_launcher.py --frontend "/path/to/Athletrix Fixed Website" --athletes 4 --duration 90 --device-status
     python scripts/demo_launcher.py --exit-after-demo                 # stop everything when data generation ends
+    python scripts/demo_launcher.py --tracking-cap 3000               # the demo backend keeps 3000 tracking samples per athlete
 """
 
 import argparse
@@ -240,13 +241,14 @@ def feed_team(
 class Demo:
     """Owns the temporary folder and the two child processes; cleanup stops only those."""
 
-    def __init__(self, frontend: Path, backend_port: int | None, frontend_port: int | None) -> None:
+    def __init__(self, frontend: Path, backend_port: int | None, frontend_port: int | None, retention_caps: dict[str, int] | None = None) -> None:
         self.frontend = frontend
         self.tmp = tempfile.TemporaryDirectory(prefix="athletrix-demo-")
         self.tmp_path = Path(self.tmp.name)
         self.backend_port = choose_port(backend_port, "backend")
         self.frontend_port = choose_port(frontend_port, "frontend")
-        self.backend = IsolatedBackend(port=self.backend_port, cors_origins=[f"http://localhost:{self.frontend_port}", f"http://127.0.0.1:{self.frontend_port}"])
+        self.retention_caps = dict(retention_caps or {})
+        self.backend = IsolatedBackend(port=self.backend_port, cors_origins=[f"http://localhost:{self.frontend_port}", f"http://127.0.0.1:{self.frontend_port}"], retention_caps=self.retention_caps)
         self.static: StaticServer | None = None
         self.cleaned = False
 
@@ -301,6 +303,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend-port", type=int, default=None, help="backend port (default: a free port; an occupied port is an error)")
     p.add_argument("--frontend-port", type=int, default=None, help="frontend port (default: a free port; an occupied port is an error)")
     p.add_argument("--exit-after-demo", action="store_true", help="stop the servers when data generation ends instead of waiting for Ctrl-C")
+    p.add_argument("--physiological-cap", type=int, default=None, help="newest physiological samples the demo backend keeps per athlete (default: the backend's default, 300); its own environment only, .env is untouched")
+    p.add_argument("--tracking-cap", type=int, default=None, help="newest tracking samples the demo backend keeps per athlete (default: the backend's default, 300); a count, not a time span")
     return p
 
 
@@ -309,12 +313,16 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = say, wai
     if args.athletes < 1 or args.duration < 1:
         out("athletes and duration must be at least 1")
         return 2
+    caps = {stream: cap for stream, cap in (("physiological", args.physiological_cap), ("tracking", args.tracking_cap)) if cap is not None}
+    if any(cap < 1 for cap in caps.values()):
+        out("retention caps must be positive integers")
+        return 2
     frontend = args.frontend.expanduser()
     if not (frontend / "index.html").is_file():
         out(f"Frontend folder not found or has no index.html: {frontend}. Pass the Athletrix_Web folder with --frontend.")
         return 2
     try:
-        demo = (demo_factory or Demo)(frontend, args.backend_port, args.frontend_port)
+        demo = (demo_factory or Demo)(frontend, args.backend_port, args.frontend_port, caps)
     except RuntimeError as exc:
         out(f"Cannot start the demo: {exc}")
         return 1
@@ -331,6 +339,8 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = say, wai
     try:
         out("ATHLETRIX ISOLATED DEMO · fictional athletes and simulated data only · nothing is uploaded anywhere")
         out(f"Temporary folder: {demo.tmp_path} (removed on exit) · demo database: {demo.backend.db_path}")
+        if caps:
+            out("Retention caps for this demo backend only (its environment, not .env): " + ", ".join(f"{k} {v} samples per athlete" for k, v in caps.items()) + " · a count, not a time span")
         try:
             demo.start()
         except (RuntimeError, FileNotFoundError, OSError) as exc:

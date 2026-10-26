@@ -30,18 +30,18 @@ Terms used throughout:
 | Frontend / Athletrix_Web | The single static page `index.html` (port 3000 locally; assistantcoachai.net publicly). |
 | Stream | One of two per-athlete sample series: `physiological` or `tracking`. |
 | Latest | The newest persisted sample of a stream for an athlete. |
-| History | The newest 300 samples per athlete per stream (a count, not a time span). |
+| History | The newest samples per athlete per stream up to that stream's retention cap (`PHYSIOLOGICAL_RETENTION_SAMPLES`, `TRACKING_RETENTION_SAMPLES`, default 300 each; a count, not a time span). |
 | Window | Both streams for one athlete between `window_start` and one captured backend instant `window_end`. |
 | Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
 | Demo launcher | `scripts/demo_launcher.py`: one command starts a temporary database, an isolated backend and a frontend copy on free ports, registers a fictional multi-sport roster and feeds simulated data for a bounded time; nothing in the repositories, `.env` or the development database is touched. |
 | Team-scale validation | `scripts/validate_team_scale.py`: starts an isolated backend, registers N fictional athletes to a fictional team, sends samples concurrently on independent per-stream grids (`--rate`, or `--physiological-rate` / `--tracking-rate`) while reading the team overview every 2 s, reports write and read latency, scheduling lateness and counts (omitted-by-scenario apart from unsent), verifies retained data, overview consistency (no substituted readings, newest-timestamp ordering, paused-stream recency checked on the reads taken during the pause) and device statuses, with timeout-dependent checks reported as unknown rather than passed; `--scenario interrupted` adds a fixed paused/late-stream disturbance. Observations on one machine, not a capacity claim. |
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm, plus explicitly mapped optional physiological fields) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
-| Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
+| Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (the newest per athlete up to each stream's cap); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
 | Effort review | `GET /athletes/{id}/effort-review?effort_start&effort_end`: a manually selected 1-120 s period described by the tracking summary during it and heart-rate figures before [start-10 s, start), during [start, end] and after (end, end+30 s] (capped at backend time). Not sprint detection, not an effort classification. |
 | Live team overview | `GET /teams/{id}/live` and the dashboard's team card: every registered athlete on a team with the newest retained reading per stream and its age; the 5 s "stopped updating" label is a display rule, not a judgment. |
 | Retained-samples export | `GET /athletes/{id}/retained-samples.jsonl`: both streams of one athlete as replayable JSON Lines, written as stored. A snapshot of retained rows, not an archive. |
-| Retained data | `GET /athletes/{id}/retained-data`: per stream, the count of rows currently stored and the UTC recorded timestamps of the oldest and newest, plus the 300 cap. Describes retained rows only, not coverage, sessions or an archive; the dashboard's Find retained data / Review latest retained buttons use it. |
+| Retained data | `GET /athletes/{id}/retained-data`: per stream, the count of rows currently stored, the UTC recorded timestamps of the oldest and newest, and that stream's cap (`max_samples`). Describes retained rows only, not coverage, sessions or an archive; the dashboard's Find retained data / Review latest retained buttons use it. |
 | Engine mode / public mode | Whether the frontend polls the engine (localhost) or shows an explanation card and makes no engine requests (any other host). |
 | Usable tracking point | A tracking sample whose `tracking_confidence` is at or above the engine's `min_confidence` rule. Says nothing about the accuracy of the speed value itself. |
 
@@ -126,6 +126,7 @@ curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/effort-review?effort_start
 # 3i. one-command isolated demo: temporary database, own backend and frontend copy on free ports, fictional roster, simulated data
 python scripts/demo_launcher.py --frontend "/Users/parthgupta/Athletrix Fixed Website" --athletes 4 --duration 90 --device-status
 #    prints http://localhost:<port>/#demo; Ctrl-C stops only what it started and removes its temporary folder
+#    add --tracking-cap 3000 (and/or --physiological-cap N) to start the demo backend with other retention caps (its environment only)
 
 # 3g. team-scale validation on its own isolated backend (fresh temporary database, free port; the dev backend is untouched)
 python scripts/validate_team_scale.py --athletes 11 --duration 15
@@ -133,6 +134,7 @@ python scripts/validate_team_scale.py --athletes 20 --duration 60               
 python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted   # paused/late streams + device statuses
 python scripts/validate_team_scale.py --athletes 20 --duration 40 --physiological-rate 1 --tracking-rate 10   # unequal rates, crosses the tracking cap
 python scripts/validate_team_scale.py --athletes 20 --duration 20 --physiological-rate 1 --tracking-rate 4 --scenario interrupted
+python scripts/validate_team_scale.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000   # isolated backend with a larger tracking cap
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
 
 # 3h. live team overview: every registered athlete on a team, newest retained reading per stream with its age
@@ -168,7 +170,7 @@ Timestamps must be ISO 8601 with a timezone.
 | `EffortReview` | `athlete_id`, `effort_start`, `effort_end`, `effort_duration_seconds`, `captured_at`, `follow_up_elapsed`, `rules` (`EffortRules`: before 10 s, after 30 s, effort 1-120 s), `movement` (`TrackingSummary` over the effort), `heart_rate.before/during/after` (`HeartRatePeriod`: applied bounds with inclusivity flags, sample and heart-rate counts, mean, peak, first/last, max gap, `sources`) |
 | `AthleteLive` | `athlete_id`, `captured_at`, `registered`, `athlete` or null, `physiological`, `tracking` or null, ages, `physiological_newest_ahead_seconds`, `tracking_newest_ahead_seconds`, `devices` |
 | `TeamLive` | `team_id`, `captured_at`, `athletes` (`TeamAthleteLive`: `athlete`, `physiological`, `tracking` or null, `physiological_age_seconds`, `tracking_age_seconds`, `devices`: `ReportedDevice` with `device_id`, `streams`, `status` or null, `status_age_seconds`) |
-| `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (300) |
+| `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `max_samples` (that stream's cap), `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (the shared cap when both are equal, null when they differ; kept for older consumers) |
 
 Endpoints, all under `/api/v1`:
 
@@ -181,14 +183,14 @@ Endpoints, all under `/api/v1`:
 | `POST /samples/physiological`, `POST /samples/tracking` | Ingest one sample: validate, reject timestamps more than 5 s ahead of backend UTC (422), persist, echo. Registration is not required. |
 | `POST /devices/status`, `GET /devices/{id}/status/latest` | Device status ingest (newest per device kept) and read |
 | `GET /athletes/{id}/physiological/latest`, `.../tracking/latest` | Newest persisted sample (404 if none) |
-| `GET /athletes/{id}/physiological/history?limit=60`, `.../tracking/history?limit=60` | Newest `limit` (1-300) samples, oldest to newest |
+| `GET /athletes/{id}/physiological/history?limit=60`, `.../tracking/history?limit=60` | Newest `limit` (1-300 per request, a page-size limit separate from the retention caps) samples, oldest to newest |
 | `GET /athletes/{id}/window?seconds=60[&end=...]` | Both streams in the `seconds` (1-300) before `end`, plus `tracking_rules`. Without `end`: live, one captured backend `window_end`. With `end` (ISO 8601 with timezone, not after backend time, `+` encoded as `%2B`): recorded review ending at that exact instant. Invalid, naive or future `end` is a 422. |
 | `GET /athletes/{id}/summary?seconds=60[&end=...]` | Descriptive metrics over the same window selection; ages are relative to `window_end` (in a review: seconds before the selected end) |
 | `GET /athletes/{id}/effort-review?effort_start=...&effort_end=...` | Descriptive review of a manually selected effort (ISO timestamps with timezone, 1-120 s, end not in the future; 422 otherwise). Movement = tracking summary over the effort; heart rate for three non-overlapping periods; `follow_up_elapsed` says only whether 30 s have passed. No interpolation, extrapolation, recovery or fatigue inference. |
 | `GET /athletes/{id}/live` | Coherent single-athlete snapshot on the team overview's selection: one captured instant, newest retained sample per stream at or before it, ages, `*_newest_ahead_seconds` for a stored sample not yet current, device associations with explicit skew. Registration not required (`registered: false`, never 404). The `latest` endpoints keep newest-stored semantics. |
 | `GET /teams/{team_id}/live` | One snapshot of every athlete registered with the team id (sorted by jersey then id) with the newest retained sample per stream at or before one captured instant and its age (never negative; samples after the instant excluded). Unknown team: empty list. Each athlete also carries `devices`: the ids named by those newest samples (deduplicated) with each id's latest DeviceStatus report, age and `status_ahead_seconds` (explicit clock skew for a report timestamped after the captured instant; age 0, never negative, never presented as current), read in one query; a reported association, not a verified identity. |
 | `GET /athletes/{id}/retained-samples.jsonl` | Download of every retained sample for the athlete, both streams, as replayable JSON Lines (`application/x-ndjson`, attachment filename, record-count headers): one consistent read, oldest first with physiological before tracking at equal instants, written as stored. 404 when neither stream has rows. A snapshot of retained rows, not an archive or backup. |
-| `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and the cap. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
+| `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and that stream's cap; both streams under one read. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
 Configuration (`app/core/config.py`, overridable via environment or `.env`; see `.env.example`):
 
@@ -200,10 +202,19 @@ Configuration (`app/core/config.py`, overridable via environment or `.env`; see 
 | `DISTANCE_MAX_GAP_SECONDS` | `3.0` | Longest consecutive-sample interval counted (0 < v <= 60) |
 | `DISTANCE_MIN_CONFIDENCE` | `0.5` | Minimum confidence at both ends of an interval; also echoed as `tracking_rules.min_confidence` in the window |
 | `HIGH_SPEED_THRESHOLD_MPS` | `5.0` | Speed at or above which time and distance count as high-speed (demonstration value) |
+| `PHYSIOLOGICAL_RETENTION_SAMPLES` | `300` | Newest physiological samples kept per athlete (positive integer; a count, not a time span) |
+| `TRACKING_RETENTION_SAMPLES` | `300` | Newest tracking samples kept per athlete (positive integer; 3000 is about five minutes only at 10 Hz) |
 
-Other fixed constants: `MAX_HISTORY_SAMPLES = 300` (`app/store/history.py`),
-`MAX_WINDOW_SECONDS = 300` (`app/api/athletes.py`), `MAX_FUTURE_TIMESTAMP_SKEW = 5 s`
-(`app/core/clock.py`).
+Changing a cap: it is applied only by the insert-plus-trim write of an accepted
+sample, for that athlete and stream. Startup never prunes or rewrites stored
+rows, so a reduced cap takes effect for an athlete's stream at its next accepted
+sample and a raised cap never brings trimmed rows back. Example profile:
+physiological 300, tracking 3000.
+
+Other fixed constants: `MAX_HISTORY_QUERY_LIMIT = 300` and `MAX_WINDOW_SECONDS = 300`
+(`app/api/athletes.py`: page size of one history request and longest window; API
+limits separate from the retention caps, deliberately unchanged by them),
+`MAX_FUTURE_TIMESTAMP_SKEW = 5 s` (`app/core/clock.py`).
 
 ## 5. Persistence and retention
 
@@ -211,13 +222,17 @@ Other fixed constants: `MAX_HISTORY_SAMPLES = 300` (`app/store/history.py`),
   5 s busy timeout, one connection per process shared behind a lock. Schema is
   created at startup. Supported setup: a single uvicorn process (`--reload` is fine).
 - Persisted across restarts: registered athletes; each device's newest status;
-  each athlete's newest 300 physiological and 300 tracking samples. "Latest" is
-  simply the newest persisted row, so it survives restarts too.
-- Each sample write (insert or equal-instant replacement plus trim to 300) is one
-  short transaction. Equal timestamps: the latest arrival replaces the earlier one.
-  Timestamps are stored as fixed-width UTC text; payloads keep the original offset.
-- Retention is a sample count, not a time span: at 1 Hz about five minutes per
-  stream. There is no match or season storage and no export.
+  each athlete's newest physiological and tracking samples up to each stream's
+  cap (default 300 each). "Latest" is simply the newest persisted row, so it
+  survives restarts too.
+- Each sample write (insert or equal-instant replacement plus trim to that
+  stream's cap) is one short transaction. Equal timestamps: the latest arrival
+  replaces the earlier one. Timestamps are stored as fixed-width UTC text;
+  payloads keep the original offset. Opening a database prunes nothing.
+- Retention is a sample count per stream, not a time span: 300 is about five
+  minutes at 1 Hz and 30 s at 10 Hz; 3000 tracking samples is about five minutes
+  only at 10 Hz. There is no match or season storage; the export is a snapshot
+  of retained rows, not an archive.
 - `data/` and `*.db*` are git-ignored. Tests never touch it: every test uses its
   own temporary file (`tests/conftest.py`).
 
@@ -239,7 +254,7 @@ banner, and is never substituted for engine data.
 ## 7. Implemented calculations and their assumptions
 
 All of these are descriptive and cover only the samples available in the window
-(bounded by transmission gaps and the 300-sample history cap).
+(bounded by transmission gaps and each stream's retention cap).
 
 - **Window selection.** `window_end` is backend UTC time read once (live) or
   the `end` query parameter (recorded review; timezone-aware, not after backend
@@ -286,7 +301,7 @@ All of these are descriptive and cover only the samples available in the window
   HTTP or connection failure and reports submitted / failed / not sent counts.
   Preserves timestamps, sources, ids, nulls, zeros and confidences; never
   rebases to the current time, so old recordings stay out of the rolling
-  60 s window and are subject to the newest-timestamp and 300-sample rules.
+  60 s window and are subject to the newest-timestamp rules and the per-stream caps.
 - **Heart-rate CSV conversion (`scripts/convert_heart_rate_csv.py`).** One
   `physiological` record per CSV row with the given athlete, device and
   source; heart rate taken as bpm as written (blank = null, never 0);
@@ -365,7 +380,7 @@ Implemented today is listed above; the following are **not** implemented:
   or recommendation; a heart-rate difference between its periods is not
   evidence of recovery or of a change in condition. Its 10 s / 30 s periods
   are engineering defaults, `follow_up_elapsed` only reports elapsed time,
-  and the 300-sample cap can leave any period partial or empty.
+  and the retention caps can leave any period partial or empty.
 - The single-athlete live cards and the team overview share one selection
   (`app/core/live.py`): a sample timestamped ahead of backend time stays
   stored and is reported as "ahead", never shown as current. The plain
@@ -381,18 +396,21 @@ Implemented today is listed above; the following are **not** implemented:
   time and then stops sending; it is not a deployment and changes no hosting
   or DNS setting. Only the engine dashboard was verified with external
   origins blocked; the marketing pages were not.
-- The newest-300 retention cap is a row count per stream, not a duration:
-  a 10 Hz tracking stream keeps about 30 s while a 1 Hz physiological
-  stream keeps 300 s. The validation report shows each stream's retained
-  rows and timestamp span so the difference is visible. A synthetic 10 Hz
-  tracking stream is not a camera integration.
+- A retention cap is a row count per stream, not a duration: under the
+  default 300 a 10 Hz tracking stream keeps about 30 s while a 1 Hz
+  physiological stream keeps 300 s, and a tracking cap of 3000 keeps about
+  five minutes only at 10 Hz. The caps are configurable per stream but
+  remain bounded local storage, not an archive. The validation report shows
+  each stream's cap, retained rows and timestamp span so the difference is
+  visible. A synthetic 10 Hz tracking stream is not a camera integration.
 - The team-scale validation tool measures a short run on one machine with
   fictional athletes. Its latency figures are client-side round trips with
   no pass threshold, and 15 s runs do not establish sustained match-length
   behaviour; a timed-out request leaves acceptance unknown and is reported
   as such.
 - The retained-samples export is a snapshot of what is stored at that
-  moment for one athlete: newest 300 per stream, written as stored. It is
+  moment for one athlete: every retained row under each stream's cap,
+  written as stored, with the caps in its headers. It is
   not a recording archive or a database backup; rows the cap has already
   removed cannot be recovered, and the roster, device status and
   configuration are not part of it.
@@ -407,8 +425,8 @@ Implemented today is listed above; the following are **not** implemented:
 - No authentication, authorisation or multi-user handling; the engine is meant to
   run on a local sideline machine behind CORS only.
 - Single-process SQLite only; multiple backend processes on one file are unsupported.
-- Retention is 300 samples per athlete per stream; no match/season storage and
-  no export. Recorded review (`end=` and the dashboard's Recorded mode) can
+- Retention is a per-stream sample count (default 300 each, configurable); no
+  match/season storage. Recorded review (`end=` and the dashboard's Recorded mode) can
   therefore show only what is still retained: it is a review of retained
   samples, not a recording archive, and older records may already be gone.
 - Retained-data lookup (`retained-data`, dashboard Find retained data)
