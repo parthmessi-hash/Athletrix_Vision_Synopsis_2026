@@ -36,6 +36,7 @@ Terms used throughout:
 | Demo launcher | `scripts/demo_launcher.py`: one command starts a temporary database, an isolated backend and a frontend copy on free ports, registers a fictional multi-sport roster and feeds simulated data for a bounded time; nothing in the repositories, `.env` or the development database is touched. |
 | Team-scale validation | `scripts/validate_team_scale.py`: starts an isolated backend, registers N fictional athletes to a fictional team, sends samples concurrently on independent per-stream grids (`--rate`, or `--physiological-rate` / `--tracking-rate`) while reading the team overview every 2 s, reports write and read latency, scheduling lateness and counts (omitted-by-scenario apart from unsent), verifies retained data, overview consistency (no substituted readings, newest-timestamp ordering, paused-stream recency checked on the reads taken during the pause) and device statuses, with timeout-dependent checks reported as unknown rather than passed; `--scenario interrupted` adds a fixed paused/late-stream disturbance. Observations on one machine, not a capacity claim. |
 | Retention comparison | `scripts/compare_retention.py`: the team-scale scenario run twice on two isolated backends, profile A (default caps) and profile B (larger tracking cap), same deterministic values and relative schedule, genuine timestamps per run; verifies retention, an early effort review (movement against independently calculated expectations, heart-rate periods, availability metadata, null distance preserved), the recorded window, export and replay into a third isolated backend, and compares the runs. Observations, not thresholds. |
+| Saved period workflow check | `scripts/verify_period_workflow.py`: a deterministic fictional effort-rest session on an isolated backend (missing heart rates, low-confidence points, a gap), several saved periods including identical labels, another athlete and a second recording, snapshots downloaded, a restart, reopened reviews against independent expectations, empty phases and null distance, snapshot agreement, and a changed high-speed threshold reflected in a new review and snapshot while the saved bounds and the earlier snapshot stay. A functional check, not a performance test. |
 | Recording flow check | `scripts/verify_recording_flow.py`: an isolated backend with tiny rolling caps, rolling samples before any recording, a recording for two of three fictional athletes with more samples than the caps (a delayed sample, an equal-instant replacement, a null heart rate, a real zero speed), stop, more samples, a second recording, a restart, then rolling versus recorded contents, exclusion of pre-start, post-stop and unselected data, separation of the two recordings, independent summary and effort expectations, and export plus replay into a second isolated backend. A functional check, not a performance test. |
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm, plus explicitly mapped optional physiological fields) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (the newest per athlete up to each stream's cap); it is not a recording archive. |
@@ -154,6 +155,9 @@ curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/record
 curl -s -X POST "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods" -H 'content-type: application/json' -d '{"label":"second sprint","effort_start":"<ISO>","effort_end":"<ISO>"}'
 curl -s "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods"
 curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods/<period id>/review.json"   # descriptive snapshot
+
+# 3n. saved-period workflow check on an isolated backend (save, restart, reopen, export, changed setting; report under reports/)
+python scripts/verify_period_workflow.py
 
 # 3l. recording end-to-end check on an isolated backend with rolling caps of 3 (report under reports/, ignored by git)
 python scripts/verify_recording_flow.py
@@ -567,9 +571,11 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "56 tests, 56 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "58 tests, 58 passed"
 # recording flow on an isolated backend (seconds; exit 0 means every check passed)
 python scripts/verify_recording_flow.py
+# saved-period workflow on an isolated backend (seconds; exit 0 means every check passed)
+python scripts/verify_period_workflow.py
 # retention comparison on isolated backends (about three minutes; exit 0 means every check passed, unknown is not a pass)
 python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000
 

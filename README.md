@@ -1087,6 +1087,44 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
+### Save, restart, reopen, export: a reproducible example
+
+```bash
+B=http://127.0.0.1:8000/api/v1
+# 1. a stopped recording of athlete-1 exists (start one, send samples, stop it); then save a period
+curl -s -X POST "$B/recordings/<id>/athletes/athlete-1/periods" -H 'content-type: application/json' \
+     -d '{"label":"second sprint","effort_start":"2026-10-26T20:10:00Z","effort_end":"2026-10-26T20:10:20Z"}'
+# 2. restart the backend (Ctrl-C and start uvicorn again): the period is still listed with the same id and bounds
+curl -s "$B/recordings/<id>/athletes/athlete-1/periods"
+# 3. reopen it: the existing session effort review at its exact bounds (the engine's current rules apply)
+curl -s "$B/recordings/<id>/athletes/athlete-1/effort-review?effort_start=2026-10-26T20:10:00Z&effort_end=2026-10-26T20:10:20Z"
+# 4. export the descriptive snapshot (saved selection, rules in force now, result and samples)
+curl -OJ "$B/recordings/<id>/athletes/athlete-1/periods/<period id>/review.json"
+```
+
+The same steps on isolated backends with fictional data, including a changed
+engine setting between two exports, are run by `scripts/verify_period_workflow.py`:
+
+```bash
+python scripts/verify_period_workflow.py                   # isolated backend, 120 s fictional effort-rest session, exit 0 when every check passed
+```
+
+It feeds a deterministic session built from the simulator's effort-rest
+profile (accelerate, sustain, slow, rest) with missing heart-rate
+measurements, low-confidence tracking points and a gap, saves several periods
+(an acceleration, a sustained effort, a rest, the gap, two with the same
+label) plus one for another athlete and one in a second recording, downloads
+each snapshot, restarts the backend and checks that the periods are listed
+again with their exact bounds, that identical labels coexist, that athletes
+and recordings stay separate, that reopened reviews match expectations
+computed independently in the script (trapezoid distance over eligible
+intervals, threshold crossings, the documented phase boundaries, null heart
+rates as samples but not measurements), that an empty phase and a missing
+distance stay null, that each snapshot agrees with the live review, and that
+after restarting the backend with a different high-speed threshold a new
+review and a new snapshot reflect it while the saved bounds and the earlier
+snapshot do not change.
+
 ### End-to-end check (`scripts/verify_recording_flow.py`)
 
 ```bash
