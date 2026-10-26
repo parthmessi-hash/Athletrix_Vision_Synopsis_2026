@@ -205,7 +205,7 @@ The page resolves a mode on load (`resolveEngineMode` in `index.html`):
 
 | Mode | When | Behaviour |
 |------|------|-----------|
-| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). Each card's source badge is derived from the data it shows: the two latest-reading cards from that sample's own `source`/`device_id`, the summary and timeline cards from their response's `sources` breakdown ("Reported source: simulated", "Reported source: wearable", "Mixed sources: camera 1, wearable 3, not reported 2", "Source not reported", "No samples", "Source information unavailable"); badges are cleared on athlete, mode and review-time changes. Browser-generated demonstration panels keep their own "Browser demo · fictional data" labels. In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. **Download retained samples** in the same block fetches `retained-samples.jsonl` on click and saves it through a browser download link (nothing uploaded); a 404 is shown as "no retained samples", errors can be retried, and a response for an earlier athlete, mode or request is never saved. In Recorded mode a **Selected effort review** card calls `effort-review` only on Review effort / Refresh and shows the engine's movement figures, the before/during/after heart-rate comparison with per-period bounds, first/last samples and sources, the applied rules and the follow-up flag with its "elapsed time is not completeness" wording; results are invalidated on input edits, athlete and mode changes. |
+| `engine` | hostname is `localhost`, `127.0.0.1`, `[::1]` or `*.localhost`; or `?engine=1`; or `engineMode: "engine"` in `window.ATHLETRIX_CONFIG` | Shows the athlete selector, the Live / Recorded review bar and four engine-connected cards (Live Heart Rate, Live Tracking, Last 60 seconds, Recent movement and heart rate) and polls `apiBase` (default `http://127.0.0.1:8000`). Each card's source badge is derived from the data it shows: the two latest-reading cards from that sample's own `source`/`device_id`, the summary and timeline cards from their response's `sources` breakdown ("Reported source: simulated", "Reported source: wearable", "Mixed sources: camera 1, wearable 3, not reported 2", "Source not reported", "No samples", "Source information unavailable"); badges are cleared on athlete, mode and review-time changes. Browser-generated demonstration panels keep their own "Browser demo · fictional data" labels. In Recorded mode the two live cards are hidden, the summary and timeline are fetched with `end=` only on Review, athlete change or Refresh (no timer), and both are badged "Recorded-time review". A **Retained data** block (Recorded mode only) fetches `retained-data` on **Find retained data** (never on a timer), shows each stream's count and UTC range, and **Review latest retained** opens the 60 s review ending at the newest retained timestamp across the non-empty streams; the block is cleared on athlete or mode change and late responses are dropped. **Download retained samples** in the same block fetches `retained-samples.jsonl` on click and saves it through a browser download link (nothing uploaded); a 404 is shown as "no retained samples", errors can be retried, and a response for an earlier athlete, mode or request is never saved. In Recorded mode a **Selected effort review** card calls `effort-review` only on Review effort / Refresh and shows the engine's movement figures, the before/during/after heart-rate comparison with per-period bounds, first/last samples and sources, the applied rules and the follow-up flag with its "elapsed time is not completeness" wording; results are invalidated on input edits, athlete and mode changes. The timeline card's **Select an effort from the timeline** toolbar (Recorded mode) copies a clicked or list-chosen sample's recorded timestamp text into that form, shades the selected span on both charts as a user selection, and is cleared on athlete, window or mode change; picking never requests anything. |
 | `public` | any other hostname (the published site), or `?engine=0`, or `engineMode: "public"` | Shows an explanation card with the local startup steps. **No request is made to the engine.** |
 
 Polling: live cards every 1 s, summary and timeline every 5 s, only while the
@@ -422,6 +422,7 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 #    expect movement 4 samples, peak 6.0, 10.5 m over 2.0 s (1 excluded), high speed 1.5 s / 8.25 m; heart rate before 1 sample (112),
 #    during 4 samples / 3 measurements mean 117.833 peak 120.5, after 0 samples; follow_up_elapsed true
 #    dashboard: Recorded -> Selected effort review -> enter 2026-10-20T10:00:01Z and 2026-10-20T10:00:04Z -> Review effort -> same figures
+#    or: Recorded -> Review 2026-10-20T10:00:04Z -> Pick effort start -> click the 10:00:01Z point -> click the 10:00:04Z point -> Review effort
 # dashboard against that backend (serve a copy of index.html with apiBase pointed at :8010): Recorded -> Find retained data ->
 # expect both streams "5 retained · 2026-10-20T10:00:00Z → 2026-10-20T10:00:04Z UTC"; Review latest retained -> the review above
 
@@ -429,7 +430,7 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "33 tests, 33 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "39 tests, 39 passed"
 
 # frontend: public mode locally (must make no engine requests; check the Network tab)
 open "http://localhost:3000/?engine=0#demo"
@@ -437,9 +438,9 @@ open "http://localhost:3000/?engine=0#demo"
 
 ## 10. Recommended next milestone
 
-**Optional physiological fields in the heart-rate adapter.** The effort
-review is now on the dashboard (done 2026-10-26) as a typed-bounds card;
-picking the bounds by clicking on the timeline would be a later refinement.
+**Effort comparison and team-scale validation.** The effort review is on
+the dashboard (done 2026-10-26) with typed bounds and timeline point
+selection (done 2026-10-26).
 With both CSV adapters, the replay, recorded review,
 the retained-data lookup and source-derived card labels (all done
 2026-10-25), a converted session can be found and reviewed end to end on
