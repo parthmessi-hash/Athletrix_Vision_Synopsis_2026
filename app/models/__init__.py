@@ -12,7 +12,7 @@ from app.models.effort import EffortReview, EffortRules, HeartRatePeriod, HeartR
 from app.models.physiological import PhysiologicalSample
 from app.models.retained import RetainedData, StreamRetention
 from app.models.sources import SourceBreakdown, WindowSources
-from app.models.team import TeamAthleteLive, TeamLive
+from app.models.team import ReportedDevice, TeamAthleteLive, TeamLive
 from app.models.summary import AthleteSummary, DistanceEstimate, DistanceRules, HighSpeedEstimate, PhysiologicalSummary, TrackingSummary
 from app.models.tracking import TrackingSample
 from app.models.window import AthleteWindow, TrackingRules
@@ -32,6 +32,7 @@ __all__ = [
     "PhysiologicalSample",
     "PhysiologicalSummary",
     "Posture",
+    "ReportedDevice",
     "RetainedData",
     "SampleSource",
     "SourceBreakdown",

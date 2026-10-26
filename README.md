@@ -551,6 +551,25 @@ curl "http://127.0.0.1:8000/api/v1/teams/demo-team/live"
   how a consumer tells a stale reading from no reading (`null`).
 - The response carries the samples as stored, sources included, and makes
   no judgment about freshness.
+- `devices` lists, per athlete, the device ids named by those two newest
+  samples (deduplicated; `streams` says which named it) with the latest
+  `DeviceStatus` report held for each id and its age, read in one query for
+  the whole team. The association is only that the sample reported the id:
+  it is a reported association, not a verified identity or a permanent
+  assignment, and an id named only by an older sample is not listed. A
+  report describes the moment it was sent, so an old `connected: true` is
+  not proof of a current connection; nothing infers connection or
+  disconnection from samples arriving or stopping. `status` is null when
+  no report was ever received; battery and signal quality are null when
+  not reported and 0 when reported as 0.
+
+The simulator can send clearly fictional status reports for its own device
+id every 5 s with `--with-device-status` (off by default; existing commands
+are unchanged):
+
+```bash
+python scripts/simulate_athlete.py --with-tracking --with-device-status
+```
 
 ### Reviewing a recorded window (`end` parameter)
 
@@ -802,13 +821,40 @@ on one machine, reported as observations with the machine context, with no
 latency pass threshold invented.
 
 ```bash
-python scripts/validate_team_scale.py                          # 20 athletes, ~15 s, 1 Hz per stream
+python scripts/validate_team_scale.py                          # 20 athletes, ~15 s, 1 Hz per stream, overview read every 2 s
 python scripts/validate_team_scale.py --athletes 11 --duration 15
+python scripts/validate_team_scale.py --athletes 20 --duration 60                        # healthy run with concurrent reads
+python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario interrupted # paused and late streams
 python scripts/validate_team_scale.py --athletes 20 --report reports/my-run.json
 #   flags: --athletes N (default 20) --duration S (default 15) --rate HZ (default 1) --timeout S (default 5)
 #          --workers N (default 8 request threads) --port P (default: a free port) --report PATH
-#   exit 0 when every verification passed and nothing was left unsent; 1 otherwise; 2 for bad arguments
+#          --read-interval S (overview read during ingestion, default 2; 0 disables) --scenario healthy|interrupted
+#   exit 0 when every verification and overview check passed and nothing was left unsent; 1 otherwise; 2 for bad arguments
 ```
+
+Before the timed run the tool registers its fictional athletes to the
+fictional team `fictional-team`; that setup is reported apart from the
+measured traffic. During the run it reads `GET /teams/fictional-team/live`
+every `--read-interval` seconds from the same client and checks each
+response: one entry per registered athlete, every entry's samples naming
+that athlete and no other, ages never negative, latest timestamps never
+going backwards between reads, and device ids matching the samples. Read
+latency is reported separately from write latency.
+
+`--scenario interrupted` adds a small, fixed disturbance (it needs at least
+3 athletes and 13 ticks): the tracking streams of the first two athletes are
+paused for ticks 5 to 9 (those samples are counted as *omitted by
+scenario*, apart from anything the tool failed to send), the third
+athlete's physiological samples for ticks 5 to 9 are delivered at tick 12,
+newest first, with their original recorded timestamps, and the first three
+athletes report a device status at ticks 0 and 10 with the tick-0 report
+re-sent at tick 12. The verification then also checks that the overview's
+latest reading per stream is the newest accepted timestamp (so an older
+late arrival never replaced a newer one), that the paused samples are
+absent while the other stream's samples for those ticks are present, and
+that each device's status is the newest report. It is one reproducible
+scenario, not a fault-injection framework, and timestamp validation is
+never bypassed: late samples are late only in delivery.
 
 What a run does:
 

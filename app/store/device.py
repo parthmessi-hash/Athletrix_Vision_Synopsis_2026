@@ -37,6 +37,15 @@ class DeviceStatusStore:
             row = c.execute("SELECT payload FROM device_status WHERE device_id = ?", (device_id,)).fetchone()
         return DeviceStatus.model_validate_json(row["payload"]) if row else None
 
+    def get_many(self, device_ids: list[str]) -> dict[str, DeviceStatus]:
+        """Latest status for each of the given device ids that has one, in one query (ids without a status are absent)."""
+        ids = sorted({d for d in device_ids if d})
+        if not ids:
+            return {}
+        with self.db.read() as c:
+            rows = c.execute(f"SELECT device_id, payload FROM device_status WHERE device_id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        return {r["device_id"]: DeviceStatus.model_validate_json(r["payload"]) for r in rows}
+
     def clear(self) -> None:
         with self.db.transaction() as c:
             c.execute("DELETE FROM device_status")

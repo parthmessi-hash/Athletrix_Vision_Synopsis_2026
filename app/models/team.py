@@ -2,8 +2,25 @@ from pydantic import AwareDatetime, Field
 
 from app.models.athlete import Athlete
 from app.models.common import AthletrixModel
+from app.models.device import DeviceStatus
 from app.models.physiological import PhysiologicalSample
 from app.models.tracking import TrackingSample
+
+
+class ReportedDevice(AthletrixModel):
+    """A device id reported by an athlete's newest samples, with that device's latest status report if one exists.
+
+    The association is only that the athlete's newest sample(s) named this device id: it is a reported association,
+    not a verified identity or a permanent assignment. `status` is the newest report the engine holds for the id
+    (null when none was ever received) and `status_age_seconds` is captured_at minus its timestamp. A report
+    describes the moment it was sent: an old "connected" is not proof of a current connection, and nothing here
+    infers connection or disconnection from samples arriving or not.
+    """
+
+    device_id: str = Field(..., description="Device id as reported in the athlete's newest sample(s).")
+    streams: list[str] = Field(..., description="Which of the athlete's newest samples reported this id: physiological, tracking, or both.")
+    status: DeviceStatus | None = Field(None, description="Latest status report received for this device id; null if none.")
+    status_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the status report timestamp; null if no report.")
 
 
 class TeamAthleteLive(AthletrixModel):
@@ -21,6 +38,7 @@ class TeamAthleteLive(AthletrixModel):
     tracking: TrackingSample | None = Field(None, description="Newest retained tracking sample at or before captured_at; null if none.")
     physiological_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the physiological sample timestamp; null if no sample.")
     tracking_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the tracking sample timestamp; null if no sample.")
+    devices: list[ReportedDevice] = Field(default_factory=list, description="Device ids named by the newest samples above (deduplicated), each with its latest status report if any; empty when neither sample reports a device id.")
 
 
 class TeamLive(AthletrixModel):

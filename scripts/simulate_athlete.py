@@ -148,6 +148,8 @@ def main() -> None:
     parser.add_argument("--with-tracking", action="store_true", help="Also send a TrackingSample each second")
     parser.add_argument("--athlete-id", default=DEFAULT_ATHLETE_ID, help="athlete_id for all samples")
     parser.add_argument("--device-id", default=DEFAULT_DEVICE_ID, help="device_id for every sample (physiological and tracking)")
+    parser.add_argument("--with-device-status", action="store_true",
+                        help="also send a clearly fictional DeviceStatus report for --device-id every 5 s (connected=true, a slowly falling battery, signal quality 0.9); off by default")
     parser.add_argument("--profile", choices=("sine", "effort-rest"), default="sine",
                         help="sine: single rise-and-fall over the run (default); effort-rest: repeating 40 s accelerate/sustain/slow/stationary cycle with a delayed toy heart-rate response")
     args = parser.parse_args()
@@ -156,9 +158,10 @@ def main() -> None:
     base = args.url.rstrip("/")
     physiological_endpoint = f"{base}/api/v1/samples/physiological"
     tracking_endpoint = f"{base}/api/v1/samples/tracking"
+    status_endpoint = f"{base}/api/v1/devices/status"
 
     print("FICTIONAL DEMO DATA - not from any real athlete or device.")
-    kinds = "physiological + tracking" if args.with_tracking else "physiological"
+    kinds = ("physiological + tracking" if args.with_tracking else "physiological") + (" + device status every 5 s" if args.with_device_status else "")
     print(f"Sending {args.seconds} {kinds} samples for athlete_id={athlete_id} device_id={device_id} to {base} (profile={args.profile})")
     hr_series = effort_rest_heart_rate_series(args.seconds) if args.profile == "effort-rest" else None
 
@@ -180,6 +183,12 @@ def main() -> None:
                 f"[{athlete_id}/{device_id}] t={i:02d}s  heart_rate_bpm={hr:6.1f}  "
                 f"physiological={post(client, physiological_endpoint, physiological)}"
             )
+
+            if args.with_device_status and i % 5 == 0:
+                # a fictional status for the simulator's own device id: it reports "connected" because it is sending, which is a
+                # claim made by this script, not an observation; the dashboard shows it as "last reported" with its age
+                status = {"device_id": device_id, "timestamp": timestamp, "connected": True, "battery_percent": max(0.0, 100.0 - i * 0.5), "signal_quality": 0.9}
+                line += f"  |  device_status={post(client, status_endpoint, status)}"
 
             if args.with_tracking:
                 if args.profile != "effort-rest":
