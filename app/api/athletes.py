@@ -4,13 +4,14 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import AwareDatetime
 
 from app.core import clock
+from app.core.availability import stream_availability
 from app.core.config import get_settings
 from app.core.effort import BEFORE_SECONDS, AFTER_SECONDS, EffortRequestError, parse_effort_timestamp, review_effort
 from app.core.export import export_filename, export_records, to_jsonl
 from app.core.live import select_live
 from app.db import get_database
 from app.core.summary import summarize_window
-from app.models import Athlete, AthleteLive, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
+from app.models import Athlete, AthleteLive, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample, WindowAvailability
 from app.store.athletes import athlete_registry
 from app.store.history import retention_caps
 from app.store.physiological import latest_physiological_store, physiological_history_store
@@ -184,13 +185,23 @@ def select_window(athlete_id: str, seconds: int, min_confidence: float, end: dat
     """
     window_end = resolve_window_end(end)
     window_start = window_end - timedelta(seconds=seconds)
+    caps = retention_caps()
+    with get_database().read():  # samples and the retained facts they are described against come from one consistent read
+        physiological = physiological_history_store.between(athlete_id, window_start, window_end)
+        tracking = tracking_history_store.between(athlete_id, window_start, window_end)
+        phys_ret = physiological_history_store.retention(athlete_id)
+        track_ret = tracking_history_store.retention(athlete_id)
     return AthleteWindow(
         athlete_id=athlete_id,
         window_start=window_start,
         window_end=window_end,
-        physiological_samples=physiological_history_store.between(athlete_id, window_start, window_end),
-        tracking_samples=tracking_history_store.between(athlete_id, window_start, window_end),
+        physiological_samples=physiological,
+        tracking_samples=tracking,
         tracking_rules=TrackingRules(min_confidence=min_confidence),
+        availability=WindowAvailability(
+            physiological=stream_availability(phys_ret, caps["physiological"], physiological),
+            tracking=stream_availability(track_ret, caps["tracking"], tracking),
+        ),
     )
 
 
@@ -234,13 +245,18 @@ def get_effort_review(athlete_id: str, effort_start: str | None = EFFORT_START, 
         end = parse_effort_timestamp("effort_end", effort_end)
         now = clock.utc_now()  # read exactly once per request
         settings = get_settings()
-        physiological = physiological_history_store.between(athlete_id, start - timedelta(seconds=BEFORE_SECONDS), end + timedelta(seconds=AFTER_SECONDS))
-        tracking = tracking_history_store.between(athlete_id, start, end)
+        caps = retention_caps()
+        with get_database().read():  # samples and the retained facts in one consistent read
+            physiological = physiological_history_store.between(athlete_id, start - timedelta(seconds=BEFORE_SECONDS), end + timedelta(seconds=AFTER_SECONDS))
+            tracking = tracking_history_store.between(athlete_id, start, end)
+            phys_ret = physiological_history_store.retention(athlete_id)
+            track_ret = tracking_history_store.retention(athlete_id)
         return review_effort(
             athlete_id, start, end, now, physiological, tracking,
             distance_max_gap_seconds=settings.distance_max_gap_seconds,
             distance_min_confidence=settings.distance_min_confidence,
             high_speed_threshold_mps=settings.high_speed_threshold_mps,
+            physiological_retention=phys_ret, tracking_retention=track_ret, retention_caps=caps,
         )
     except EffortRequestError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

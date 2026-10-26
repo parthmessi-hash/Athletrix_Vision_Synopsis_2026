@@ -1,5 +1,6 @@
 from pydantic import AwareDatetime, Field, model_validator
 
+from app.models.availability import WindowAvailability
 from app.models.common import AthletrixModel
 from app.models.physiological import PhysiologicalSample
 from app.models.sources import WindowSources
@@ -44,6 +45,7 @@ class AthleteWindow(AthletrixModel):
     tracking_samples: list[TrackingSample] = Field(..., description="Oldest to newest.")
     tracking_rules: TrackingRules = Field(..., description="Applied tracking rule (the engine's configured minimum confidence).")
     sources: WindowSources | None = Field(None, description="Per-stream source breakdown of the samples above; derived from them when omitted.")
+    availability: WindowAvailability | None = Field(None, description="Per stream: the configured cap, what is retained for the athlete and what this window selected from it. Null when not computed.")
 
     @model_validator(mode="after")
     def _derive_sources(self) -> "AthleteWindow":

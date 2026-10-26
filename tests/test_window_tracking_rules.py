@@ -86,7 +86,7 @@ def test_window_response_is_self_contained(client, tracking_payload):
     post_track(client, tracking_payload, -2, 0.3)   # below the rule: still returned, the consumer classifies it
     post_track(client, tracking_payload, -1, 0.5)   # exactly at the rule
     body = client.get(WINDOW).json()
-    assert set(body) == {"athlete_id", "window_start", "window_end", "physiological_samples", "tracking_samples", "tracking_rules", "sources"}
+    assert set(body) == {"athlete_id", "window_start", "window_end", "physiological_samples", "tracking_samples", "tracking_rules", "sources", "availability"}
     assert [s["tracking_confidence"] for s in body["tracking_samples"]] == [0.3, 0.5]
     assert datetime.fromisoformat(body["window_end"]) == NOW  # one captured backend window end, unchanged
 

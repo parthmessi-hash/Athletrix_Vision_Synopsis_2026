@@ -743,7 +743,39 @@ curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/retained-data"
 curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/summary?seconds=60&end=2026-10-20T10:00:04Z"
 ```
 
-What the numbers mean, and what they do not:
+### Requested period versus available history (`availability`)
+
+The window, summary and effort-review responses carry an additive
+`availability` block so a consumer can tell a period that reaches beyond the
+retained history from one that was never sampled. Per stream it holds the
+same facts as `retained-data`, read in the same database read as the samples
+it accompanies, plus what the request selected:
+
+```json
+"availability": {
+  "physiological": {"max_samples": 300, "retained_count": 300, "retained_earliest": "2026-10-20T10:00:00Z", "retained_latest": "2026-10-20T10:04:59Z", "at_cap": true,
+                    "selected_count": 60, "selected_first": "2026-10-20T10:04:00Z", "selected_last": "2026-10-20T10:04:59Z"},
+  "tracking":      {"max_samples": 3000, "retained_count": 0, "retained_earliest": null, "retained_latest": null, "at_cap": false,
+                    "selected_count": 0, "selected_first": null, "selected_last": null}
+}
+```
+
+The window and summary carry one block for the window (`selected_count`
+equals each stream's `sample_count`). The effort review carries
+`availability.movement` (tracking over the effort) and
+`availability.heart_rate.before/during/after` (physiological per period, the
+retained facts repeated in each); the period boundaries and every figure are
+computed exactly as before. What the block does not say: a selection whose
+first and last timestamps reach the period bounds is not thereby complete
+(nothing counts gaps inside it); no expected count, sampling rate or coverage
+fraction is implied; and retained history that begins after the period
+starts, or ends before it ends, does not show why. `at_cap` is the engine's
+only evidence about removal: at the cap, any older sample that was received
+has been trimmed; below it, the engine cannot tell whether earlier data was
+never received or was removed under an earlier cap. A consumer that does not
+know the block (or an engine that does not send it) loses nothing else.
+
+What the retained-data numbers mean, and what they do not:
 
 - `sample_count` is the number of rows still stored (never more than that
   stream's `max_samples`). The timestamps are the

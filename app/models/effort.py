@@ -1,5 +1,6 @@
 from pydantic import AwareDatetime, Field
 
+from app.models.availability import EffortAvailability
 from app.models.common import AthletrixModel
 from app.models.sources import SourceBreakdown
 from app.models.summary import TrackingSummary
@@ -77,3 +78,4 @@ class EffortReview(AthletrixModel):
     rules: EffortRules = Field(..., description="Applied period lengths and effort limits.")
     movement: TrackingSummary = Field(..., description="Tracking summary over [effort_start, effort_end], with its distance rules and source breakdown.")
     heart_rate: HeartRatePeriods = Field(..., description="Heart-rate descriptions for the before, during and after periods.")
+    availability: EffortAvailability | None = Field(None, description="Retained-versus-selected context for the movement period and each heart-rate period, read with the samples. Null when not computed.")

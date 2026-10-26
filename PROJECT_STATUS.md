@@ -171,6 +171,7 @@ Timestamps must be ISO 8601 with a timezone.
 | `AthleteLive` | `athlete_id`, `captured_at`, `registered`, `athlete` or null, `physiological`, `tracking` or null, ages, `physiological_newest_ahead_seconds`, `tracking_newest_ahead_seconds`, `devices` |
 | `TeamLive` | `team_id`, `captured_at`, `athletes` (`TeamAthleteLive`: `athlete`, `physiological`, `tracking` or null, `physiological_age_seconds`, `tracking_age_seconds`, `devices`: `ReportedDevice` with `device_id`, `streams`, `status` or null, `status_age_seconds`) |
 | `RetainedData` | `athlete_id`, `physiological` and `tracking` (`StreamRetention`: `sample_count`, `max_samples` (that stream's cap), `earliest_timestamp`, `latest_timestamp` in UTC, null when empty), `max_samples_per_stream` (the shared cap when both are equal, null when they differ; kept for older consumers) |
+| `StreamAvailability` | `max_samples`, `retained_count`, `retained_earliest`, `retained_latest`, `at_cap`, `selected_count`, `selected_first`, `selected_last`: what is retained for one stream against what one request selected from it. Carried as `availability` (`WindowAvailability`: `physiological`, `tracking`) on `AthleteWindow` and `AthleteSummary`, and as `EffortAvailability` (`movement`, `heart_rate.before/during/after`) on `EffortReview`. Read with the samples; no expected count, coverage fraction or reason for absence is implied; `at_cap` is the only evidence of removal. |
 
 Endpoints, all under `/api/v1`:
 
@@ -408,6 +409,11 @@ Implemented today is listed above; the following are **not** implemented:
   no pass threshold, and 15 s runs do not establish sustained match-length
   behaviour; a timed-out request leaves acceptance unknown and is reported
   as such.
+- The `availability` block and the dashboard's Available data lines describe
+  retained rows against a request's selection only. They never call a period
+  complete, never derive an expected count or coverage from a rate, never
+  interpolate, and claim removal only when a stream is at its cap; below the
+  cap, "not retained" may mean never received or removed earlier.
 - The retained-samples export is a snapshot of what is stored at that
   moment for one athlete: every retained row under each stream's cap,
   written as stored, with the caps in its headers. It is
@@ -495,7 +501,7 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "49 tests, 49 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "53 tests, 53 passed"
 
 # frontend: public mode locally (must make no engine requests; check the Network tab)
 open "http://localhost:3000/?engine=0#demo"

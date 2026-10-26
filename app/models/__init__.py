@@ -6,6 +6,7 @@ Adapters for specific hardware will map vendor payloads onto these models.
 """
 
 from app.models.athlete import Athlete
+from app.models.availability import EffortAvailability, HeartRateAvailability, StreamAvailability, WindowAvailability
 from app.models.common import Posture, SampleSource
 from app.models.device import DeviceStatus
 from app.models.effort import EffortReview, EffortRules, HeartRatePeriod, HeartRatePeriods
@@ -24,6 +25,10 @@ __all__ = [
     "AthleteSummary",
     "AthleteWindow",
     "DistanceEstimate",
+    "EffortAvailability",
+    "HeartRateAvailability",
+    "StreamAvailability",
+    "WindowAvailability",
     "DistanceRules",
     "EffortReview",
     "EffortRules",

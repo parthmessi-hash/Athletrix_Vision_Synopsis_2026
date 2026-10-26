@@ -16,11 +16,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from app.core.availability import stream_availability
 from app.core.distance import DEFAULT_HIGH_SPEED_THRESHOLD_MPS, DEFAULT_MAX_GAP_SECONDS, DEFAULT_MIN_CONFIDENCE
 from app.core.sources import source_breakdown
 from app.core.summary import max_inter_sample_gap_seconds, summarize_window
 from app.models import AthleteWindow, PhysiologicalSample, TrackingRules, TrackingSample, TrackingSummary
+from app.models.availability import EffortAvailability, HeartRateAvailability
 from app.models.effort import EffortReview, EffortRules, HeartRatePeriod, HeartRatePeriods
+from app.store.samples import Retention
 
 BEFORE_SECONDS = 10.0     # period immediately before the effort (engineering default)
 AFTER_SECONDS = 30.0      # follow-up period after the effort (engineering default)
@@ -154,10 +157,24 @@ def review_effort(
     distance_max_gap_seconds: float = DEFAULT_MAX_GAP_SECONDS,
     distance_min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     high_speed_threshold_mps: float = DEFAULT_HIGH_SPEED_THRESHOLD_MPS,
+    physiological_retention: Retention | None = None,
+    tracking_retention: Retention | None = None,
+    retention_caps: dict[str, int] | None = None,
 ) -> EffortReview:
-    """Assemble the review from already-validated bounds and the retained samples that may fall in any period."""
+    """Assemble the review from already-validated bounds and the retained samples that may fall in any period.
+
+    With the two `Retention` facts and the caps (read together with the samples), the review also carries availability
+    context per period; the period boundaries and every figure are computed exactly as without it.
+    """
     duration = validate_effort(effort_start, effort_end, now)
     before, during, after = period_bounds(effort_start, effort_end, now)
+    availability = None
+    if physiological_retention is not None and tracking_retention is not None and retention_caps is not None:
+        availability = EffortAvailability(
+            movement=stream_availability(tracking_retention, retention_caps["tracking"], [s for s in tracking if effort_start <= s.timestamp <= effort_end]),
+            heart_rate=HeartRateAvailability(**{name: stream_availability(physiological_retention, retention_caps["physiological"], select_period(physiological, period))
+                                               for name, period in (("before", before), ("during", during), ("after", after))}),
+        )
     return EffortReview(
         athlete_id=athlete_id,
         effort_start=effort_start,
@@ -180,4 +197,5 @@ def review_effort(
             during=summarize_heart_rate_period(physiological, during),
             after=summarize_heart_rate_period(physiological, after),
         ),
+        availability=availability,
     )

@@ -82,4 +82,5 @@ def summarize_window(
         window_end=window.window_end,
         physiological=physiological,
         tracking=tracking,
+        availability=window.availability,   # the same facts the window was selected under; selected counts equal the sample counts above
     )

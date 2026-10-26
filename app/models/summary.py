@@ -1,5 +1,6 @@
 from pydantic import AwareDatetime, Field
 
+from app.models.availability import WindowAvailability
 from app.models.common import AthletrixModel
 from app.models.sources import SourceBreakdown
 
@@ -124,3 +125,4 @@ class AthleteSummary(AthletrixModel):
     window_end: AwareDatetime = Field(..., description="Inclusive end of the window: backend time at the request (UTC).")
     physiological: PhysiologicalSummary
     tracking: TrackingSummary
+    availability: WindowAvailability | None = Field(None, description="Per stream: the configured cap, what is retained for the athlete and what this window selected (selected_count equals each stream's sample_count). Null when not computed.")
