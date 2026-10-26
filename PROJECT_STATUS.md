@@ -240,7 +240,9 @@ limits separate from the retention caps, deliberately unchanged by them),
   only at 10 Hz. There is no match or season storage; the export is a snapshot
   of retained rows, not an archive.
 - `data/` and `*.db*` are git-ignored. Tests never touch it: every test uses its
-  own temporary file (`tests/conftest.py`).
+  own temporary file (`tests/conftest.py`); the fallback `DATABASE_PATH` folder
+  the suite sets as a safeguard belongs to that test process and is removed
+  when it exits.
 
 ## 6. Public mode versus engine mode (frontend)
 

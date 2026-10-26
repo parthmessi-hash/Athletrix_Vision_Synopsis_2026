@@ -1,10 +1,15 @@
+import atexit
 import os
 import tempfile
 from pathlib import Path
 
 # Belt and braces: even if something opened the default database during tests, it would be a
-# throwaway file, never the development database under ./data.
-os.environ.setdefault("DATABASE_PATH", str(Path(tempfile.mkdtemp(prefix="athletrix-tests-")) / "fallback.db"))
+# throwaway file, never the development database under ./data. The folder belongs to this test
+# process and is removed when it exits (it is normally empty: every test uses its own tmp_path
+# database); nothing else in the temp directory is touched.
+_fallback_dir = tempfile.TemporaryDirectory(prefix="athletrix-tests-")
+atexit.register(_fallback_dir.cleanup)
+os.environ.setdefault("DATABASE_PATH", str(Path(_fallback_dir.name) / "fallback.db"))
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
