@@ -1029,6 +1029,34 @@ recording and its athletes, lists the recordings and opens one in
 data lookup and download read only that recording (see the `Athletrix_Web`
 README).
 
+### Saved effort periods in a stopped recording (`periods` endpoints)
+
+A manually selected effort period of a stopped recording can be saved with a
+short label and reopened later. A saved period is the selection only (label,
+exact start and end instants as sent with their offsets, creation time on the
+backend's clock); it is never a frozen calculation, so reviewing it later uses
+the engine's rules in force at that time, and an empty or partial phase is a
+valid outcome, not an error.
+
+```bash
+P=http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods
+curl -X POST "$P" -H 'content-type: application/json' \
+     -d '{"label":"second sprint","effort_start":"2026-10-26T20:10:00Z","effort_end":"2026-10-26T20:10:20Z"}'   # 201 SavedPeriod
+curl "$P"                      # the athlete's saved periods in this recording, by start instant
+curl "$P/<period id>"          # one saved period
+# reopen it with the existing session effort review:
+curl "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/effort-review?effort_start=...&effort_end=..."
+```
+
+Rules: the recording must be stopped (409 otherwise, so the samples under a
+period are stable); the athlete must be in the recording's roster (404
+otherwise); the label must not be blank (at most 80 characters) and the bounds
+follow the effort review's validation (explicit timezone, 1 to 120 s, not
+after backend time), with a 422 and nothing created on any failure. Labels
+are not identifiers and may repeat; the generated id identifies a period.
+Periods are isolated by recording and athlete and survive restarts. No
+editing, deletion, automatic detection or cross-athlete comparison exists.
+
 ### End-to-end check (`scripts/verify_recording_flow.py`)
 
 ```bash

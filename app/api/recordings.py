@@ -24,7 +24,9 @@ from app.models.recording import (
     ActiveRecording, RecordedAthlete, RecordedData, RecordedStream, Recording, RecordingDetail, RecordingEffortReview, RecordingRef, RecordingStart, RecordingSummary, RecordingWindow,
     SessionEffortAvailability, SessionHeartRateAvailability, SessionWindowAvailability,
 )
+from app.models.period import PeriodCreate, SavedPeriod
 from app.store.athletes import athlete_registry
+from app.store.periods import period_store
 from app.store.recordings import RecordingConflict, recording_store
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
@@ -211,6 +213,56 @@ def export_recording_samples(recording_id: str, athlete_id: str) -> Response:
             "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Record-Count, X-Athletrix-Physiological-Count, X-Athletrix-Tracking-Count, X-Athletrix-Recording-Id",
         },
     )
+
+
+# ---- saved effort periods (stopped recordings only) --------------------------------------------------------------------
+
+@router.post("/{recording_id}/athletes/{athlete_id}/periods", response_model=SavedPeriod, status_code=status.HTTP_201_CREATED,
+             responses={404: {"description": "Unknown recording or athlete not in its roster"}, 409: {"description": "The recording is still active"}, 422: {"description": "Blank label or invalid period"}})
+def save_period(recording_id: str, athlete_id: str, body: PeriodCreate) -> SavedPeriod:
+    """Save a manually selected effort period for an athlete of a stopped recording: the label and the exact bounds, nothing calculated.
+
+    The bounds follow the effort review's rules (explicit timezone, 1 to 120 s, not after backend time) and are stored
+    as sent. Labels are not identifiers and may repeat. Empty or partial phases are a valid outcome when the period is
+    reviewed later; nothing here checks for measurements.
+    """
+    try:
+        start = parse_effort_timestamp("effort_start", body.effort_start)
+        end = parse_effort_timestamp("effort_end", body.effort_end)
+        now = clock.utc_now()
+        validate_effort(start, end, now)
+    except EffortRequestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    rec = require_recording(recording_id)
+    require_member(rec, athlete_id)
+    if rec.status != "stopped":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Recording '{rec.id}' is still active; stop it before saving periods so the underlying samples are stable")
+    return period_store.add(rec.id, athlete_id, body.label, start, end, now)
+
+
+@router.get("/{recording_id}/athletes/{athlete_id}/periods", response_model=list[SavedPeriod])
+def list_periods(recording_id: str, athlete_id: str) -> list[SavedPeriod]:
+    """The athlete's saved periods in this recording, ordered by start instant."""
+    with get_database().read():
+        rec = require_recording(recording_id)
+        require_member(rec, athlete_id)
+        return period_store.list(rec.id, athlete_id)
+
+
+def require_period(rec: Recording, athlete_id: str, period_id: str) -> SavedPeriod:
+    period = period_store.get(rec.id, athlete_id, period_id)
+    if period is None:
+        raise HTTPException(status_code=404, detail=f"Saved period '{period_id}' does not exist for athlete '{athlete_id}' in recording '{rec.id}'")
+    return period
+
+
+@router.get("/{recording_id}/athletes/{athlete_id}/periods/{period_id}", response_model=SavedPeriod)
+def get_period(recording_id: str, athlete_id: str, period_id: str) -> SavedPeriod:
+    """One saved period (404 when it belongs to another recording or athlete, or does not exist)."""
+    with get_database().read():
+        rec = require_recording(recording_id)
+        require_member(rec, athlete_id)
+        return require_period(rec, athlete_id, period_id)
 
 
 @router.post("/{recording_id}/stop", response_model=Recording)

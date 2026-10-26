@@ -150,6 +150,10 @@ curl -s -X POST "http://127.0.0.1:8000/api/v1/recordings/<id>/stop"
 curl -s "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/summary?seconds=60&end=<UTC time>"     # session review
 curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/recorded-samples.jsonl"            # export
 
+# 3m. saved effort period in a stopped recording (selection only; reopen it with the session effort review)
+curl -s -X POST "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods" -H 'content-type: application/json' -d '{"label":"second sprint","effort_start":"<ISO>","effort_end":"<ISO>"}'
+curl -s "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods"
+
 # 3l. recording end-to-end check on an isolated backend with rolling caps of 3 (report under reports/, ignored by git)
 python scripts/verify_recording_flow.py
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
@@ -192,6 +196,8 @@ Timestamps must be ISO 8601 with a timezone.
 | `Recording` | `id`, `name`, `status` (`active` or `stopped`), `started_at`, `stopped_at` or null, `athlete_ids`, `athletes` (roster snapshot) |
 | `RecordingDetail` | `Recording` plus `recorded`: per athlete, `physiological` and `tracking` (`RecordedStream`: `sample_count`, `earliest_timestamp`, `latest_timestamp`) |
 | `ActiveRecording` | `recording` or null |
+| `PeriodCreate` | `label` (1-80 characters, not blank), `effort_start`, `effort_end` (ISO 8601 with timezone; the effort review's limits) |
+| `SavedPeriod` | `id`, `recording_id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as sent, offsets kept), `duration_seconds`, `created_at`: a selection, never a frozen calculation |
 | `RecordingRef` | `id`, `name`, `status`, `started_at`, `stopped_at`: the recording a session response belongs to |
 | `SessionStreamAvailability` | `recorded_count`, `recorded_earliest`, `recorded_latest`, `selected_count`, `selected_first`, `selected_last` (no cap) |
 | `RecordedData` | `recording`, `athlete`, `physiological`, `tracking` (`RecordedStream`) |
@@ -219,6 +225,7 @@ Endpoints, all under `/api/v1`:
 | `POST /recordings` | Start a recording for registered athletes (201); 422 naming unknown ids or an invalid selection, nothing created; 409 while another is active |
 | `GET /recordings`, `GET /recordings/active`, `GET /recordings/{id}` | All recordings newest first; the active one or null; detail with roster snapshot and recorded counts and bounds per athlete and stream (404 unknown) |
 | `POST /recordings/{id}/stop` | Stop at backend time now; an already stopped recording is returned unchanged |
+| `POST /recordings/{id}/athletes/{aid}/periods`, `GET .../periods`, `GET .../periods/{pid}` | Save (201; stopped recordings only, 409 while active; 404 for unknown recording or non-member athlete; 422 for a blank label or invalid period, nothing created), list by start instant, get one. Labels may repeat; ids identify |
 | `GET /recordings/{id}/athletes/{aid}/recorded-data`, `.../window`, `.../summary`, `.../effort-review`, `.../recorded-samples.jsonl` | Session review over that recording's samples only (no rolling fallback, no cap): same query rules and calculations as the rolling endpoints, with `session_availability`; export in the replay-compatible format with a safe filename. 404 for unknown recordings, athletes outside the roster, or nothing to export |
 | `GET /athletes/{id}/retained-data` | Per stream: rows currently retained, oldest and newest recorded timestamps (UTC), and that stream's cap; both streams under one read. Reads persisted rows; unknown ids report empty streams (200). Retained rows only: no coverage, session or eviction inference. |
 
@@ -458,7 +465,10 @@ Implemented today is listed above; the following are **not** implemented:
   as such.
 - Recordings are a first version: one active at a time, no deletion, no
   upload, no automatic start, no management of disk use; an active recording
-  survives a restart until stopped explicitly. The dashboard's Recording
+  survives a restart until stopped explicitly. Saved periods are manual
+  selections in stopped recordings: no editing or deletion, no automatic
+  event detection, no cross-athlete comparison, and a period never freezes a
+  calculation. The dashboard's Recording
   review reads one recording at a time through the same cards as the rolling
   review; recordings are not compared with each other and nothing is
   interpreted from them.

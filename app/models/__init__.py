@@ -10,6 +10,7 @@ from app.models.availability import EffortAvailability, HeartRateAvailability, S
 from app.models.common import Posture, SampleSource
 from app.models.device import DeviceStatus
 from app.models.effort import EffortReview, EffortRules, HeartRatePeriod, HeartRatePeriods
+from app.models.period import PeriodCreate, SavedPeriod
 from app.models.physiological import PhysiologicalSample
 from app.models.recording import (
     ActiveRecording, RecordedAthlete, RecordedData, RecordedStream, Recording, RecordingDetail, RecordingEffortReview, RecordingRef, RecordingStart, RecordingSummary, RecordingWindow,
@@ -43,6 +44,8 @@ __all__ = [
     "PhysiologicalSample",
     "PhysiologicalSummary",
     "Posture",
+    "PeriodCreate",
+    "SavedPeriod",
     "ActiveRecording",
     "RecordedAthlete",
     "RecordedStream",
