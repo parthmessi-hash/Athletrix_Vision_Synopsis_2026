@@ -5,6 +5,7 @@ It is local SQLite storage on this machine; nothing is uploaded, nothing is dele
 recording survives a backend restart until it is stopped explicitly.
 """
 
+import json
 import re
 from datetime import datetime, timedelta
 
@@ -153,29 +154,44 @@ EFFORT_START_Q = "Selected effort start: ISO 8601 with an explicit timezone (enc
 EFFORT_END_Q = "Selected effort end, same format; 1 to 120 s after the start and not after backend time."
 
 
+class SessionReview:
+    """One session effort review with the samples it was calculated from (the review endpoint and the export share this)."""
+
+    def __init__(self, review: RecordingEffortReview, physiological: list, tracking: list, periods: dict) -> None:
+        self.review, self.physiological, self.tracking, self.periods = review, physiological, tracking, periods
+
+
+def compute_session_review(recording_id: str, athlete_id: str, start: datetime, end: datetime, now: datetime, settings) -> SessionReview:
+    """The effort review over one recording's samples only, from one database read, with the given captured time and settings.
+
+    `physiological` holds the samples of the before, during and after span and `tracking` those of the effort, both as
+    stored; the review's figures come from exactly these samples under the given settings.
+    """
+    validate_effort(start, end, now)
+    with get_database().read():
+        rec = require_recording(recording_id)
+        require_member(rec, athlete_id)
+        physiological = recording_store.between(rec.id, athlete_id, "physiological", start - timedelta(seconds=BEFORE_SECONDS), end + timedelta(seconds=AFTER_SECONDS))
+        tracking = recording_store.between(rec.id, athlete_id, "tracking", start, end)
+        p_ret, t_ret = recording_store.retention(rec.id, athlete_id, "physiological"), recording_store.retention(rec.id, athlete_id, "tracking")
+    review = review_effort(athlete_id, start, end, now, physiological, tracking, distance_max_gap_seconds=settings.distance_max_gap_seconds,
+                           distance_min_confidence=settings.distance_min_confidence, high_speed_threshold_mps=settings.high_speed_threshold_mps)
+    before, during, after = period_bounds(start, end, now)
+    availability = SessionEffortAvailability(
+        movement=session_stream_availability(t_ret, [s for s in tracking if start <= s.timestamp <= end]),
+        heart_rate=SessionHeartRateAvailability(**{name: session_stream_availability(p_ret, select_period(physiological, period)) for name, period in (("before", before), ("during", during), ("after", after))}),
+    )
+    periods = {name: {"start": period.start, "end": period.end, "start_inclusive": period.start_inclusive, "end_inclusive": period.end_inclusive} for name, period in (("before", before), ("during", during), ("after", after))}
+    return SessionReview(RecordingEffortReview(**review.model_dump(), recording=recording_ref(rec), session_availability=availability), physiological, tracking, periods)
+
+
 @router.get("/{recording_id}/athletes/{athlete_id}/effort-review", response_model=RecordingEffortReview)
 def get_recording_effort_review(recording_id: str, athlete_id: str, effort_start: str | None = None, effort_end: str | None = None) -> RecordingEffortReview:
     """The same effort review as the rolling endpoint (same boundaries, rules and calculations) over the recording's samples only, with session availability per period."""
     try:
         start = parse_effort_timestamp("effort_start", effort_start)
         end = parse_effort_timestamp("effort_end", effort_end)
-        now = clock.utc_now()
-        validate_effort(start, end, now)
-        settings = get_settings()
-        with get_database().read():
-            rec = require_recording(recording_id)
-            require_member(rec, athlete_id)
-            physiological = recording_store.between(rec.id, athlete_id, "physiological", start - timedelta(seconds=BEFORE_SECONDS), end + timedelta(seconds=AFTER_SECONDS))
-            tracking = recording_store.between(rec.id, athlete_id, "tracking", start, end)
-            p_ret, t_ret = recording_store.retention(rec.id, athlete_id, "physiological"), recording_store.retention(rec.id, athlete_id, "tracking")
-        review = review_effort(athlete_id, start, end, now, physiological, tracking, distance_max_gap_seconds=settings.distance_max_gap_seconds,
-                               distance_min_confidence=settings.distance_min_confidence, high_speed_threshold_mps=settings.high_speed_threshold_mps)
-        before, during, after = period_bounds(start, end, now)
-        availability = SessionEffortAvailability(
-            movement=session_stream_availability(t_ret, [s for s in tracking if start <= s.timestamp <= end]),
-            heart_rate=SessionHeartRateAvailability(**{name: session_stream_availability(p_ret, select_period(physiological, period)) for name, period in (("before", before), ("during", during), ("after", after))}),
-        )
-        return RecordingEffortReview(**review.model_dump(), recording=recording_ref(rec), session_availability=availability)
+        return compute_session_review(recording_id, athlete_id, start, end, clock.utc_now(), get_settings()).review
     except EffortRequestError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -263,6 +279,87 @@ def get_period(recording_id: str, athlete_id: str, period_id: str) -> SavedPerio
         rec = require_recording(recording_id)
         require_member(rec, athlete_id)
         return require_period(rec, athlete_id, period_id)
+
+
+# ---- descriptive review snapshot of a saved period (analysis export, separate from the sample JSONL) -------------------
+
+PERIOD_REVIEW_FORMAT = "athletrix-period-review"
+PERIOD_REVIEW_VERSION = 1
+
+
+def period_review_filename(recording_id: str, athlete_id: str, period_id: str, captured_at: datetime) -> str:
+    safe = lambda text, fallback: re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._") or fallback  # noqa: E731
+    return f"athletrix-period-review-{safe(recording_id, 'recording')}-{safe(athlete_id, 'athlete')}-{safe(period_id, 'period')}-{captured_at.strftime('%Y%m%dT%H%M%SZ')}.json"
+
+
+def json_default(v):
+    """Datetimes as the models write them (UTC as 'Z', other offsets kept); anything else as text."""
+    if isinstance(v, datetime):
+        return v.isoformat().replace("+00:00", "Z")
+    return str(v)
+
+
+def build_period_review(rec: Recording, athlete: Athlete, period: SavedPeriod, computed: SessionReview, settings, captured_at: datetime) -> dict:
+    """The exported document: the saved selection, the rules used now, and this snapshot of the result with its samples."""
+    review = computed.review
+    return {
+        "format": PERIOD_REVIEW_FORMAT,
+        "format_version": PERIOD_REVIEW_VERSION,
+        "generated_at": captured_at,
+        "what_this_is": "A descriptive snapshot of one effort review calculated at generated_at from the recording's samples with the engine rules listed under calculation. "
+                        "The saved period is the selection only; a later review of the same period with other engine settings gives other figures, and this file keeps the earlier ones. "
+                        "No diagnosis, score, baseline comparison or recommendation is part of it.",
+        "recording": {**recording_ref(rec).model_dump(mode="json"), "athletes": [a.model_dump(mode="json") for a in rec.athletes]},
+        "athlete": athlete.model_dump(mode="json"),
+        "saved_period": period.model_dump(mode="json"),
+        "calculation": {
+            "captured_at": captured_at,
+            "rules": review.rules.model_dump(mode="json"),
+            "distance_rules": {"max_gap_seconds": settings.distance_max_gap_seconds, "min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps},
+            "tracking_rules": {"min_confidence": settings.distance_min_confidence},
+            "note": "Rules in force when this snapshot was calculated; they are engine settings, not sport standards, and are not stored with the saved period.",
+        },
+        "periods": {name: {"start": v["start"], "end": v["end"], "start_inclusive": v["start_inclusive"], "end_inclusive": v["end_inclusive"]} for name, v in computed.periods.items()},
+        "review": review.model_dump(mode="json"),
+        "samples": {
+            "physiological": [s.model_dump(mode="json") for s in computed.physiological],
+            "tracking": [s.model_dump(mode="json") for s in computed.tracking],
+            "note": "The normalised samples the review was calculated from, as stored: physiological samples across the before, during and after span, tracking samples within the effort. Nulls, zeros, confidences, sources and device ids are kept.",
+        },
+    }
+
+
+@router.get(
+    "/{recording_id}/athletes/{athlete_id}/periods/{period_id}/review.json",
+    responses={200: {"content": {"application/json": {}}, "description": "Descriptive review snapshot of the saved period"}, 404: {"description": "Unknown recording, athlete or period"}},
+)
+def export_period_review(recording_id: str, athlete_id: str, period_id: str) -> Response:
+    """Download a descriptive JSON review of a saved period: the saved selection, the rules used now, and this snapshot of the result with its samples.
+
+    One database read and one captured set of engine settings produce the whole document, which reuses the session
+    effort review's selection and calculations. It is an analysis export, separate from the replay-compatible sample
+    JSONL export, and it is a snapshot: the saved period itself never freezes a calculation.
+    """
+    captured_at = clock.utc_now()
+    settings = get_settings()
+    with get_database().read():
+        rec = require_recording(recording_id)
+        athlete = require_member(rec, athlete_id)
+        period = require_period(rec, athlete_id, period_id)
+        try:
+            computed = compute_session_review(rec.id, athlete_id, period.effort_start, period.effort_end, captured_at, settings)
+        except EffortRequestError as exc:  # cannot happen for a saved period unless the clock went backwards
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    document = build_period_review(rec, athlete, period, computed, settings, captured_at)
+    body = json.dumps(document, ensure_ascii=False, indent=2, default=json_default)
+    return Response(
+        content=body, media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{period_review_filename(rec.id, athlete_id, period.id, captured_at)}"',
+            "X-Athletrix-Format": f"{PERIOD_REVIEW_FORMAT}/{PERIOD_REVIEW_VERSION}", "X-Athletrix-Recording-Id": rec.id, "X-Athletrix-Period-Id": period.id,
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Format, X-Athletrix-Recording-Id, X-Athletrix-Period-Id",
+        },
+    )
 
 
 @router.post("/{recording_id}/stop", response_model=Recording)

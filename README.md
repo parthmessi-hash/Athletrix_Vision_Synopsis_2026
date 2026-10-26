@@ -1057,6 +1057,36 @@ are not identifiers and may repeat; the generated id identifies a period.
 Periods are isolated by recording and athlete and survive restarts. No
 editing, deletion, automatic detection or cross-athlete comparison exists.
 
+### Exporting a descriptive review snapshot of a saved period (`review.json`)
+
+`GET /api/v1/recordings/{id}/athletes/{athlete}/periods/{period}/review.json`
+downloads a JSON document (attachment, safe filename
+`athletrix-period-review-<recording>-<athlete>-<period>-<UTC time>.json`,
+`X-Athletrix-Format: athletrix-period-review/1`) produced from **one database
+read and one captured set of engine settings**, reusing the session effort
+review's selection and calculations. It is an analysis export, separate from
+the replay-compatible sample JSONL export, whose format is unchanged.
+
+```bash
+curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1/periods/<period id>/review.json"
+```
+
+The document keeps three things apart: the **saved selection**
+(`saved_period`: id, label, exact bounds, creation time), the **rules used
+now** (`calculation`: capture time, the review's period rules, the distance
+rules and tracking rule from the engine settings in force at that moment) and
+**this snapshot of the result** (`review`: movement and the before, during and
+after heart-rate phases with session availability and source breakdowns;
+`periods`: the applied phase bounds and inclusivity; `samples`: the normalised
+physiological samples across the before-to-after span and the tracking
+samples within the effort, as stored, with nulls, zeros, confidences, sources
+and device ids). `format`, `format_version` and `generated_at` identify the
+file; `recording` carries the recording reference and its saved roster. A
+later export after a change to an engine setting is a different snapshot with
+different figures and the same saved bounds; an earlier file stays a
+standalone record of the earlier calculation. Nothing interpretive is in it:
+no diagnosis, score, recovery judgement, baseline comparison or advice.
+
 ### End-to-end check (`scripts/verify_recording_flow.py`)
 
 ```bash
