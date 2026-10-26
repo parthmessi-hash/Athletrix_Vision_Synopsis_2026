@@ -28,6 +28,7 @@ app/
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
                      # GET  /api/v1/athletes/{id}/physiological/history?limit=60, /tracking/history?limit=60
                      # GET  /api/v1/athletes/{id}/window?seconds=60, /summary?seconds=60
+                     # GET  /api/v1/athletes/{id}/live (coherent snapshot: newest sample per stream at one captured instant)
                      # GET  /api/v1/athletes/{id}/retained-data (per-stream count and UTC range of retained rows)
                      # GET  /api/v1/athletes/{id}/effort-review?effort_start=..&effort_end=.. (manually selected effort)
                      # GET  /api/v1/athletes/{id}/retained-samples.jsonl (replayable export of retained samples)
@@ -529,6 +530,42 @@ tracking export align in a review only as far as the recording devices'
 clocks agreed. Converted tracking files are historical and subject to the
 300-sample retention cap, exactly like converted heart-rate files.
 
+### Coherent single-athlete live snapshot (`athletes/{id}/live`)
+
+`GET /api/v1/athletes/{id}/live` is the single-athlete form of the team
+overview, built on the same selection code, so the two agree whenever they
+share a captured instant. Backend time is read once; the newest retained
+sample per stream **at or before** that instant is chosen; ages are that
+instant minus the sample timestamp, never negative; device associations
+and statuses (with explicit clock skew) follow the same rules as the team
+overview; and the whole snapshot is one database read.
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/live"
+# {"athlete_id":"athlete-1","captured_at":"...","registered":true,"athlete":{...},
+#  "physiological":{...},"tracking":{...},"physiological_age_seconds":0.4,"tracking_age_seconds":0.4,
+#  "physiological_newest_ahead_seconds":null,"tracking_newest_ahead_seconds":null,"devices":[...]}
+```
+
+- A sample timestamped after the captured instant (accepted within the 5 s
+  ingestion clock-skew allowance) stays stored but is **not** returned as the
+  current reading until backend time reaches it. If an earlier eligible
+  sample exists it is returned with its real age, and
+  `*_newest_ahead_seconds` says how far ahead the stored newer sample is; if
+  no eligible sample exists the stream is null with the same figure. Nothing
+  is clamped into an apparently fresh reading.
+- The plain `physiological/latest` and `tracking/latest` endpoints are
+  unchanged: they still return the newest stored sample, future-dated or
+  not, and 404 when there is none.
+- Registration is not required, exactly as for ingestion and history: an
+  unregistered or unknown id answers with `registered: false`,
+  `athlete: null` and whatever samples it has (possibly none). It is never a
+  404.
+- Ingestion, the timestamp allowance and retention are unchanged.
+
+The dashboard's Live Heart Rate and Live Tracking cards poll this endpoint
+once per second (one request for both cards) and use its ages.
+
 ### Live team overview (`teams/{team_id}/live`)
 
 `GET /api/v1/teams/{team_id}/live` returns, in one consistent read, every
@@ -550,7 +587,9 @@ curl "http://127.0.0.1:8000/api/v1/teams/demo-team/live"
   are never negative. An old sample is still returned with its age, which is
   how a consumer tells a stale reading from no reading (`null`).
 - The response carries the samples as stored, sources included, and makes
-  no judgment about freshness.
+  no judgment about freshness. `*_newest_ahead_seconds` says, per stream,
+  how far ahead of the captured instant the newest stored sample is when it
+  is not yet current.
 - `devices` lists, per athlete, the device ids named by those two newest
   samples (deduplicated; `streams` says which named it) with the latest
   `DeviceStatus` report held for each id and its age, read in one query for

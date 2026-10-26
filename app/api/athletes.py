@@ -7,9 +7,10 @@ from app.core import clock
 from app.core.config import get_settings
 from app.core.effort import BEFORE_SECONDS, AFTER_SECONDS, EffortRequestError, parse_effort_timestamp, review_effort
 from app.core.export import export_filename, export_records, to_jsonl
+from app.core.live import select_live
 from app.db import get_database
 from app.core.summary import summarize_window
-from app.models import Athlete, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
+from app.models import Athlete, AthleteLive, AthleteSummary, AthleteWindow, EffortReview, PhysiologicalSample, RetainedData, StreamRetention, TrackingRules, TrackingSample
 from app.store.athletes import athlete_registry
 from app.store.history import MAX_HISTORY_SAMPLES
 from app.store.physiological import latest_physiological_store, physiological_history_store
@@ -88,6 +89,30 @@ def get_tracking_history(
 ) -> list[TrackingSample]:
     """The newest `limit` tracking samples for an athlete, oldest to newest. Empty list if none."""
     return tracking_history_store.recent(athlete_id, limit)
+
+
+# ---- coherent live snapshot (registration not required) -------------------
+
+@router.get("/{athlete_id}/live", response_model=AthleteLive)
+def get_athlete_live(athlete_id: str) -> AthleteLive:
+    """The athlete's newest retained sample per stream at or before one captured backend instant, with ages, device associations and clock skew.
+
+    The same selection as the team overview, so the two agree at the same instant. A sample timestamped after the captured
+    instant stays stored but is not shown as current; `*_newest_ahead_seconds` says how far ahead it is. The plain
+    `latest` endpoints are unchanged and still return the newest stored sample. Registration is not required: an unknown
+    id answers with registered=false and whatever it has stored (possibly nothing); it is never a 404.
+    """
+    captured_at = clock.utc_now()
+    with get_database().read():  # one consistent snapshot of the registry, both sample tables and the device-status table
+        athlete = athlete_registry.get(athlete_id)
+        sel = select_live([athlete_id], captured_at)[athlete_id]
+    return AthleteLive(
+        athlete_id=athlete_id, captured_at=captured_at, registered=athlete is not None, athlete=athlete,
+        physiological=sel.physiological, tracking=sel.tracking,
+        physiological_age_seconds=sel.physiological_age_seconds, tracking_age_seconds=sel.tracking_age_seconds,
+        physiological_newest_ahead_seconds=sel.physiological_newest_ahead_seconds, tracking_newest_ahead_seconds=sel.tracking_newest_ahead_seconds,
+        devices=sel.devices,
+    )
 
 
 # ---- retained data (registration not required) -----------------------------

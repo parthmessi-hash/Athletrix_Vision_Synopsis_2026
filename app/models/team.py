@@ -42,6 +42,8 @@ class TeamAthleteLive(AthletrixModel):
     tracking: TrackingSample | None = Field(None, description="Newest retained tracking sample at or before captured_at; null if none.")
     physiological_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the physiological sample timestamp; null if no sample.")
     tracking_age_seconds: float | None = Field(None, ge=0, description="captured_at minus the tracking sample timestamp; null if no sample.")
+    physiological_newest_ahead_seconds: float | None = Field(None, gt=0, description="How far after captured_at the newest stored physiological sample is, when it is not yet current; null otherwise.")
+    tracking_newest_ahead_seconds: float | None = Field(None, gt=0, description="How far after captured_at the newest stored tracking sample is, when it is not yet current; null otherwise.")
     devices: list[ReportedDevice] = Field(default_factory=list, description="Device ids named by the newest samples above (deduplicated), each with its latest status report if any; empty when neither sample reports a device id.")
 
 
