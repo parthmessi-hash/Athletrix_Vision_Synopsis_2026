@@ -11,3 +11,6 @@ data/
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# validation reports written by scripts/validate_team_scale.py
+reports/

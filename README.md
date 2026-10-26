@@ -35,7 +35,8 @@ app/
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
   scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers),
-                     # replay_samples.py (recorded JSONL replay), convert_heart_rate_csv.py and
+                     # replay_samples.py (recorded JSONL replay), validate_team_scale.py (isolated
+                     # multi-athlete load check), convert_heart_rate_csv.py and
                      # convert_tracking_csv.py (CSV adapters), examples/fictional_replay.jsonl,
                      # examples/fictional_heart_rate.csv, examples/fictional_physiology.csv, examples/fictional_tracking.csv
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
@@ -767,6 +768,56 @@ recorded times. Consequences, by design:
   timestamps would make recorded data look live and break the "recorded time
   only" guarantee of the window and summary; if a demo needs live-looking
   data, use the simulator.
+
+## Team-scale validation (`scripts/validate_team_scale.py`)
+
+A repeatable local check of how this software behaves with 11 to 20
+fictional athletes sending samples at once. It is **not** a hardware test,
+not proof of production capacity and not a match-length soak: a short run
+on one machine, reported as observations with the machine context, with no
+latency pass threshold invented.
+
+```bash
+python scripts/validate_team_scale.py                          # 20 athletes, ~15 s, 1 Hz per stream
+python scripts/validate_team_scale.py --athletes 11 --duration 15
+python scripts/validate_team_scale.py --athletes 20 --report reports/my-run.json
+#   flags: --athletes N (default 20) --duration S (default 15) --rate HZ (default 1) --timeout S (default 5)
+#          --workers N (default 8 request threads) --port P (default: a free port) --report PATH
+#   exit 0 when every verification passed and nothing was left unsent; 1 otherwise; 2 for bad arguments
+```
+
+What a run does:
+
+- Starts its own backend (`uvicorn app.main:app`) on a free localhost port
+  with a fresh temporary SQLite database. The development backend and
+  database are not involved, and on exit, failure or Ctrl-C the tool stops
+  only the process it started and removes its temporary folder.
+- Sends, per athlete and per tick, one physiological and one tracking
+  sample built from the simulator's deterministic sine profile (phase-shifted
+  per athlete), with `source=simulated`, distinct athlete ids
+  (`fictional-athlete-NN`) and distinct device ids per stream. Ticks are
+  scheduled on a monotonic clock; a small thread pool issues the requests,
+  so no separate process is spawned per athlete. Every request records its
+  due time, actual issue time, round-trip latency and outcome. Failures are
+  counted by kind (HTTP error, timeout, connection error) and never retried;
+  requests that could not be issued before the deadline are reported as
+  unsent, never as successes.
+- Reads the backend back and checks, per athlete: retained counts against
+  the accepted samples (with the newest-300 cap), latest timestamps,
+  athlete and device ids, both streams in one window, and a recorded
+  summary (counts, heart-rate mean, peak speed, sources) against the
+  accepted samples. If any of an athlete's requests timed out, acceptance is
+  unknown, so that athlete's sample-set checks are reported as unknown
+  rather than forced to pass or fail.
+- Writes a JSON report (default `reports/team-scale-<UTC time>.json`; the
+  `reports/` folder is ignored by git) and prints a summary: requested and
+  actual duration, expected/attempted/accepted/failed/unsent counts overall
+  and per stream, HTTP status counts and timeouts, latency p50/p95/max
+  (the client-side round trip around one POST, which includes connection
+  reuse and serialisation, not backend-internal time), scheduling lateness
+  p50/p95/max (issue time minus due time), the backend configuration,
+  athlete count and requested rate, verification results and machine
+  context.
 
 ## Running with the Athletrix_Web frontend
 
