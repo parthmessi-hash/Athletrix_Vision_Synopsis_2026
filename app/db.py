@@ -111,6 +111,11 @@ def get_database() -> Database:
     return _current
 
 
+def current_database() -> Database | None:
+    """The database currently in use, or None when nothing has been opened or set. Never opens one."""
+    return _current
+
+
 def set_database(db: Database | None) -> None:
     """Point the stores at a specific database (tests use isolated temporary files)."""
     global _current
