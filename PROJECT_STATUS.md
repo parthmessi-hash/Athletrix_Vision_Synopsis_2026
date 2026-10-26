@@ -35,6 +35,7 @@ Terms used throughout:
 | Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
 | Demo launcher | `scripts/demo_launcher.py`: one command starts a temporary database, an isolated backend and a frontend copy on free ports, registers a fictional multi-sport roster and feeds simulated data for a bounded time; nothing in the repositories, `.env` or the development database is touched. |
 | Team-scale validation | `scripts/validate_team_scale.py`: starts an isolated backend, registers N fictional athletes to a fictional team, sends samples concurrently on independent per-stream grids (`--rate`, or `--physiological-rate` / `--tracking-rate`) while reading the team overview every 2 s, reports write and read latency, scheduling lateness and counts (omitted-by-scenario apart from unsent), verifies retained data, overview consistency (no substituted readings, newest-timestamp ordering, paused-stream recency checked on the reads taken during the pause) and device statuses, with timeout-dependent checks reported as unknown rather than passed; `--scenario interrupted` adds a fixed paused/late-stream disturbance. Observations on one machine, not a capacity claim. |
+| Retention comparison | `scripts/compare_retention.py`: the team-scale scenario run twice on two isolated backends, profile A (default caps) and profile B (larger tracking cap), same deterministic values and relative schedule, genuine timestamps per run; verifies retention, an early effort review (movement against independently calculated expectations, heart-rate periods, availability metadata, null distance preserved), the recorded window, export and replay into a third isolated backend, and compares the runs. Observations, not thresholds. |
 | CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm, plus explicitly mapped optional physiological fields) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (the newest per athlete up to each stream's cap); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
@@ -135,6 +136,10 @@ python scripts/validate_team_scale.py --athletes 20 --duration 30 --scenario int
 python scripts/validate_team_scale.py --athletes 20 --duration 40 --physiological-rate 1 --tracking-rate 10   # unequal rates, crosses the tracking cap
 python scripts/validate_team_scale.py --athletes 20 --duration 20 --physiological-rate 1 --tracking-rate 4 --scenario interrupted
 python scripts/validate_team_scale.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000   # isolated backend with a larger tracking cap
+
+# 3j. retention comparison: the same 20-athlete, 1 Hz / 10 Hz, 60 s scenario on two isolated backends (A: 300/300, B: 300/3000),
+#     an early effort (5-15 s) reviewed under both, export + replay into a third isolated backend; report under reports/ (ignored)
+python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000 --effort-start 5 --effort-end 15
 #    JSON reports under reports/ (ignored by git); registers fictional athletes to team fictional-team first (reported apart)
 
 # 3h. live team overview: every registered athlete on a team, newest retained reading per stream with its age
@@ -404,6 +409,13 @@ Implemented today is listed above; the following are **not** implemented:
   remain bounded local storage, not an archive. The validation report shows
   each stream's cap, retained rows and timestamp span so the difference is
   visible. A synthetic 10 Hz tracking stream is not a camera integration.
+- The retention comparison runs the same scenario under two cap profiles and
+  re-implements the documented distance and high-speed rules to cross-check
+  the effort review; it is a consistency check of this software on one
+  machine, not a ground truth about any athlete and not a capacity claim.
+  Under the default caps an effort older than the newest 300 tracking rows
+  has no movement samples and a null distance, which the availability
+  metadata explains; a larger cap only changes how many rows are kept.
 - The team-scale validation tool measures a short run on one machine with
   fictional athletes. Its latency figures are client-side round trips with
   no pass threshold, and 15 s runs do not establish sustained match-length
@@ -502,6 +514,8 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
 open http://localhost:3000/tests/timeline_confidence.test.html      # expect "53 tests, 53 passed"
+# retention comparison on isolated backends (about three minutes; exit 0 means every check passed, unknown is not a pass)
+python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000
 
 # frontend: public mode locally (must make no engine requests; check the Network tab)
 open "http://localhost:3000/?engine=0#demo"

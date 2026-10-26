@@ -1083,6 +1083,48 @@ What a run does:
   athlete count and requested rate, verification results and machine
   context.
 
+## Retention comparison (`scripts/compare_retention.py`)
+
+A reproducible comparison of retention and effort review under two cap
+profiles, each on its own isolated backend (fresh temporary database, free
+port; the development backend and database are never touched):
+
+```bash
+python scripts/compare_retention.py                                                        # 20 athletes, 1 Hz / 10 Hz, 60 s, B = 300 / 3000
+python scripts/compare_retention.py --athletes 20 --duration 60 --tracking-cap 3000 --effort-start 5 --effort-end 15
+#   profile A: the backend defaults (300 physiological / 300 tracking); profile B: --physiological-cap / --tracking-cap
+#   --effort-start / --effort-end: whole seconds after the run start; the effort must end before the oldest tracking
+#   sample the default cap keeps at the end of the run, or the tool refuses (exit 2)
+#   exit 0 when every check passed; 1 when anything failed or is unknown; reports/ is ignored by git
+```
+
+Both runs send the same deterministic fictional values on the same relative
+schedule (the team-scale tool's machinery, with concurrent overview reads),
+and each keeps its genuine timestamps. After each run the tool verifies the
+retained counts and spans under that profile's caps, latest readings,
+athlete and device separation and the recorded window and summary (the
+team-scale verification), then reviews an early effort (default 5 s to 15 s)
+whose tracking samples have fallen outside the default cap by the end of a
+60 s run at 10 Hz (the newest 300 rows begin at 30 s) but remain under the
+larger cap. Per athlete it checks the review's movement figures (sample
+count, distance, included duration, high-speed time and distance) against
+expectations calculated independently in the tool from the accepted samples
+under the newest-N rule, the Before / During / After heart-rate selection
+against the same samples, the availability metadata (cap, retained count and
+bounds, `at_cap`, selected count and bounds), that a missing distance stays
+null rather than becoming zero, and the recorded window over the effort. It
+also exports one athlete's retained samples, checks every retained row is in
+the file, replays the file into a third isolated backend started with the
+same caps and compares the replayed export line for line. Finally the two
+runs are compared: heart-rate periods must agree (same deterministic values)
+and the movement review must differ only in what the caps explain.
+
+The summary prints, per profile, the request accounting (errors,
+intentionally omitted, unsent and timed-out requests kept apart), write and
+read latency, scheduling lateness, retained rows and spans per stream with
+the cap, and the per-athlete effort comparison. Observations on one machine
+with no threshold; not a capacity or match-length claim.
+
 ## Running with the Athletrix_Web frontend
 
 The frontend is a separate static site in the `Athletrix_Web` repository. Its
