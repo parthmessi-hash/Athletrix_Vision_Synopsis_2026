@@ -1037,17 +1037,25 @@ python scripts/verify_recording_flow.py --cap 3 --samples 8 --after 4 --report r
 ```
 
 On an isolated backend with deliberately small rolling caps it registers
-three fictional athletes, starts a recording for two, sends more samples than
-the caps for all three, stops, sends more, restarts the backend on the same
-database file, and then checks against expectations computed in the script:
-the rolling history holds only its capped newest rows (the later ones), the
-stopped recording holds exactly the samples accepted for its two athletes
-while active and nothing after the stop or for the third athlete, the
-recording stays visible and stopped after the restart, the session window,
-summary and effort review match independent distance and heart-rate-period
-expectations while the rolling effort over the same period has no samples and
-a null distance, and the export holds every recorded sample and replays
-identically into a second isolated backend. Exit 0 when every check passed.
+three fictional athletes, sends a few rolling samples before any recording
+exists, starts a recording for two athletes, sends more samples than the caps
+for all three (including a delayed sample with an older timestamp, an
+equal-instant replacement, a null heart rate and a real zero speed), stops,
+sends more, starts and stops a second recording for one athlete, restarts the
+backend on the same database file, and then checks against expectations
+computed in the script: the rolling history holds only its capped newest rows,
+the first recording holds exactly the samples accepted for its two athletes
+while active (the delayed sample at its own timestamp, one row for the equal
+instant with the later payload, the null and the zero as stored) and nothing
+from before the start, after the stop or for the third athlete, the second
+recording holds only its own samples, both stay visible and stopped after the
+restart, the session window, summary and effort review match independent
+distance and heart-rate-period expectations while the rolling effort over the
+same period has no samples and a null distance, and the export holds every
+recorded sample and replays identically into a second isolated backend. Exit 0
+when every check passed. The transaction-rollback case (a failed recording
+write leaves the rolling store unchanged) is covered by the backend test
+`tests/test_recording_ingest.py`, since it cannot be induced from outside.
 
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 
