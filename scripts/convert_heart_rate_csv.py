@@ -23,6 +23,23 @@ WHAT THE CSV MUST LOOK LIKE (first version)
   row. `--source` must be one of the existing generic source categories
   (`wearable`, `camera`, `manual`, `simulated`); it is never inferred from the
   file name or contents. No other measurement is invented.
+- OPTIONAL MEASUREMENTS. The other fields of `PhysiologicalSample` can be
+  mapped with explicit column flags; a field is written only when its flag is
+  given, never guessed from the header. Values must already be in the model's
+  units and scales (no conversion is done):
+      --breathing-rate-column    breathing_rate_bpm   breaths per minute, 0-100
+      --hrv-rmssd-column         hrv_rmssd_ms         milliseconds, 0-1000
+      --hrv-sdnn-column          hrv_sdnn_ms          milliseconds, 0-1000
+      --activity-level-column    activity_level       unitless 0.0-1.0
+      --posture-column           posture              one of standing, sitting, lying, walking, running, unknown
+      --skin-temperature-column  skin_temperature_c   degrees Celsius, 20-45
+      --spo2-column              spo2_percent         percent, 0-100
+      --signal-quality-column    signal_quality       unitless 0.0-1.0
+  A mapped column must exist exactly once and no two fields may share a
+  column. A blank cell in a mapped column becomes `null`; a zero is kept where
+  the model allows it. Unmapped fields are left out of the records (not
+  reported). Values outside the model's ranges, non-finite numbers and
+  unknown postures are errors.
 
 The whole file is validated first, using the same `PhysiologicalSample` model
 as the API; any problem is reported with its CSV row number (the header is row
@@ -65,11 +82,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:  # allow `python scripts/convert_heart_rate_csv.py` from the repository root
     sys.path.insert(0, str(ROOT))
 
-from app.models import PhysiologicalSample, SampleSource  # noqa: E402
+from app.models import PhysiologicalSample, Posture, SampleSource  # noqa: E402
 
 DEFAULT_TIMESTAMP_COLUMN = "timestamp"
 DEFAULT_HEART_RATE_COLUMN = "heart_rate_bpm"
 SOURCES = [s.value for s in SampleSource]
+POSTURES = [p.value for p in Posture]
+
+# Optional PhysiologicalSample fields that may be mapped explicitly: field -> (flag, unit or scale as the model defines it).
+OPTIONAL_FIELDS = {
+    "breathing_rate_bpm": ("--breathing-rate-column", "breaths per minute (0-100)"),
+    "hrv_rmssd_ms": ("--hrv-rmssd-column", "milliseconds (0-1000)"),
+    "hrv_sdnn_ms": ("--hrv-sdnn-column", "milliseconds (0-1000)"),
+    "activity_level": ("--activity-level-column", "unitless 0.0-1.0"),
+    "posture": ("--posture-column", "one of " + ", ".join(POSTURES)),
+    "skin_temperature_c": ("--skin-temperature-column", "degrees Celsius (20-45)"),
+    "spo2_percent": ("--spo2-column", "percent (0-100)"),
+    "signal_quality": ("--signal-quality-column", "unitless 0.0-1.0"),
+}
 
 # ISO 8601 date-time with a 'T' separator and an explicit UTC designator or numeric offset. Anything else is rejected.
 ISO_WITH_TZ = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})$")
@@ -112,7 +142,7 @@ def parse_timestamp(text: str) -> tuple[datetime | None, str | None]:
     return parsed, None
 
 
-def parse_heart_rate(text: str) -> tuple[float | int | None, str | None, bool]:
+def parse_measurement(text: str, what: str) -> tuple[float | int | None, str | None, bool]:
     """(value, reason, is_blank). A blank cell is null (not reported); the value keeps integer-ness for the output."""
     t = text.strip()
     if not t:
@@ -122,26 +152,47 @@ def parse_heart_rate(text: str) -> tuple[float | int | None, str | None, bool]:
     try:
         value = float(t)
     except ValueError:
-        return None, f"{t!r} is not a number (heart rate must already be in bpm)", False
+        return None, f"{t!r} is not a number ({what})", False
     if not math.isfinite(value):
         return None, f"{t!r} is not a finite number", False
     return value, None, False
 
 
-def read_header(header: list[str], timestamp_column: str, heart_rate_column: str) -> tuple[dict[str, int], list[RowError]]:
-    """Column name -> index for the two required columns; errors for missing, duplicated or identical names."""
+def parse_heart_rate(text: str) -> tuple[float | int | None, str | None, bool]:
+    return parse_measurement(text, "heart rate must already be in bpm")
+
+
+def parse_posture(text: str) -> tuple[str | None, str | None, bool]:
+    """(value, reason, is_blank). Only the model's exact posture values are accepted; nothing is normalised."""
+    t = text.strip()
+    if not t:
+        return None, None, True
+    if t not in POSTURES:
+        return None, f"{t!r} is not an accepted posture (expected one of {', '.join(POSTURES)})", False
+    return t, None, False
+
+
+def read_header(
+    header: list[str], timestamp_column: str, heart_rate_column: str, optional_columns: dict[str, str] | None = None
+) -> tuple[dict[str, int], list[RowError]]:
+    """Column name -> index for the required columns and any mapped optional ones; errors for missing, duplicated or shared names."""
     errors: list[RowError] = []
     names = [h.strip() for h in header]
     if not any(names):
         return {}, [RowError(1, "row", "header row is empty")]
     if timestamp_column == heart_rate_column:
         return {}, [RowError(1, "row", f"timestamp and heart-rate columns are both {timestamp_column!r}; they must differ")]
+    mapping = {"timestamp": timestamp_column, "heart_rate_bpm": heart_rate_column, **(optional_columns or {})}
+    shared = [c for c, n in Counter(mapping.values()).items() if n > 1]
+    if shared:
+        fields = ", ".join(f for f, c in mapping.items() if c in shared)
+        return {}, [RowError(1, "row", f"column(s) {sorted(shared)} are mapped to more than one field ({fields}); each field needs its own column")]
     counts = Counter(names)
     index: dict[str, int] = {}
-    for column in (timestamp_column, heart_rate_column):
+    for field, column in mapping.items():
         n = counts.get(column, 0)
         if n == 0:
-            errors.append(RowError(1, column, f"column not found in header {names}"))
+            errors.append(RowError(1, column, f"column not found in header {names}" + (f" (mapped to {field})" if field != column else "")))
         elif n > 1:
             errors.append(RowError(1, column, f"column appears {n} times in the header; the mapping is ambiguous"))
         else:
@@ -157,13 +208,23 @@ def convert_rows(
     athlete_id: str,
     device_id: str,
     source: str,
+    optional_columns: dict[str, str] | None = None,
 ) -> tuple[list[Converted], list[RowError]]:
-    """Validate every CSV row (header first) and build the records. Errors never stop the scan, so all are reported."""
+    """Validate every CSV row (header first) and build the records. Errors never stop the scan, so all are reported.
+
+    `optional_columns` maps PhysiologicalSample field names (see OPTIONAL_FIELDS) to CSV column names. Only mapped
+    fields are written: a blank mapped cell becomes null, an unmapped field is absent from the record.
+    """
+    optional_columns = dict(optional_columns or {})
+    unknown = sorted(set(optional_columns) - set(OPTIONAL_FIELDS))
+    if unknown:
+        return [], [RowError(1, "row", f"unknown optional field(s) {unknown}; mappable fields are {sorted(OPTIONAL_FIELDS)}")]
     if not rows:
         return [], [RowError(1, "row", "file is empty (no header row)")]
-    index, errors = read_header(rows[0], timestamp_column, heart_rate_column)
+    index, errors = read_header(rows[0], timestamp_column, heart_rate_column, optional_columns)
     if errors:
         return [], errors
+    column_of = {"heart_rate_bpm": heart_rate_column, **optional_columns}  # model field -> CSV column, for error messages
     width = len(rows[0])
     out: list[Converted] = []
     for offset, row in enumerate(rows[1:], start=2):
@@ -179,15 +240,27 @@ def convert_rows(
             errors.append(RowError(offset, timestamp_column, ts_err))
         if hr_err:
             errors.append(RowError(offset, heart_rate_column, hr_err))
-        if ts_err or hr_err:
-            continue
         sample = {"athlete_id": athlete_id, "timestamp": ts_text, "source": source, "device_id": device_id, "heart_rate_bpm": hr}
+        row_bad = bool(ts_err or hr_err)
+        for field, column in optional_columns.items():
+            cell = row[index[column]]
+            if field == "posture":
+                value, err, _blank = parse_posture(cell)
+            else:
+                value, err, _blank = parse_measurement(cell, f"{field} must already be in {OPTIONAL_FIELDS[field][1]}")
+            if err:
+                errors.append(RowError(offset, column, err))
+                row_bad = True
+            else:
+                sample[field] = value  # null when the cell was blank
+        if row_bad:
+            continue
         try:
             PhysiologicalSample.model_validate(sample)
         except ValidationError as exc:
             for err in exc.errors():
                 loc = ".".join(str(p) for p in err["loc"])
-                errors.append(RowError(offset, heart_rate_column if loc == "heart_rate_bpm" else loc, err["msg"]))
+                errors.append(RowError(offset, column_of.get(loc, loc), err["msg"]))
             continue
         out.append(Converted(row=offset, record={"type": "physiological", "sample": sample}, timestamp=ts, heart_rate=hr))
     if not out and not errors:
@@ -202,12 +275,14 @@ def read_csv(path: Path) -> list[list[str]]:
 
 # ---- description and output ----------------------------------------------------------------------------------
 
-def describe(converted: list[Converted], src: Path, dst: Path, athlete_id: str, device_id: str, source: str) -> list[str]:
+def describe(
+    converted: list[Converted], src: Path, dst: Path, athlete_id: str, device_id: str, source: str, optional_columns: dict[str, str] | None = None
+) -> list[str]:
     stamps = [c.timestamp for c in converted]
     nulls = sum(1 for c in converted if c.heart_rate is None)
     out_of_order = sum(1 for a, b in zip(stamps, stamps[1:]) if b < a)
     first, last = min(stamps), max(stamps)
-    return [
+    lines = [
         "HEART-RATE CSV CONVERSION",
         "Heart rate is taken as bpm as written; timestamps and offsets are copied as written; blank heart rates become null. No hardware, no network.",
         f"Input: {src} -> {len(converted)} physiological records ({nulls} with heart rate null)",
@@ -217,6 +292,15 @@ def describe(converted: list[Converted], src: Path, dst: Path, athlete_id: str, 
         (f"Rows are kept in CSV order; {out_of_order} row(s) are earlier than the row before them. The replay script orders records by timestamp."
          if out_of_order else "Rows are in chronological order and are kept in CSV order."),
     ]
+    if optional_columns:
+        parts = []
+        for field, column in optional_columns.items():
+            missing = sum(1 for c in converted if c.record["sample"].get(field) is None)
+            parts.append(f"{field} from column {column!r} ({OPTIONAL_FIELDS[field][1]}; {missing} null)")
+        lines.append("Optional measurements mapped as written, no unit conversion: " + "; ".join(parts) + ".")
+    else:
+        lines.append("No optional measurements mapped: records carry heart rate only; other fields are not reported.")
+    return lines
 
 
 def write_jsonl(converted: list[Converted], dst: Path) -> None:
@@ -247,8 +331,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--athlete-id", required=True, help="athlete_id for every record")
     parser.add_argument("--device-id", required=True, help="device_id for every record")
     parser.add_argument("--source", required=True, choices=SOURCES, help="generic source category for every record (never inferred)")
+    for field, (flag, unit) in OPTIONAL_FIELDS.items():
+        parser.add_argument(flag, dest=f"{field}_column", default=None, help=f"optional: header name of the {field} column, {unit}; the field is written only when this flag is given")
     parser.add_argument("--dry-run", action="store_true", help="validate and describe the conversion; write nothing")
     return parser
+
+
+def optional_columns_from(args: argparse.Namespace) -> dict[str, str]:
+    """The optional field -> column mappings actually given on the command line, in OPTIONAL_FIELDS order."""
+    return {field: getattr(args, f"{field}_column") for field in OPTIONAL_FIELDS if getattr(args, f"{field}_column") is not None}
 
 
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -> int:
@@ -266,9 +357,10 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         out(f"Cannot read {src}: {exc}")
         return 1
+    optional = optional_columns_from(args)
     converted, errors = convert_rows(
         rows, timestamp_column=args.timestamp_column, heart_rate_column=args.heart_rate_column,
-        athlete_id=args.athlete_id, device_id=args.device_id, source=args.source,
+        athlete_id=args.athlete_id, device_id=args.device_id, source=args.source, optional_columns=optional,
     )
     if errors:
         out(f"HEART-RATE CSV CONVERSION: {src} is invalid; nothing was written.")
@@ -276,7 +368,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
             out(f"  {e}")
         out(f"{len(errors)} error(s) on {len({e.row for e in errors})} row(s); {len(converted)} row(s) were valid.")
         return 1
-    for line in describe(converted, src, dst, args.athlete_id, args.device_id, args.source):
+    for line in describe(converted, src, dst, args.athlete_id, args.device_id, args.source, optional):
         out(line)
     if args.dry_run:
         out("Dry run: the CSV is valid; no file was written.")

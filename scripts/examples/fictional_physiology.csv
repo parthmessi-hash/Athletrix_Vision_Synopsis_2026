@@ -1,0 +1,6 @@
+timestamp,heart_rate_bpm,breathing_rate_bpm,hrv_rmssd_ms,hrv_sdnn_ms,activity_level,posture,skin_temperature_c,spo2_percent,signal_quality,comment
+2026-10-20T10:00:00Z,112,18,42.5,55,0.0,standing,33.1,98,0.9,fictional demo row: activity 0.0 is a real value
+2026-10-20T12:00:02+02:00,115,19,,,0.4,walking,33.2,97.5,0.85,fictional row with a +02:00 offset and no HRV values (blank -> null)
+2026-10-20T10:00:01Z,,0,40,52,0.2,,33.1,,1.0,fictional row with blank heart rate and posture (null) and a breathing rate of 0 (kept)
+2026-10-20T05:00:03-05:00,118,20,38.0,50.0,0.6,running,33.4,97,0.7,fictional row with a -05:00 offset
+2026-10-20T10:00:04Z,120.5,21,0,0,0.65,unknown,33.5,96.5,0.6,fictional row with HRV values of 0 (kept) and posture unknown

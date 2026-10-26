@@ -33,7 +33,7 @@ Terms used throughout:
 | History | The newest 300 samples per athlete per stream (a count, not a time span). |
 | Window | Both streams for one athlete between `window_start` and one captured backend instant `window_end`. |
 | Replay / interchange format | Athletrix's own JSON Lines format (`{"type": ..., "sample": {...}}`) replayed by `scripts/replay_samples.py` with recorded timestamps preserved. Not a vendor format. |
-| CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
+| CSV adapters | `scripts/convert_heart_rate_csv.py` (heart-rate CSV, bpm, plus explicitly mapped optional physiological fields) and `scripts/convert_tracking_csv.py` (position/motion CSV: metres, m/s, m/s², confidence 0 to 1): documented, provider-agnostic converters with explicit column names and ISO timestamps with timezone, into the interchange format. Not support for any vendor's export; no hardware, no network, no clock synchronization. |
 | Live mode / Recorded review | Live: window and summary end at backend time now and the dashboard polls. Recorded review: the same endpoints with `end=<timestamp>` and the dashboard's Recorded mode, showing the 60 s ending at a chosen past instant. A review covers only samples still retained (newest 300 per athlete per stream); it is not a recording archive. |
 | Summary | Descriptive metrics over a window. |
 | Effort review | `GET /athletes/{id}/effort-review?effort_start&effort_end`: a manually selected 1-120 s period described by the tracking summary during it and heart-rate figures before [start-10 s, start), during [start, end] and after (end, end+30 s] (capped at backend time). Not sprint detection, not an effort classification. |
@@ -88,6 +88,13 @@ python scripts/convert_heart_rate_csv.py scripts/examples/fictional_heart_rate.c
 python scripts/replay_samples.py /tmp/hr.jsonl
 #    flags: --timestamp-column NAME --heart-rate-column NAME (defaults timestamp, heart_rate_bpm); --source is one of
 #    wearable|camera|manual|simulated and is never inferred; exit 0 ok, 1 invalid CSV / output exists, 2 bad arguments
+#    optional measurements, each written only when its flag is given (values as written in the model's units, blank = null):
+#    --breathing-rate-column --hrv-rmssd-column --hrv-sdnn-column --activity-level-column --posture-column
+#    --skin-temperature-column --spo2-column --signal-quality-column; richer fictional fixture:
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_physiology.csv /tmp/phys.jsonl \
+    --athlete-id athlete-1 --device-id fictional-phys-csv-1 --source simulated --breathing-rate-column breathing_rate_bpm \
+    --hrv-rmssd-column hrv_rmssd_ms --hrv-sdnn-column hrv_sdnn_ms --activity-level-column activity_level --posture-column posture \
+    --skin-temperature-column skin_temperature_c --spo2-column spo2_percent --signal-quality-column signal_quality
 
 # 3b''. convert a tracking CSV (metres, m/s, m/s², confidence 0-1, ISO timestamps with timezone) and replay it
 python scripts/convert_tracking_csv.py scripts/examples/fictional_tracking.csv /tmp/trk.jsonl --athlete-id athlete-1 --source simulated --device-id fictional-trk-csv-1 --dry-run
@@ -258,8 +265,15 @@ All of these are descriptive and cover only the samples available in the window
   written (naive values, numeric epochs and invalid dates are rejected);
   every row validated with `PhysiologicalSample` before anything is written;
   errors carry CSV row numbers and field names; existing output is never
-  overwritten and a failure leaves no partial file. No other measurement is
-  produced and nothing is inferred from the file name.
+  overwritten and a failure leaves no partial file. Nothing is inferred
+  from the file name. The other `PhysiologicalSample` fields
+  (`breathing_rate_bpm`, `hrv_rmssd_ms`, `hrv_sdnn_ms`, `activity_level`,
+  `posture`, `skin_temperature_c`, `spo2_percent`, `signal_quality`) are
+  written only when mapped with their explicit column flags, as written in
+  the model's units (blank = null, zeros kept, exact posture values only,
+  conflicting or ambiguous mappings rejected); unmapped fields stay absent.
+  They are stored and echoed; no metric or interpretation is derived from
+  them.
 - **Tracking CSV conversion (`scripts/convert_tracking_csv.py`).** One
   `tracking` record per CSV row with the given athlete id; x/y positions
   (metres), speed (m/s), acceleration (m/s²) and confidence (0 to 1) taken as
@@ -308,8 +322,8 @@ Implemented today is listed above; the following are **not** implemented:
   model's units (bpm; metres, m/s, m/s², confidence 0 to 1) plus ISO
   timestamps with a timezone, so a real export may need its columns named
   explicitly, a unit or timestamp reformatting step, or another adapter.
-  Other measurements (signal quality, posture, altitude) and live hardware
-  are **planned**.
+  The heart-rate adapter can map the model's other optional measurements
+  with explicit flags; live hardware is **not** integrated.
 - `source` and `device_id` are metadata supplied by whoever sent the sample.
   The engine validates the category, stores and counts it, and echoes it; it
   does not verify it, and a source label is not a claim about authenticity or

@@ -36,7 +36,7 @@ app/
   scripts/           # register_demo_roster.py, simulate_athlete.py (local demo helpers),
                      # replay_samples.py (recorded JSONL replay), convert_heart_rate_csv.py and
                      # convert_tracking_csv.py (CSV adapters), examples/fictional_replay.jsonl,
-                     # examples/fictional_heart_rate.csv, examples/fictional_tracking.csv
+                     # examples/fictional_heart_rate.csv, examples/fictional_physiology.csv, examples/fictional_tracking.csv
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
   store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status
 tests/
@@ -396,6 +396,55 @@ Rules of this first version:
   temporary file in the same folder and an existing output file is never
   overwritten, so a failure leaves no partial output. Rows keep their CSV
   order; the replay orders them by timestamp when sending.
+
+#### Optional measurements (explicit column flags)
+
+The other fields of `PhysiologicalSample` can be mapped as well, each with
+its own flag. A field is written **only** when its flag is given: a column
+that happens to be named like a model field is ignored without the flag, so
+nothing is guessed from the header. Values are taken as written in the
+model's units and scales; no conversion is done.
+
+| Flag | Field | Required unit or scale |
+|------|-------|------------------------|
+| `--breathing-rate-column` | `breathing_rate_bpm` | breaths per minute, 0 to 100 |
+| `--hrv-rmssd-column` | `hrv_rmssd_ms` | milliseconds, 0 to 1000 |
+| `--hrv-sdnn-column` | `hrv_sdnn_ms` | milliseconds, 0 to 1000 |
+| `--activity-level-column` | `activity_level` | unitless, 0.0 to 1.0 |
+| `--posture-column` | `posture` | exactly one of `standing`, `sitting`, `lying`, `walking`, `running`, `unknown` |
+| `--skin-temperature-column` | `skin_temperature_c` | degrees Celsius, 20 to 45 |
+| `--spo2-column` | `spo2_percent` | percent, 0 to 100 |
+| `--signal-quality-column` | `signal_quality` | unitless, 0.0 to 1.0 |
+
+Rules: a mapped column must exist exactly once in the header and no two
+fields may share a column (conflicting mappings are rejected before any row
+is read). A blank cell in a mapped column becomes `null`; a zero is kept
+wherever the model allows it (for example `activity_level` 0.0 or
+`hrv_rmssd_ms` 0). Unmapped fields are absent from the records, meaning not
+reported. Non-numeric or non-finite values, values outside the model's
+ranges and postures outside the list above are row errors, named with the
+CSV column, and nothing is written. Whole-file validation, dry run,
+no-overwrite protection and failure cleanup work exactly as before, and the
+heart-rate-only command keeps producing heart-rate-only records.
+
+```bash
+# the fictional richer fixture: every optional field mapped (fictional values; source=simulated)
+python scripts/convert_heart_rate_csv.py scripts/examples/fictional_physiology.csv /tmp/phys.jsonl \
+    --athlete-id athlete-1 --device-id fictional-phys-csv-1 --source simulated \
+    --breathing-rate-column breathing_rate_bpm --hrv-rmssd-column hrv_rmssd_ms --hrv-sdnn-column hrv_sdnn_ms \
+    --activity-level-column activity_level --posture-column posture --skin-temperature-column skin_temperature_c \
+    --spo2-column spo2_percent --signal-quality-column signal_quality
+python scripts/replay_samples.py /tmp/phys.jsonl
+curl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/physiological/history?limit=10"   # the fields come back as written
+```
+
+`scripts/examples/fictional_physiology.csv` has the same five recorded
+timestamps as the heart-rate fixture with every optional column: blank HRV
+and SpO2 cells (null), a breathing rate of 0 and HRV values of 0 (kept), a
+blank posture (null) and the posture `unknown`. The engine stores and echoes
+these fields; the summary and effort-review heart-rate figures still use
+`heart_rate_bpm` only, and no new metric or interpretation is derived from
+the other measurements.
 
 `scripts/examples/fictional_heart_rate.csv` is a tiny fictional example with
 `+02:00` and `-05:00` offsets, a blank heart rate and an out-of-order row; its
