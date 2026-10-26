@@ -65,7 +65,12 @@ class SampleStore(Generic[S]):
 
     # ---- writes -----------------------------------------------------------
     def add(self, sample: S) -> None:
-        """Insert (or replace an equal-instant row) and trim to the stream's cap, atomically.
+        """Insert (or replace an equal-instant row) and trim to the stream's cap, atomically, in a transaction of its own."""
+        with self.db.transaction() as c:
+            self.write(c, sample)
+
+    def write(self, c, sample: S) -> None:
+        """The insert-or-replace plus trim, inside the caller's transaction (so other writes can commit with it or not at all).
 
         The trim keeps the newest `max_samples` rows by recorded timestamp for this athlete and stream only; other
         athletes and the other stream are untouched. This is the only place a cap is applied.
@@ -74,17 +79,16 @@ class SampleStore(Generic[S]):
         ts = to_utc_iso(sample.timestamp)  # type: ignore[attr-defined]
         t = self._table
         cap = self.max_samples
-        with self.db.transaction() as c:
-            c.execute(
-                f"INSERT INTO {t} (athlete_id, ts_utc, payload) VALUES (?, ?, ?) "
-                f"ON CONFLICT(athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload",
-                (athlete_id, ts, sample.model_dump_json()),
-            )
-            c.execute(
-                f"DELETE FROM {t} WHERE athlete_id = ? AND rowid IN "
-                f"(SELECT rowid FROM {t} WHERE athlete_id = ? ORDER BY ts_utc DESC LIMIT -1 OFFSET ?)",
-                (athlete_id, athlete_id, cap),
-            )
+        c.execute(
+            f"INSERT INTO {t} (athlete_id, ts_utc, payload) VALUES (?, ?, ?) "
+            f"ON CONFLICT(athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload",
+            (athlete_id, ts, sample.model_dump_json()),
+        )
+        c.execute(
+            f"DELETE FROM {t} WHERE athlete_id = ? AND rowid IN "
+            f"(SELECT rowid FROM {t} WHERE athlete_id = ? ORDER BY ts_utc DESC LIMIT -1 OFFSET ?)",
+            (athlete_id, athlete_id, cap),
+        )
 
     def upsert(self, sample: S) -> S:
         """Record the sample; return whichever sample is now the athlete's latest."""

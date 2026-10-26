@@ -970,6 +970,26 @@ Rules of this first version:
 - There is no deletion, no cloud upload and no background pruning, so
   recordings consume local disk until an explicit management feature exists.
 
+### What a recording preserves
+
+While a recording is active, every accepted physiological and tracking sample
+for one of its athletes is written to the recording's own tables in the
+**same transaction** as the rolling store's insert-plus-trim (`app/core/ingest.py`),
+so a successful POST means both took the sample and a failed recording write
+leaves the rolling store unchanged too. Membership is decided at ingestion,
+while the recording is active, not by the sample's own timestamp: a delayed
+sample or a historical replay received during the recording is recorded as
+received, and a sample timestamped inside the session window but received
+after the stop is not. Validation and the 5 s future-timestamp rule are
+unchanged, and the sample is stored exactly as normalised for the rolling
+store: timestamp with its offset, ids, source, nulls, zeros and tracking
+confidence. Within one recording, athlete and stream an equal instant
+replaces the earlier row, exactly as in the rolling store, so a recording is a
+normalised record of what was accepted, not an audit log of every arrival.
+Recorded rows are never trimmed by the rolling caps and survive restarts;
+samples for athletes outside the selection never enter; the live endpoints
+and rolling retention behave exactly as before.
+
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 
 ```bash

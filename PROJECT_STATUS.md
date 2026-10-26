@@ -196,7 +196,7 @@ Endpoints, all under `/api/v1`:
 | `POST /athletes` | Register (201; 409 if the id exists, original kept) |
 | `GET /athletes`, `GET /athletes/{id}` | List sorted by id / fetch one (404) |
 | `POST /athletes/validate` | Validate an athlete payload without storing it |
-| `POST /samples/physiological`, `POST /samples/tracking` | Ingest one sample: validate, reject timestamps more than 5 s ahead of backend UTC (422), persist, echo. Registration is not required. |
+| `POST /samples/physiological`, `POST /samples/tracking` (while a recording is active, a sample for one of its athletes is also written to the recording, same transaction) | Ingest one sample: validate, reject timestamps more than 5 s ahead of backend UTC (422), persist, echo. Registration is not required. |
 | `POST /devices/status`, `GET /devices/{id}/status/latest` | Device status ingest (newest per device kept) and read |
 | `GET /athletes/{id}/physiological/latest`, `.../tracking/latest` | Newest persisted sample (404 if none) |
 | `GET /athletes/{id}/physiological/history?limit=60`, `.../tracking/history?limit=60` | Newest `limit` (1-300 per request, a page-size limit separate from the retention caps) samples, oldest to newest |
@@ -255,8 +255,12 @@ limits separate from the retention caps, deliberately unchanged by them),
 - Explicit recordings live in `recordings`, `recording_athletes` and
   `recording_*_samples` tables in the same file (created on open, never
   pruned); an active recording is persisted state and stays active across
-  restarts until stopped. Recordings consume local disk until an explicit
-  management feature exists.
+  restarts until stopped. While active, each accepted sample for a selected
+  athlete is written to the recording in the same transaction as the rolling
+  insert-plus-trim (`app/core/ingest.py`): membership is decided at ingestion,
+  equal instants replace within the recording, recorded rows are never trimmed
+  by the rolling caps, and a stopped recording is never written again.
+  Recordings consume local disk until an explicit management feature exists.
 - `data/` and `*.db*` are git-ignored. Tests never touch it: every test uses its
   own temporary file (`tests/conftest.py`); the fallback `DATABASE_PATH` folder
   the suite sets as a safeguard belongs to that test process and is removed
