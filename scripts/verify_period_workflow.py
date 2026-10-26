@@ -113,6 +113,10 @@ def start_backend(backend: IsolatedBackend, env: dict[str, str] | None = None) -
                 os.environ[k] = v
 
 
+def in_phase(t: datetime, lo: datetime, hi: datetime, start_inclusive: bool, end_inclusive: bool) -> bool:
+    return (t >= lo if start_inclusive else t > lo) and (t <= hi if end_inclusive else t < hi)
+
+
 def review_matches_expectation(review: dict, phys: list, track: list, start: datetime, end: datetime, threshold: float) -> tuple[bool, dict]:
     """Compare a session effort review with expectations computed here from the sent samples under the newest rules."""
     captured = datetime.fromisoformat(review["captured_at"].replace("Z", "+00:00"))
@@ -204,6 +208,17 @@ def run(seconds: int, out: Callable[[str], None], backend_factory: Callable = Is
                          and len(snap["samples"]["tracking"]) == review["movement"]["sample_count"]
                          and len(snap["samples"]["physiological"]) == sum(review["heart_rate"][n]["sample_count"] for n in ("before", "during", "after"))
                          and all(x["timestamp"] == r.payload["timestamp"] and x["speed_mps"] == r.payload["speed_mps"] and x["tracking_confidence"] == r.payload["tracking_confidence"] for x, r in zip(snap["samples"]["tracking"], [r for r in track if start <= ts_of(r) <= end])))
+                # the snapshot's own samples, partitioned by its exported phase bounds and inclusivity, reproduce each phase without double counting
+                seen: list[str] = []
+                for name in ("before", "during", "after"):
+                    b = snap["periods"][name]
+                    lo, hi = datetime.fromisoformat(b["start"].replace("Z", "+00:00")), datetime.fromisoformat(b["end"].replace("Z", "+00:00"))
+                    chosen = [x for x in snap["samples"]["physiological"] if in_phase(datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00")), lo, hi, b["start_inclusive"], b["end_inclusive"])]
+                    rates = [x["heart_rate_bpm"] for x in chosen if x["heart_rate_bpm"] is not None]
+                    ph = snap["review"]["heart_rate"][name]
+                    agree = agree and ph["sample_count"] == len(chosen) and ph["heart_rate_count"] == len(rates) and close(ph["heart_rate_mean_bpm"], sum(rates) / len(rates) if rates else None)
+                    seen += [x["timestamp"] for x in chosen]
+                agree = agree and len(seen) == len(set(seen)) == len(snap["samples"]["physiological"])
                 all_agree = all_agree and agree
                 per_period.append({"id": p["id"], "label": p["label"], "bounds": [p["effort_start"], p["effort_end"]], "matches_independent_expectation": ok, "snapshot_agrees_with_live_review": agree,
                                    "movement": {k: review["movement"].get(k) for k in ("sample_count", "estimated_distance_m", "high_speed_duration_seconds", "excluded_interval_count")},

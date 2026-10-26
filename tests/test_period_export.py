@@ -128,3 +128,34 @@ def test_export_404s_and_empty_periods(client, scene, frozen):
     assert all(doc["review"]["heart_rate"][n]["sample_count"] == 0 for n in ("before", "during", "after"))
     jsonl = client.get(f"{base}/a1/recorded-samples.jsonl")
     assert jsonl.headers["content-type"].startswith("application/x-ndjson") and all(set(json.loads(l)) == {"type", "sample"} for l in jsonl.text.splitlines()), "the interchange export is untouched"
+
+
+def test_exported_samples_reproduce_each_phase_and_the_movement_without_double_counting(client, scene):
+    """Partition the exported samples by the exported phase bounds and inclusivity: counts, measurement counts and means come back; no sample lands in two phases."""
+    from datetime import datetime as dt
+    _, doc = export(client, scene)
+    parse = lambda s: dt.fromisoformat(s.replace("Z", "+00:00"))  # noqa: E731
+    seen = []
+    for name in ("before", "during", "after"):
+        b = doc["periods"][name]
+        lo, hi = parse(b["start"]), parse(b["end"])
+        chosen = [s for s in doc["samples"]["physiological"] if (parse(s["timestamp"]) >= lo if b["start_inclusive"] else parse(s["timestamp"]) > lo) and (parse(s["timestamp"]) <= hi if b["end_inclusive"] else parse(s["timestamp"]) < hi)]
+        rates = [s["heart_rate_bpm"] for s in chosen if s["heart_rate_bpm"] is not None]
+        phase = doc["review"]["heart_rate"][name]
+        assert phase["sample_count"] == len(chosen) and phase["heart_rate_count"] == len(rates), name
+        assert (phase["heart_rate_mean_bpm"] is None and not rates) or abs(phase["heart_rate_mean_bpm"] - sum(rates) / len(rates)) < 1e-9, name
+        assert phase["first_sample_at"] == (chosen[0]["timestamp"] if chosen else None) and phase["last_sample_at"] == (chosen[-1]["timestamp"] if chosen else None), name
+        seen += [s["timestamp"] for s in chosen]
+    assert len(seen) == len(set(seen)) == len(doc["samples"]["physiological"]), "every exported physiological sample falls in exactly one phase: the shared instants 10 s and 30 s are not counted twice"
+    # the exported tracking samples reproduce the movement figures under the exported rules
+    import importlib.util
+    from pathlib import Path as _P
+    spec = importlib.util.spec_from_file_location("compare_retention", _P(__file__).resolve().parents[1] / "scripts" / "compare_retention.py")
+    cr = importlib.util.module_from_spec(spec); spec.loader.exec_module(cr)
+    RequestRecord = cr.sys.modules["validate_team_scale"].RequestRecord
+    recs = [RequestRecord("a1", "tracking", i, 0.0, 0.0, 0.0, "accepted", 200, payload=s) for i, s in enumerate(doc["samples"]["tracking"])]
+    rules = doc["calculation"]["distance_rules"]
+    mine = cr.independent_movement(recs, threshold_mps=rules["high_speed_threshold_mps"], max_gap_s=rules["max_gap_seconds"], min_confidence=rules["min_confidence"])
+    m = doc["review"]["movement"]
+    assert m["sample_count"] == mine["sample_count"] and abs(m["estimated_distance_m"] - mine["estimated_distance_m"]) < 1e-9 and m["excluded_interval_count"] == mine["excluded_interval_count"]
+    assert abs(m["high_speed_duration_seconds"] - mine["high_speed_duration_seconds"]) < 1e-9 and abs(m["high_speed_distance_m"] - mine["high_speed_distance_m"]) < 1e-9
