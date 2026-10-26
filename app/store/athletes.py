@@ -43,6 +43,18 @@ class AthleteRegistry:
             rows = c.execute("SELECT id, name, jersey_number, sport, team_id FROM athletes ORDER BY id").fetchall()
         return [Athlete(**dict(r)) for r in rows]
 
+    def list_team(self, team_id: str) -> list[Athlete]:
+        """Registered athletes whose team_id matches, sorted by jersey number then id (a stable display order)."""
+        with self.db.read() as c:
+            rows = c.execute("SELECT id, name, jersey_number, sport, team_id FROM athletes WHERE team_id = ? ORDER BY jersey_number, id", (team_id,)).fetchall()
+        return [Athlete(**dict(r)) for r in rows]
+
+    def team_ids(self) -> list[str]:
+        """Distinct team ids present in the registry, sorted."""
+        with self.db.read() as c:
+            rows = c.execute("SELECT DISTINCT team_id FROM athletes ORDER BY team_id").fetchall()
+        return [r["team_id"] for r in rows]
+
     def clear(self) -> None:
         with self.db.transaction() as c:
             c.execute("DELETE FROM athletes")

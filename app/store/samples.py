@@ -83,6 +83,15 @@ class SampleStore(Generic[S]):
 
     latest = get
 
+    def latest_at_or_before(self, athlete_id: str, instant: datetime) -> S | None:
+        """Newest sample whose recorded timestamp is at or before `instant` (compared in UTC), or None."""
+        with self.db.read() as c:
+            row = c.execute(
+                f"SELECT payload FROM {self._table} WHERE athlete_id = ? AND ts_utc <= ? ORDER BY ts_utc DESC LIMIT 1",
+                (athlete_id, to_utc_iso(instant)),
+            ).fetchone()
+        return self._row(row) if row else None
+
     def recent(self, athlete_id: str, limit: int) -> list[S]:
         """The newest `limit` samples, oldest to newest."""
         with self.db.read() as c:

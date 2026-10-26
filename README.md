@@ -31,6 +31,7 @@ app/
                      # GET  /api/v1/athletes/{id}/retained-data (per-stream count and UTC range of retained rows)
                      # GET  /api/v1/athletes/{id}/effort-review?effort_start=..&effort_end=.. (manually selected effort)
                      # GET  /api/v1/athletes/{id}/retained-samples.jsonl (replayable export of retained samples)
+  api/teams.py       # GET  /api/v1/teams/{team_id}/live (one snapshot of every registered athlete on a team)
   api/samples.py     # POST /api/v1/samples/physiological, /api/v1/samples/tracking
   api/devices.py     # POST /api/v1/devices/status, GET /api/v1/devices/{id}/status/latest
   models/            # provider-agnostic Pydantic models (units documented in each file)
@@ -527,6 +528,29 @@ synchronize or correct device clocks, so a real heart-rate export and a real
 tracking export align in a review only as far as the recording devices'
 clocks agreed. Converted tracking files are historical and subject to the
 300-sample retention cap, exactly like converted heart-rate files.
+
+### Live team overview (`teams/{team_id}/live`)
+
+`GET /api/v1/teams/{team_id}/live` returns, in one consistent read, every
+athlete registered with that `team_id` and the newest retained sample per
+stream at or before one captured backend instant, with each sample's age.
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/teams/demo-team/live"
+# {"team_id":"demo-team","captured_at":"2026-10-26T05:23:44Z","athletes":[
+#   {"athlete":{"id":"athlete-1",...},"physiological":{...},"tracking":{...},"physiological_age_seconds":0.1,"tracking_age_seconds":0.1},
+#   {"athlete":{"id":"athlete-2",...},"physiological":{...},"tracking":null,"physiological_age_seconds":145.0,"tracking_age_seconds":null}]}
+```
+
+- Membership is `Athlete.team_id` in the registry; there is no team
+  registry, so an unknown team id returns an empty list. Athletes are
+  sorted by jersey number, then id.
+- Backend time is read once. A sample timestamped after it, even one
+  accepted within the ingestion clock-skew allowance, is not shown, so ages
+  are never negative. An old sample is still returned with its age, which is
+  how a consumer tells a stale reading from no reading (`null`).
+- The response carries the samples as stored, sources included, and makes
+  no judgment about freshness.
 
 ### Reviewing a recorded window (`end` parameter)
 
