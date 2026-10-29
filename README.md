@@ -1774,8 +1774,7 @@ operator metadata, the 559 samples sent as live-paced playback with a fictional 
 per athlete, rolling history, live snapshots naming the right athlete with `source: simulated` and the adapter's device
 id, the start snapshot carrying the calibration hash and estimator settings, and a package import keeping every
 sample and the snapshot. Engine distances over known phases versus the analytic path: 28.39 vs 28.0 m, 10.18 vs 10.0 m,
-21.19 vs 21.0 m, 16.28 vs 16.0 m (noise adds length). The engine's own rule bridges red's 1.0 s gap behind the occluder
-with a straight line for distance (`DISTANCE_MAX_GAP_SECONDS` 3 s); the adapter itself never invents samples. The
+21.19 vs 21.0 m, 16.28 vs 16.0 m (noise adds length). The engine's own distance rule spans red's 1.0 s gap behind the occluder by integrating the average of the two endpoint speeds (a trapezoid, not x/y positions; intervals up to `DISTANCE_MAX_GAP_SECONDS`, 3 s); the adapter itself never invents samples. The
 dashboard showed the stream through the existing cards and timelines ("Live · reported source: simulated · device:
 synthetic-marker-cam-1"; the speed timeline follows the designed profile). With 10 Hz tracking and the cards' 1 s poll,
 the cards show about one sample in ten (all are stored and charted); the developer timing panel measured receipt to DOM

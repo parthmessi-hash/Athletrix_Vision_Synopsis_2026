@@ -193,7 +193,7 @@ def run(workdir: Path, out: Callable[[str], None], frontend: Path | None, wait_b
             "movement_phases": phases, "checks": checks, "passed": synthetic["passed"] and all(v["passed"] for v in checks.values()),
             "limitations": ["Synthetic markers and a virtual camera: nothing here measures people, real footage or a real camera's timing.",
                             "Live-paced playback of a generated file; timestamps follow the stated anchor, not capture time.",
-                            "The engine's distance bridges sample gaps up to its own DISTANCE_MAX_GAP_SECONDS (3 s) with a straight line; the adapter itself never invents samples."]}
+                            "The engine's distance integrates the average of the two endpoint speeds over each interval up to DISTANCE_MAX_GAP_SECONDS (3 s), so it spans such gaps by assuming speed changed linearly; it never uses x/y positions, and the adapter itself never invents samples."]}
 
 
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -> int:
