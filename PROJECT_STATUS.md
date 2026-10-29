@@ -478,6 +478,21 @@ Implemented today is listed above; the following are **not** implemented:
   no pass threshold, and 15 s runs do not establish sustained match-length
   behaviour; a timed-out request leaves acceptance unknown and is reported
   as such.
+- Portable packages are format `athletrix-recording-package` version 1; an
+  importer accepts only versions it lists (`SUPPORTED_VERSIONS` in
+  `app/core/recording_package.py`) and refuses others. Imported recordings get
+  new recording and period ids; the original ids, package SHA-256, format and
+  generation time are kept in `recording_imports` and shown as `imported`.
+  `settings_at_export` in a package is informational: the importing engine
+  applies its own settings, so figures follow the destination's settings.
+  Checksums detect accidental corruption only; a package is neither a backup
+  nor evidence of measurement accuracy. Databases created before this batch
+  open unchanged (the new table is added on open) and their recordings export
+  and import identically (checked on isolated copies).
+- Everything is exercised with fictional, simulated or replayed data. No real
+  wearable or camera system has been connected, so measurement accuracy, real
+  heart-rate behaviour, tracking quality, real device clock agreement and
+  full-match behaviour with real traffic are not established.
 - Recordings are a first version: one active at a time, no deletion, no
   upload, no automatic start, no management of disk use; an active recording
   survives a restart until stopped explicitly. Saved periods are manual
@@ -591,6 +606,18 @@ python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-
 # frontend: public mode locally (must make no engine requests; check the Network tab)
 open "http://localhost:3000/?engine=0#demo"
 ```
+
+## Checkpoint: portable recordings batch (2026-10-28)
+
+| Milestone | State |
+|-----------|-------|
+| 1. Versioned portable package export | Done: `GET /recordings/{id}/package.zip` |
+| 2. Local validate, dry-run and import | Done: `scripts/recording_package.py` |
+| 3. Batch review of saved periods + CSV | Done: `.../period-reviews`, `.../period-reviews.csv` |
+| 4. Dashboard: inventory, package download, review table, CSV | Done (frontend) |
+| 5. Portable workflow verification | Done: `scripts/verify_portable_workflow.py`, 27 of 27 checks |
+| 6. Longer recorded run | Done: `validate_team_scale.py --record`, 10 min, 20 athletes, 132000 of 132000 accepted, about 90 MB |
+| 7. Final verification and documentation | Done: full suite, browser harness 60 of 60, real dashboard check, older-database compatibility on isolated copies |
 
 ## 10. Recommended next milestone
 
