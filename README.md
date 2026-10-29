@@ -1195,6 +1195,107 @@ A null is an **empty cell**; a real zero is written as `0` or `0.0`. The
 detailed per-period `review.json` remains the place for exact samples and
 calculation details.
 
+### The whole workflow, command by command
+
+Record, stop, save periods, review them together, export a package, import it
+into another local engine and reproduce the selections and calculations:
+
+```bash
+B=http://127.0.0.1:8000/api/v1
+# 1. record (the athletes must be registered; samples arrive from your sender, the simulator or a replay)
+curl -s -X POST $B/recordings -H 'content-type: application/json' -d '{"name":"Tuesday practice","athlete_ids":["athlete-1","athlete-2"]}'
+python scripts/simulate_athlete.py --athlete-id athlete-1 --profile effort-rest --with-tracking --seconds 120
+curl -s -X POST $B/recordings/<id>/stop
+# 2. save effort periods (labels may repeat; ids identify)
+curl -s -X POST $B/recordings/<id>/athletes/athlete-1/periods -H 'content-type: application/json' \
+     -d '{"label":"effort","effort_start":"<ISO with timezone>","effort_end":"<ISO with timezone>"}'
+# 3. review several periods together, as JSON and CSV
+curl -s $B/recordings/<id>/athletes/athlete-1/period-reviews
+curl -OJ $B/recordings/<id>/athletes/athlete-1/period-reviews.csv
+# 4. export a portable package
+curl -OJ $B/recordings/<id>/package.zip
+# 5. inspect, dry-run and import it into another local database (stop that engine first, or use a new file)
+python scripts/recording_package.py inspect athletrix-recording-package-<id>-<time>.zip
+python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/other.db --dry-run
+python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/other.db
+# 6. start the other engine on that file and reopen: same samples, periods (new ids, mapping under "imported") and figures
+DATABASE_PATH=/path/to/other.db uvicorn app.main:app --port 8001
+curl -s http://127.0.0.1:8001/api/v1/recordings/inventory
+curl -s http://127.0.0.1:8001/api/v1/recordings/<new id>/athletes/athlete-1/period-reviews
+```
+
+The dashboard offers the same steps without curl: Local recording (start,
+stop, Download package), Recording review (navigation, Saved periods,
+Saved-period reviews with Refresh reviews and Download CSV, Open and Review
+JSON per period). Importing is the local command above; the page has no
+upload.
+
+**What exists today and what still needs real data.** Everything above runs
+on fictional or replayed samples: the simulator, the replay and CSV tools and
+the validation scripts. The engine stores, reviews and moves what it is
+given, and the checks prove that the software reproduces its own selections
+and calculations exactly across engines. Nothing here has been run against a
+real wearable or camera system, so nothing establishes measurement accuracy,
+real heart-rate behaviour, tracking quality in a stadium, clock agreement
+between real devices, or behaviour over a full match with real traffic. A
+real integration still needs a sender for the device's export or stream
+(the provider-agnostic sample models and the CSV adapters are the starting
+point), field data to check timing and confidence handling, and decisions
+about the engine settings for the sport.
+
+**Storage limits.** Recordings and imported packages live in the local SQLite
+file and are never pruned; there is no deletion or archive management yet, so
+they consume disk until such a feature exists (a 10-minute, 20-athlete,
+1 Hz + 10 Hz recording measured about 90 MB in the long run below). One recording can be
+active at a time, and one backend process should write a database file.
+
+### A longer recorded run (`validate_team_scale.py --record`)
+
+```bash
+python scripts/validate_team_scale.py --athletes 20 --duration 600 --physiological-rate 1 --tracking-rate 10 \
+    --physiological-cap 300 --tracking-cap 3000 --record --session-read-interval 15 --size-interval 60
+```
+
+`--record` starts a recording covering every athlete before the timed run,
+adds a session window read of the active recording every
+`--session-read-interval` seconds (rotating athletes) next to the team
+overview reads, samples the database size (file plus WAL and shared-memory
+sidecars) every `--size-interval` seconds, and afterwards stops the
+recording, compares rolling and recorded rows and spans per athlete and
+stream, restarts the backend and checks the recording is identical, and runs
+early, middle and late 20 s effort reviews of the first athlete,
+cross-checked against an independent calculation from the accepted samples.
+Schedule time (when a sample is due), send time (when it was issued),
+request latency (the round trip) and the recorded timestamp (the tick's own
+instant, never rewritten) are reported separately; nothing catches up by
+rewriting timestamps and nothing is dropped to hide overload.
+
+Observed on this Mac (8 CPUs, macOS, Python 3.14; fictional data, one run,
+no threshold, not a capacity or match claim):
+
+| | Physiological 1 Hz | Tracking 10 Hz |
+|---|---|---|
+| Scheduled / attempted / accepted | 12000 / 12000 / 12000 | 120000 / 120000 / 120000 |
+| Failed / timeout (unknown) / omitted / unsent | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| Delivered rate | 1.0 Hz over 600.0 s | 10.0 Hz over 600.0 s |
+| Write latency p50 / p95 / max | 7.6 / 14.6 / 112.2 ms | 7.7 / 14.8 / 250.6 ms |
+| Scheduling lateness p50 / p95 / max | 17.2 / 29.5 / 75.4 ms | 18.4 / 37.5 / 358.5 ms |
+| Rolling rows per athlete (span) | 300 (299.0 s) | 3000 (299.9 s) |
+| Recorded rows per athlete (span) | 600 (599.0 s) | 6000 (599.9 s) |
+
+Team overview reads: 300 of 300 ok (p50 6.1 ms, p95 12.2 ms, max 15.4 ms),
+every consistency check passed. Session window reads: 40 of 40 ok (p50
+12.1 ms, p95 42.7 ms, max 78.9 ms), each naming only its athlete. Recorded
+rows equalled accepted samples for all 20 athletes and were identical after a
+backend restart. Database size: 0.4 MB at the start, 15.4 MB after 60 s,
+60.1 MB after 300 s (when the rolling caps filled), 90.0 MB at 600 s and
+unchanged after the stop and the restart; after the caps filled, growth was
+about 6 MB per minute, all of it the recording. Effort reviews of the first
+athlete (20 s each) matched the independent calculation: early 201 tracking
+samples, 16.72 m; middle 201, 159.71 m with 20.0 s at or above 5 m/s; late
+201, 25.02 m. The run took 600.09 s from start to the last response and its
+backend and temporary folder were removed afterwards.
+
 ### Proving the portable workflow (`scripts/verify_portable_workflow.py`)
 
 ```bash

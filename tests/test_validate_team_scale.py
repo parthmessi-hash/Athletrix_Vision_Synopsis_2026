@@ -507,3 +507,33 @@ def test_expected_retained_and_cli_use_each_streams_cap():
     cfg = vt.RunConfig(physiological_cap=args.physiological_cap, tracking_cap=args.tracking_cap)
     assert cfg.retention_caps == {"physiological": 300, "tracking": 3000} and cfg.cap_for("tracking") == 3000
     assert vt.main(["--tracking-cap", "0"], out=lambda s: None) == 2, "rejected before any backend is started"
+
+
+# ---- an active recording during the run: session reads, sizes, reviews ------------------------------------------------
+
+def test_session_reads_of_an_active_recording_name_only_their_athlete(client):
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=2, duration_s=4, physiological_rate_hz=1.0, tracking_rate_hz=2.0, workers=1, read_interval_s=0)
+    vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
+    rec = client.post("/api/v1/recordings", json={"name": "fictional", "athlete_ids": [vt.athlete_id(0), vt.athlete_id(1)]}).json()["id"]
+    cfg.recording_id, cfg.session_read_interval_s = rec, 1.0
+    start = datetime.now(UTC) - timedelta(seconds=30)
+    res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=start)
+    assert len(res.session_reads) == 4 and all(r.outcome == "ok" for r in res.session_reads), res.session_reads
+    assert [r.detail for r in res.session_reads] == [vt.athlete_id(1), vt.athlete_id(0), vt.athlete_id(1), vt.athlete_id(0)], "athletes rotate"
+    assert all(v is True for r in res.session_reads for v in r.checks.values())
+    snap = vt.recorded_snapshot(Borrowed2(client), "", rec, cfg)
+    assert snap[vt.athlete_id(0)]["tracking"]["recorded"] == 8 and snap[vt.athlete_id(0)]["physiological"]["recorded"] == 4
+
+
+def test_database_bytes_counts_the_wal_sidecars(tmp_path):
+    db = tmp_path / "x.db"
+    db.write_bytes(b"a" * 10)
+    (tmp_path / "x.db-wal").write_bytes(b"b" * 5)
+    assert vt.database_bytes(db) == 15 and vt.database_bytes(tmp_path / "missing.db") == 0
+
+
+def test_record_flags_parse_with_documented_defaults():
+    args = vt.build_parser().parse_args(["--record"])
+    assert args.record is True and args.session_read_interval == 15.0 and args.size_interval == 60.0
+    assert vt.build_parser().parse_args([]).record is False, "default behaviour is unchanged"

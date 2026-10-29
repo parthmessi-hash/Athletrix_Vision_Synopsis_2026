@@ -146,6 +146,10 @@ python scripts/validate_team_scale.py --athletes 20 --duration 60 --physiologica
 #     an early effort (5-15 s) reviewed under both, export + replay into a third isolated backend; report under reports/ (ignored)
 python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-rate 1 --tracking-rate 10 --tracking-cap 3000 --effort-start 5 --effort-end 15
 
+# 3o. a 10-minute recorded run: 20 athletes, 1 Hz / 10 Hz, caps 300/3000, an active recording, team and session reads,
+#     database sizes, restart check, early/middle/late reviews (about 11 minutes; report under reports/)
+python scripts/validate_team_scale.py --athletes 20 --duration 600 --physiological-rate 1 --tracking-rate 10 --physiological-cap 300 --tracking-cap 3000 --record
+
 # 3k. explicit local recording: start for registered athletes, inspect, stop (one active at a time; survives restarts until stopped)
 curl -s -X POST http://127.0.0.1:8000/api/v1/recordings -H 'content-type: application/json' -d '{"name":"Tuesday practice","athlete_ids":["athlete-1","athlete-2"]}'
 curl -s http://127.0.0.1:8000/api/v1/recordings/active
