@@ -1159,6 +1159,42 @@ python scripts/recording_package.py import  athletrix-recording-package-<id>-<ti
 - Import into a separate file, or stop the destination engine first, so a
   running backend and the tool do not use one file at the same time.
 
+### Reviewing several saved periods together (`period-reviews`, `period-reviews.csv`)
+
+```bash
+R=http://127.0.0.1:8000/api/v1/recordings/<id>/athletes/athlete-1
+curl "$R/period-reviews"          # JSON: recording, athlete, captured_at, rules, distance_rules, one item per saved period
+curl -OJ "$R/period-reviews.csv"  # the same set as CSV, one row per saved period
+```
+
+The batch reviews every saved period of one athlete in one **stopped**
+recording (409 while active) with **one captured time, one capture of the
+engine settings and one consistent read**, using the same selection and
+calculation functions as the single effort review and the review JSON. Each
+item carries the saved period (id, label, exact bounds) and its full review
+(movement, before/during/after heart-rate phases, session availability,
+sources). Items are listed by start instant, never ranked or combined across
+athletes; periods differ in length and content, so their figures are not
+equivalents, and nothing judges fatigue, recovery, readiness or safety. A
+missing value stays null.
+
+CSV columns (one row per saved period, UTF-8, header row, `\r\n` line ends):
+
+| Column | Unit / meaning |
+|--------|----------------|
+| `recording_id`, `athlete_id`, `period_id`, `label` | text (a label starting with `=`, `+`, `-`, `@`, tab or carriage return is written with a leading `'` so a spreadsheet does not evaluate it) |
+| `effort_start`, `effort_end` | ISO 8601 as saved |
+| `duration_s` | s |
+| `calculated_at` | ISO 8601 UTC, the batch's captured time |
+| `max_gap_s`, `min_confidence`, `high_speed_threshold_mps` | engine settings applied (s, 0 to 1, m/s) |
+| `before_period_s`, `after_period_s`, `follow_up_elapsed` | the review's phase lengths (s) and whether the after period had fully elapsed (true/false) |
+| `movement_sample_count`, `distance_m`, `included_duration_s`, `excluded_interval_count`, `speed_peak_mps`, `high_speed_duration_s`, `high_speed_distance_m` | count, m, s, count, m/s, s, m |
+| `hr_<phase>_start`, `hr_<phase>_end`, `hr_<phase>_sample_count`, `hr_<phase>_measured_count`, `hr_<phase>_mean_bpm`, `hr_<phase>_peak_bpm` for `before`, `during`, `after` | applied phase bounds (UTC), counts, bpm |
+
+A null is an **empty cell**; a real zero is written as `0` or `0.0`. The
+detailed per-period `review.json` remains the place for exact samples and
+calculation details.
+
 ### Save, restart, reopen, export: a reproducible example
 
 ```bash

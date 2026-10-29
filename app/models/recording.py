@@ -160,8 +160,47 @@ class RecordingSummary(AthleteSummary):
     session_availability: SessionWindowAvailability
 
 
+class AppliedDistanceRules(AthletrixModel):
+    """The engine settings applied to every movement figure of a batch review (adjustable engineering defaults, not sport standards)."""
+
+    max_gap_seconds: float
+    min_confidence: float
+    high_speed_threshold_mps: float
+
+
 class RecordingEffortReview(EffortReview):
     """An effort review over one recording's samples only, same calculations, boundaries and rules as the rolling review."""
 
     recording: RecordingRef
     session_availability: SessionEffortAvailability
+
+
+class PeriodReviewItem(AthletrixModel):
+    """One saved period with its review, calculated in the batch."""
+
+    period: "SavedPeriod"
+    review: RecordingEffortReview
+
+
+class PeriodBatchReview(AthletrixModel):
+    """Descriptive reviews of one athlete's saved periods in one stopped recording, calculated together.
+
+    One captured time and one set of engine settings apply to every item; the samples come from one consistent read of
+    the recording. Items are listed by start instant, never ranked. Periods differ in length and in what happened, so
+    their figures are not comparable as equivalents, and nothing here judges fatigue, recovery, readiness or safety.
+    """
+
+    recording: RecordingRef
+    athlete: Athlete
+    captured_at: AwareDatetime = Field(..., description="Backend time read once for the whole batch; caps every after period.")
+    rules: "EffortRules" = Field(..., description="Period lengths and effort limits applied to every item.")
+    distance_rules: AppliedDistanceRules = Field(..., description="Engine settings applied to every movement figure.")
+    items: list[PeriodReviewItem] = Field(..., description="One per saved period, ordered by start instant.")
+    note: str = "Current calculations over recorded samples with the rules above; a saved period stores only its selection, so other engine settings give other figures. Periods are listed, not ranked."
+
+
+from app.models.effort import EffortRules  # noqa: E402
+from app.models.period import SavedPeriod  # noqa: E402
+
+PeriodReviewItem.model_rebuild()
+PeriodBatchReview.model_rebuild()

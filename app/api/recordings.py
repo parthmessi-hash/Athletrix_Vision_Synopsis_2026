@@ -5,6 +5,8 @@ It is local SQLite storage on this machine; nothing is uploaded, nothing is dele
 recording survives a backend restart until it is stopped explicitly.
 """
 
+import csv
+import io
 import json
 import re
 from datetime import datetime, timedelta
@@ -22,6 +24,7 @@ from app.core.recording_package import FORMAT as PACKAGE_FORMAT, FORMAT_VERSION 
 from app.core.summary import summarize_window
 from app.db import get_database
 from app.models import Athlete, TrackingRules
+from app.models.recording import AppliedDistanceRules, PeriodBatchReview, PeriodReviewItem
 from app.models.recording import (
     ActiveRecording, RecordedAthlete, RecordedData, RecordedStream, Recording, RecordingDetail, RecordingEffortReview, RecordingRef, RecordingStart, RecordingSummary, RecordingWindow,
     SessionEffortAvailability, SessionHeartRateAvailability, SessionWindowAvailability,
@@ -364,6 +367,90 @@ def export_period_review(recording_id: str, athlete_id: str, period_id: str) -> 
             "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Format, X-Athletrix-Recording-Id, X-Athletrix-Period-Id",
         },
     )
+
+
+# ---- batch review of saved periods (one athlete, one stopped recording) -----------------------------------------------------
+
+def compute_batch_review(recording_id: str, athlete_id: str) -> PeriodBatchReview:
+    """Every saved period of the athlete reviewed with one captured time, one settings capture and one consistent read."""
+    captured_at = clock.utc_now()
+    settings = get_settings()
+    with get_database().read():
+        rec = require_recording(recording_id)
+        athlete = require_member(rec, athlete_id)
+        if rec.status != "stopped":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Recording '{rec.id}' is still active; saved periods and their reviews exist only for stopped recordings")
+        items = [PeriodReviewItem(period=p, review=compute_session_review(rec.id, athlete_id, p.effort_start, p.effort_end, captured_at, settings).review) for p in period_store.list(rec.id, athlete_id)]
+    rules = items[0].review.rules if items else review_effort_rules()
+    return PeriodBatchReview(recording=recording_ref(rec), athlete=athlete, captured_at=captured_at, rules=rules,
+                             distance_rules=AppliedDistanceRules(max_gap_seconds=settings.distance_max_gap_seconds, min_confidence=settings.distance_min_confidence, high_speed_threshold_mps=settings.high_speed_threshold_mps),
+                             items=items)
+
+
+def review_effort_rules():
+    from app.core.effort import AFTER_SECONDS as A, BEFORE_SECONDS as B, MAX_EFFORT_SECONDS as MX, MIN_EFFORT_SECONDS as MN
+    from app.models import EffortRules
+    return EffortRules(before_seconds=B, after_seconds=A, min_effort_seconds=MN, max_effort_seconds=MX)
+
+
+@router.get("/{recording_id}/athletes/{athlete_id}/period-reviews", response_model=PeriodBatchReview)
+def get_period_reviews(recording_id: str, athlete_id: str) -> PeriodBatchReview:
+    """Descriptive reviews of the athlete's saved periods in a stopped recording, calculated together (same functions as the single effort review)."""
+    return compute_batch_review(recording_id, athlete_id)
+
+
+CSV_COLUMNS = [
+    ("recording_id", "text"), ("athlete_id", "text"), ("period_id", "text"), ("label", "text"),
+    ("effort_start", "ISO 8601 as saved"), ("effort_end", "ISO 8601 as saved"), ("duration_s", "s"), ("calculated_at", "ISO 8601 UTC"),
+    ("max_gap_s", "s"), ("min_confidence", "0-1"), ("high_speed_threshold_mps", "m/s"), ("before_period_s", "s"), ("after_period_s", "s"), ("follow_up_elapsed", "true/false"),
+    ("movement_sample_count", "count"), ("distance_m", "m"), ("included_duration_s", "s"), ("excluded_interval_count", "count"),
+    ("speed_peak_mps", "m/s"), ("high_speed_duration_s", "s"), ("high_speed_distance_m", "m"),
+] + [(f"hr_{p}_{k}", u) for p in ("before", "during", "after") for k, u in (("start", "ISO 8601 UTC"), ("end", "ISO 8601 UTC"), ("sample_count", "count"), ("measured_count", "count"), ("mean_bpm", "bpm"), ("peak_bpm", "bpm"))]
+
+
+def csv_cell(value) -> str:
+    """Null is an empty cell, never 0; numbers as Python writes them; text that a spreadsheet would treat as a formula is prefixed with an apostrophe."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(float(value)) if isinstance(value, float) else str(value)
+    if isinstance(value, datetime):
+        return value.isoformat().replace("+00:00", "Z")
+    text = str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def batch_csv(batch: PeriodBatchReview) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow([name for name, _ in CSV_COLUMNS])
+    dr, rules = batch.distance_rules, batch.rules
+    for item in batch.items:
+        p, r = item.period, item.review
+        m, hr = r.movement, r.heart_rate
+        row = [batch.recording.id, batch.athlete.id, p.id, p.label, p.effort_start.isoformat().replace("+00:00", "Z"), p.effort_end.isoformat().replace("+00:00", "Z"), p.duration_seconds, batch.captured_at,
+               dr.max_gap_seconds, dr.min_confidence, dr.high_speed_threshold_mps, rules.before_seconds, rules.after_seconds, r.follow_up_elapsed,
+               m.sample_count, m.estimated_distance_m, m.included_duration_seconds, m.excluded_interval_count, m.speed_peak_mps, m.high_speed_duration_seconds, m.high_speed_distance_m]
+        for phase in (hr.before, hr.during, hr.after):
+            row += [phase.period_start, phase.period_end, phase.sample_count, phase.heart_rate_count, phase.heart_rate_mean_bpm, phase.heart_rate_peak_bpm]
+        w.writerow([csv_cell(v) for v in row])
+    return buf.getvalue()
+
+
+@router.get(
+    "/{recording_id}/athletes/{athlete_id}/period-reviews.csv",
+    responses={200: {"content": {"text/csv": {}}, "description": "One row per saved period; columns documented in the README"}},
+)
+def export_period_reviews_csv(recording_id: str, athlete_id: str) -> Response:
+    """The batch review as CSV for a spreadsheet: one row per saved period, stable columns with units, empty cells for null."""
+    batch = compute_batch_review(recording_id, athlete_id)
+    safe = lambda text, fallback: re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._") or fallback  # noqa: E731
+    name = f"athletrix-period-reviews-{safe(batch.recording.id, 'recording')}-{safe(athlete_id, 'athlete')}-{batch.captured_at.strftime('%Y%m%dT%H%M%SZ')}.csv"
+    return Response(content=batch_csv(batch), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "X-Athletrix-Period-Count": str(len(batch.items)),
+                             "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Period-Count"})
 
 
 # ---- portable recording package (stopped recordings only) ----------------------------------------------------------------
