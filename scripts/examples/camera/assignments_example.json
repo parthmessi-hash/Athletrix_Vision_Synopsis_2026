@@ -1,0 +1,12 @@
+{
+  "format": "athletrix-track-assignments",
+  "format_version": 1,
+  "assignments": [
+    {
+      "track_id": "trk-1",
+      "athlete_id": "fictional-athlete-01",
+      "from_frame": 0,
+      "assigned_by": "operator, by hand (fictional example)"
+    }
+  ]
+}
