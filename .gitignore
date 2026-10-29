@@ -16,3 +16,7 @@ data/
 reports/
 # maintenance lease files next to local databases (app/core/db_lease.py)
 *.athletrix-lock
+# generated camera-adapter files (videos, observations, samples, logs); fixtures live in scripts/examples/camera/
+*.avi
+*.mp4
+camera-work/

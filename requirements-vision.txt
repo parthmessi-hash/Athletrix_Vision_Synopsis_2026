@@ -1,0 +1,5 @@
+# Optional: synthetic video generation and synthetic marker extraction for the camera adapter prototype
+# (scripts/camera_synthetic_check.py, scripts/verify_camera_pipeline.py). The engine and the adapter core do not need these.
+# Install once (needs network access once); processing then runs offline:  pip install -r requirements-vision.txt
+opencv-python-headless>=4.10
+numpy>=2.1

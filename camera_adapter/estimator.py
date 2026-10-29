@@ -10,9 +10,10 @@ briefly (a boundary effect lasting about one window), which the synthetic check 
 
   speed_mps           = |velocity| (never negative; a standing target gives a legitimate value near 0)
   acceleration_mps2   = tangential acceleration, d|v|/dt = (v . a) / |v|, negative when slowing down. Below
-                        `min_speed_for_direction_mps` the direction of travel is undefined; speed can then only grow,
-                        so +|a| is reported (correct when starting from rest; near a stop it can show a positive value
-                        while the target settles, a documented boundary effect).
+                        `min_speed_for_direction_mps` the direction of travel is too uncertain to project onto, so the
+                        magnitude |a| is reported with the sign of the fitted speed's change over the last half window
+                        (|v(0)| versus |v(-window/2)| from the same causal fit): positive when starting off, negative
+                        when coming to a stop.
 
 No estimate is made (the sample is skipped with a reason) while warming up (fewer than `min_points` observations or
 less than `min_span_s` covered in the window), when the fit residual exceeds `max_fit_rms_m`, or within the output-rate
@@ -122,5 +123,7 @@ class AthleteEstimator:
         if speed >= self.config.min_speed_for_direction_mps and speed > 0:
             accel = (bx * accx + by * accy) / speed
         else:
-            accel = math.hypot(accx, accy)
+            half = -self.config.window_s / 2
+            earlier = math.hypot(bx + 2 * cx * half, by + 2 * cy * half)
+            accel = math.copysign(math.hypot(accx, accy), speed - earlier)
         return Estimate(t_now, ax, ay, speed, accel, min(p.confidence for p in h), len(h), rms), None

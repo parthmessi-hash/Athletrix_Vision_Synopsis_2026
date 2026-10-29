@@ -1,10 +1,10 @@
 """Turn camera observations into TrackingSample records: validate, export JSON Lines, or send to a local engine.
 
 USAGE
-    python scripts/camera_adapter.py validate OBS.jsonl --calibration CAL.json --config CONFIG.json [--assignments A.json]
-    python scripts/camera_adapter.py export   OBS.jsonl --calibration CAL.json --config CONFIG.json [--assignments A.json] \\
+    python scripts/camera_to_samples.py validate OBS.jsonl --calibration CAL.json --config CONFIG.json [--assignments A.json]
+    python scripts/camera_to_samples.py export   OBS.jsonl --calibration CAL.json --config CONFIG.json [--assignments A.json] \\
                                               --anchor-utc 2026-10-29T12:00:00Z --out samples.jsonl --log adapter-log.json
-    python scripts/camera_adapter.py send     ... same inputs ... --anchor-utc now|ISO --url http://127.0.0.1:8000 [--speed 1] \\
+    python scripts/camera_to_samples.py send     ... same inputs ... --anchor-utc now|ISO --url http://127.0.0.1:8000 [--speed 1] \\
                                               [--out samples.jsonl] [--log adapter-log.json]
 
   validate  checks every input and runs the whole pipeline; writes and sends nothing.

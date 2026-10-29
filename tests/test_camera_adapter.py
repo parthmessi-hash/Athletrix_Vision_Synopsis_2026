@@ -134,6 +134,13 @@ def test_estimator_is_exact_for_constant_speed_acceleration_and_rest_and_never_f
     assert all(abs(e.acceleration_mps2 + 2.0) < 1e-6 for e in good), "slowing down gives negative acceleration"
     out, _ = run([(t, 10 - t * t, 0.0) for t in ts])         # speeding up while moving towards -x: positive
     assert all(e.acceleration_mps2 > 0 for _, e, _ in out if e and e.speed_mps > 0.3)
+    stop = [(t, 4 * t - t * t if t < 2 else 4.0, 0.0) for t in ts]   # decelerating 2 m/s2 to a standstill at 2 s
+    out, _ = run(stop)
+    slow = [e for _, e, _ in out if e and 0 < e.speed_mps < 0.3 and e.t < 2]
+    assert slow and all(e.acceleration_mps2 < 0 for e in slow), "below the direction speed, a stop still reads as negative"
+    start = [(t, 0.0 if t < 1 else (t - 1) ** 2, 0.0) for t in ts]
+    out, _ = run(start)
+    assert all(e.acceleration_mps2 >= 0 for _, e, _ in out if e and e.t > 1 and e.speed_mps < 0.3), "starting off reads as positive"
     out, _ = run([(t, 7.0, 7.0) for t in ts])
     assert all(0 <= e.speed_mps < 1e-9 for _, e, _ in out if e), "standing still is a legitimate (rounding-level) zero, published as 0.0"
 
@@ -210,7 +217,7 @@ def test_cli_calibrate_export_and_send_with_an_explicit_anchor(tmp_path):
     import httpx
     from pathlib import Path
     ex = Path(__file__).resolve().parents[1] / "scripts" / "examples" / "camera"
-    calibrate, adapter = load_cli("camera_calibrate"), load_cli("camera_adapter")
+    calibrate, adapter = load_cli("camera_calibrate"), load_cli("camera_to_samples")
     lines = []
     assert calibrate.main(["fit", str(ex / "calibration_points_example.json"), "--out", str(tmp_path / "cal.json")], out=lines.append) == 0
     assert calibrate.main(["fit", str(ex / "calibration_points_example.json"), "--out", str(tmp_path / "cal.json")], out=lines.append) == 1, "never overwrites"
