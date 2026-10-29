@@ -44,7 +44,11 @@ app/
                      # convert_tracking_csv.py (CSV adapters), examples/fictional_replay.jsonl,
                      # examples/fictional_heart_rate.csv, examples/fictional_physiology.csv, examples/fictional_tracking.csv
                      # recording_package.py (inspect/import packages), local_data.py (inventory and scoped removal),
-                     # verify_*.py (isolated end-to-end checks, including verify_evaluation_workflow.py)
+                     # verify_*.py (isolated end-to-end checks, including verify_evaluation_workflow.py),
+                     # camera_calibrate.py, camera_to_samples.py, camera_synthetic_check.py, verify_camera_pipeline.py
+camera_adapter/      # camera adapter prototype (outside the engine): observations, calibration, causal estimator, pipeline;
+                     # synthetic_truth.py + synthetic_video.py (OpenCV) for the synthetic marker check
+docs/                # individual-performance-design-note.md (proposed, not implemented)
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
   store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status,
                      # recordings, saved periods, package import, removal plans (store/removal.py)
@@ -1628,6 +1632,164 @@ timestamps from another clock are not corrected); display timing measured on the
 browser; an agreed procedure for exports, packages, backups and footage outside the database (the removal tool covers
 one database file only); authentication or a physically controlled computer; and the approvals and procedures that
 govern human participants, which no code here provides.
+
+## Camera adapter prototype (synthetic markers; `camera_adapter/`)
+
+A first, local path from video to the engine: **video/frame observations -> field calibration -> movement estimates
+-> TrackingSample -> engine -> dashboard and recording**. It establishes the adapter's geometry, timestamps, movement
+calculations and integration using a **generated video with coloured markers**. It does not detect people, identify
+players or assess performance.
+
+### Install and run
+
+```bash
+pip install -r requirements.txt                 # the engine (unchanged; no vision packages needed)
+pip install -r requirements-vision.txt          # optional: OpenCV + NumPy, once, for video generation and marker extraction
+python scripts/camera_synthetic_check.py        # ~3 s: video, calibration, extraction, estimates, errors vs truth
+python scripts/verify_camera_pipeline.py        # ~40 s: the same stream through an isolated engine, recording and package
+# watch it on a copy of the dashboard (Dashboard in the visible foreground tab):
+python scripts/verify_camera_pipeline.py --serve-frontend "../Athletrix Fixed Website" --wait-before-send 30
+```
+
+The adapter core (`observations`, `calibration`, `estimator`, `pipeline`) is plain Python and runs with the engine's
+own requirements; only `synthetic_video.py` and the two check scripts need OpenCV/NumPy. After installation everything
+runs offline. Reports go to `reports/` and generated videos to a temporary folder (both git-ignored).
+
+### 1. Observation contract (`camera_adapter/observations.py`, internal format)
+
+JSON Lines: a header `{"format": "athletrix-camera-observations", "format_version": 1, "video": {width, height, fps,
+name}, "time_base": "video_relative", "extractor": ...}` then one observation per line:
+`{"frame", "video_time_s", "track_id", "u_px", "v_px", "confidence", "athlete_id"}`.
+
+- `video_time_s`: seconds since the first frame (= frame / fps): **video-relative**, never file time, processing time or
+  camera capture time.
+- `track_id`: a temporary id for one continuous blob track; never an athlete id (enforced). A target that disappears and
+  reappears may get a new one.
+- `u_px, v_px`: image position of the ground-contact point, OpenCV pixel convention ((0, 0) = centre of the top-left
+  pixel, u right, v down).
+- `confidence`: the extractor's own score in [0, 1] (synthetic markers: visible fraction of the disc). **Not** a
+  calibrated probability that position or identity is correct.
+- `athlete_id`: explicit assignment or null. **Null observations are never sent** under any athlete id. Assignments
+  come from the extractor's operator or an assignment file (`athletrix-track-assignments`: track id, athlete id,
+  optional frame range, who assigned it); an assignment never overwrites a different existing one, and two tracks
+  assigned to one athlete in the same frame are both suppressed.
+- Examples: `scripts/examples/camera/observations_example.jsonl`, `assignments_example.json`. Validation is whole-file
+  and per line (unknown keys, non-finite values, positions outside the frame, times not equal to frame / fps,
+  repeated or out-of-order frames of a track).
+
+This format is the adapter's input only; the engine's public models are unchanged.
+
+### 2. Field calibration (`scripts/camera_calibrate.py`, `camera_adapter/calibration.py`)
+
+```bash
+python scripts/camera_calibrate.py fit scripts/examples/camera/calibration_points_example.json --out my-calibration.json
+python scripts/camera_calibrate.py check my-calibration.json
+```
+
+Input: image size, **fitting points** (at least 4 image pixel <-> measured ground metres) and optional **check points**
+that are never used in the fit. A planar homography is fitted by normalised DLT least squares (plain Python; it agrees
+with OpenCV's `findHomography` to 2.5 µm on exact points). Refused: fewer than 4 points, non-finite values, points
+outside the frame, coinciding points, degenerate arrangements (no four points with three not collinear), check points
+repeating fitting points, transformations that are singular or put the points on both sides of the horizon. The saved
+file (`athletrix-camera-calibration` v1) holds image size, both point sets, the transformation, conventions, the
+**fitting residual (not independent accuracy)**, **check-point errors in metres** (the only independent figure),
+assumptions and software identifiers; `load` refits and refuses an edited file. Assumptions: fixed camera (moving or
+zooming requires recalibration), approximately planar ground, no lens-distortion model. No universal acceptable-error
+threshold is applied.
+
+### 3. Movement estimates (`camera_adapter/estimator.py`, `pipeline.py`, `scripts/camera_to_samples.py`)
+
+Per athlete, a **causal** quadratic least-squares fit over the last `window_s` (0.5 s) of that athlete's valid
+observations, evaluated at the newest observation: position, velocity, acceleration vector. `speed_mps` = |v|
+(standing still is a legitimate 0.0); `acceleration_mps2` = tangential d|v|/dt, negative when slowing; below 0.3 m/s,
+where direction is too uncertain, |a| with the sign of the fitted speed's change over the last half window. Rules:
+
+- no future observations; no estimate (sample skipped, reason logged) while warming up (fewer than 5 points or less
+  than 0.3 s covered), when the fit residual exceeds 0.3 m, or within the output-rate limit (10 Hz; outputs only at real
+  observation times, never upsampled);
+- a gap longer than `max_gap_s` (0.3 s) or a change of temporary track **resets** the history (never bridged);
+- unassigned, conflicting, low-confidence (< 0.25) and outside-calibration observations (beyond the horizon, or more
+  than 2 m outside the calibrated points' extent) are not used; an unusable calibration or a size mismatch stops all
+  output;
+- **confidence**: `tracking_confidence` = the lowest observation score in the window. The engine excludes a distance
+  interval when either end is below its own `DISTANCE_MIN_CONFIDENCE` (0.5); the adapter neither knows nor changes that.
+
+All of these live in one adapter configuration (`athletrix-camera-adapter-config` v1,
+`scripts/examples/camera/adapter_config_example.json`), which is also sent as the recording's operator-supplied
+`adapter_configuration` metadata (with the calibration's SHA-256 and the time-mapping rule).
+
+```bash
+# validate (writes and sends nothing), export JSON Lines + adapter log, or send to a local engine
+python scripts/camera_to_samples.py validate OBS.jsonl --calibration CAL.json --config CONFIG.json --assignments A.json
+python scripts/camera_to_samples.py export OBS.jsonl --calibration CAL.json --config CONFIG.json --assignments A.json \
+    --anchor-utc 2026-10-20T10:00:00Z --out samples.jsonl --log adapter-log.json
+python scripts/camera_to_samples.py send OBS.jsonl ... --anchor-utc now --url http://127.0.0.1:8000 --speed 1
+```
+
+**Time mapping**: sample timestamp = anchor + video_time_s. `--anchor-utc` is required; its meaning is recorded in the
+log ("anchor stated with --anchor-utc; not camera capture time", or for `now` a live-paced playback whose first sample
+is timestamped when sending starts). Timestamps keep microseconds, so 10 Hz samples never collapse, and are never
+rewritten to pass the engine's checks. `send` reuses `scripts/replay_samples.py` (validation, monotonic pacing, stop at
+the first failure, each record counted as submitted, failed or not sent; a timed-out request is reported as unknown).
+The log keeps every sample's video time, frame, track and fit size, all skips with reasons, resets and unassigned
+tracks. Synthetic markers are sent as `source: "simulated"` with the adapter's device id; `"camera"` is reserved for a
+real camera's measurements (no schema change was needed).
+
+### 4. Synthetic check: measured on this Mac (2026-10-29)
+
+`scripts/camera_synthetic_check.py`: a 30 s, 20 fps, 960x540 MJPG video of a fictional 40 x 20 m field from a virtual
+pinhole camera (ground truth and projection computed independently of the adapter, `camera_adapter/synthetic_truth.py`).
+Red and blue move through rest, acceleration (±2 m/s²), constant speed (4, 3, 2 m/s) and a 4 m-radius curve, both at
+once for 7 s; red passes behind a grey occluder (about 0.6 s hidden, partly hidden at the edges); blue is not drawn for
+0.2 s and 0.6 s; blue's first 1.5 s and a yellow target are never assigned. Calibration points are true image positions
+rounded to whole pixels (6 fitting, 4 check points).
+
+| | red (fictional-athlete-01) | blue (fictional-athlete-02) |
+|---|---|---|
+| samples sent / assigned observations / warm-up skips | 288 / 590 / 12 | 271 / 554 / 12 |
+| position error (median / p95 / max) | 0.019 / 0.041 / 0.117 m | 0.033 / 0.045 / 0.073 m |
+| speed error, steady phases (median / p95 / max) | 0.00 / 0.22 / 0.72 m/s | 0.04 / 0.30 / 0.41 m/s |
+| speed error within 0.5 s of an acceleration change (p95 / max) | 0.38 / 0.56 m/s | 0.42 / 0.64 m/s |
+| acceleration error, steady (median / p95 / max) | 0.00 / 0.80 / 7.05 m/s² | 0.16 / 1.24 / 1.63 m/s² |
+| acceleration error near changes (median / p95 / max) | 1.09 / 2.98 / 3.90 m/s² | 0.95 / 2.70 / 3.58 m/s² |
+| first window after a reset (3 samples each) | speed 0.76, acceleration 5.6 m/s² median | 0 (blue was standing) |
+| settle after a change (speed within 0.2 m/s; acceleration within 0.5 m/s²) | 0–1.1 s; 0.2–1.2 s | 0–0.7 s; 0.2–1.3 s |
+
+Calibration: fitting residual 0.019 m rms (not independent); **check points 0.065 m rms, 0.104 m max**. Exclusions: 151
+unassigned observations (blue's first 30 frames, all 121 yellow), 2 below the 0.25 confidence floor, 24 warm-up skips,
+2 resets (red's occlusion, blue's 0.6 s dropout; the 0.2 s dropout did not reset). Identity swaps 0; no sample's window
+bridges a gap. Findings: (1) far-field pixel jitter (about 0.4 px from compression, where 1 px is about 0.2 m) makes
+0.5 s acceleration noisy; the same data with a 1.0 s window gives steady-phase acceleration p95 0.25 / 0.36 m/s² (max
+0.40 / 0.55) but similar errors near changes (p95 about 2.1–2.2 m/s²), i.e. less noise for more lag; the default stays
+0.5 s. (2) A marker emerging from behind the occluder has a shifted centroid: right after red's reset the estimates are
+wrong by up to 0.8 m/s and 9.3 m/s², while its visible-area score (0.51) still passed the engine's 0.5 limit, showing
+that the score is not a probability of correctness. These are measurements of this synthetic setup with no acceptance
+threshold; they say nothing about athletes, real footage, lighting, occlusion by people, lens distortion or a full field.
+
+### 5. Through the engine (`scripts/verify_camera_pipeline.py`)
+
+On an isolated engine: two fictional athletes, a recording started with the adapter configuration as unverified
+operator metadata, the 559 samples sent as live-paced playback with a fictional 1 Hz heart-rate feed alongside. 14 of
+14 checks passed: every sample submitted (0 failed, 0 unsent), recorded tracking samples identical to the exported ones
+per athlete, rolling history, live snapshots naming the right athlete with `source: simulated` and the adapter's device
+id, the start snapshot carrying the calibration hash and estimator settings, and a package import keeping every
+sample and the snapshot. Engine distances over known phases versus the analytic path: 28.39 vs 28.0 m, 10.18 vs 10.0 m,
+21.19 vs 21.0 m, 16.28 vs 16.0 m (noise adds length). The engine's own rule bridges red's 1.0 s gap behind the occluder
+with a straight line for distance (`DISTANCE_MAX_GAP_SECONDS` 3 s); the adapter itself never invents samples. The
+dashboard showed the stream through the existing cards and timelines ("Live · reported source: simulated · device:
+synthetic-marker-cam-1"; the speed timeline follows the designed profile). With 10 Hz tracking and the cards' 1 s poll,
+the cards show about one sample in ten (all are stored and charted); the developer timing panel measured receipt to DOM
+update of the displayed samples at a median of 117 ms (11–216 ms, ± 0.9 ms clock uncertainty) on localhost, not a
+real-camera or two-second-target result.
+
+### Next requirements for real player tracking
+
+The synthetic marker extractor must be replaced or supplemented by validated **person detection**, **multi-object
+tracking** through occlusions and crossings, **athlete assignment** (identity) with an auditable operator step, and,
+where needed, **ball and event detection**; plus lens-distortion calibration, a measured capture-time mapping for the
+camera, real-footage ground truth (for example surveyed positions or a reference system) to measure errors, and the
+approvals that govern filming people. The prototype cannot know whether a pass was the right decision. A proposed,
+unimplemented design for individual performance review is in `docs/individual-performance-design-note.md`.
 
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 

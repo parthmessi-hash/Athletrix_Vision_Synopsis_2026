@@ -188,6 +188,14 @@ CODE_REVISION=$(git rev-parse --short HEAD) uvicorn app.main:app --host 127.0.0.
 
 # 3r. developer timing panel (opt-in): open http://localhost:3000/?timing=1#demo with Dashboard in the visible foreground tab
 
+# 3s. camera adapter prototype (synthetic markers; optional vision packages, offline once installed)
+pip install -r requirements-vision.txt
+python scripts/camera_synthetic_check.py          # video -> calibration -> estimates -> errors vs analytic truth
+python scripts/verify_camera_pipeline.py          # the same stream through an isolated engine, recording and package
+python scripts/camera_calibrate.py fit POINTS.json --out CAL.json
+python scripts/camera_to_samples.py export OBS.jsonl --calibration CAL.json --config scripts/examples/camera/adapter_config_example.json \
+    --assignments A.json --anchor-utc 2026-10-20T10:00:00Z --out samples.jsonl --log adapter-log.json
+
 # 4. frontend, from the Athletrix_Web folder (loopback only)
 python3 -m http.server 3000 --bind 127.0.0.1
 
@@ -434,7 +442,9 @@ All of these are descriptive and cover only the samples available in the window
 
 Implemented today is listed above; the following are **not** implemented:
 
-- No live device or camera connections. Data comes from the simulator, manual
+- No live device or camera connections. A camera adapter prototype exists
+  (`camera_adapter/`, synthetic markers only: no person detection, no player
+  identification, no real camera tested). Data otherwise comes from the simulator, manual
   POSTs, recorded files in Athletrix's own JSON Lines interchange format
   (`scripts/replay_samples.py`), or CSV files converted by
   `scripts/convert_heart_rate_csv.py` (heart rate) and
@@ -571,7 +581,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (690 tests as of 2026-10-28)
+# engine: full suite, isolated temporary databases (700 tests as of 2026-10-29; the synthetic camera test is skipped without OpenCV)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -650,6 +660,20 @@ open "http://localhost:3000/?engine=0#demo"
 
 Still not established: real device clocks and adapters, display timing on the sideline computer, removal beyond one
 database file (exports, packages, backups, footage), authentication, and anything about human participants.
+
+## Checkpoint: camera-input prototype (2026-10-29)
+
+| Milestone | State |
+|-----------|-------|
+| 1. Camera observation contract | Done: `camera_adapter/observations.py` (video-relative time, temporary track ids distinct from athlete ids, explicit assignments, whole-file validation); examples in `scripts/examples/camera/` |
+| 2. Field calibration | Done: `scripts/camera_calibrate.py` (normalised DLT, fit vs independent check points, versioned file, refuses degenerate input and edited files) |
+| 3. Movement adapter | Done: causal 0.5 s quadratic estimator, gap and track-change resets, warm-up skips, 10 Hz cap, min-in-window confidence, `scripts/camera_to_samples.py` validate/export/send with an explicit anchor |
+| 4. Synthetic video check | Done: `scripts/camera_synthetic_check.py`; position error median 2–3 cm, check points 6.5 cm rms; acceleration noisy at 0.5 s in the far field (documented); 0 identity swaps |
+| 5. Engine integration | Done: `scripts/verify_camera_pipeline.py`, 14 of 14 checks, distances within 0.4 m over 10–28 m phases; dashboard checked with the stream |
+| 6. Documentation | Done: README "Camera adapter prototype", `docs/individual-performance-design-note.md` (proposed only) |
+
+Not established: person detection, player identification, real footage, lens distortion, capture-time mapping, real
+occlusion, any performance assessment.
 
 ## 10. Recommended next milestone
 
