@@ -71,8 +71,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # optional; every value has a local default
 
-# 1. backend (port 8000, auto-reload)
-uvicorn app.main:app --reload
+# 1. backend (port 8000, loopback only; add --reload while editing code)
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 # 2. fictional demo roster: athlete-1 Alex Example (football), athlete-2 Sam Sample (basketball)
 #    one-time per database file; safe to rerun (identical records are left alone, conflicts exit 1)
@@ -177,8 +177,11 @@ curl -fsS -o athlete-1.jsonl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/re
 python scripts/replay_samples.py athlete-1.jsonl --url http://127.0.0.1:8010      # a second backend with its own DATABASE_PATH
 #    dashboard: Recorded -> Download retained samples (saved on this computer, uploaded nowhere)
 
-# 4. frontend, from the Athletrix_Web folder
-python3 -m http.server 3000
+# 4. frontend, from the Athletrix_Web folder (loopback only)
+python3 -m http.server 3000 --bind 127.0.0.1
+
+# 5. check the listeners: both should show 127.0.0.1, never * or 0.0.0.0 (the startup command controls this)
+lsof -nP -iTCP:8000 -iTCP:3000 -sTCP:LISTEN
 ```
 
 Then open http://localhost:3000, click **Live Demo**, and pick an athlete in the
@@ -562,7 +565,7 @@ cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activa
 curl -s "http://127.0.0.1:8000/api/v1/athletes/athlete-1/window?seconds=60" | python3 -m json.tool | grep -A2 tracking_rules
 
 # engine: replay the fictional example into an isolated backend (own database, own port), then read it back
-DATABASE_PATH=/tmp/athletrix-replay-check.db uvicorn app.main:app --port 8010      # separate terminal
+DATABASE_PATH=/tmp/athletrix-replay-check.db uvicorn app.main:app --host 127.0.0.1 --port 8010      # separate terminal
 python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --dry-run --url http://127.0.0.1:8010
 python scripts/replay_samples.py scripts/examples/fictional_replay.jsonl --url http://127.0.0.1:8010 --speed 4
 curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-1/tracking/history?limit=10"  # expect 3 samples at 2026-10-20T10:00:00Z..02Z

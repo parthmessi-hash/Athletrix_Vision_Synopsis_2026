@@ -209,13 +209,36 @@ isolated demo, point `DATABASE_PATH` at a different file.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Then open:
 
 - http://127.0.0.1:8000/api/v1/health
 - http://127.0.0.1:8000/docs (interactive API docs)
+
+### Local binding (recommended setup)
+
+Bind both local servers to the loopback address so only this computer can reach them:
+
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 8000          # backend, from this folder (add --reload while editing code)
+python3 -m http.server 3000 --bind 127.0.0.1               # frontend, from the Athletrix_Web folder
+```
+
+Check what is listening (macOS):
+
+```bash
+lsof -nP -iTCP:8000 -iTCP:3000 -sTCP:LISTEN
+```
+
+Both lines should show `127.0.0.1:8000` and `127.0.0.1:3000`. A `*:3000`, `*:8000` or `0.0.0.0` address means
+the server accepts connections from other computers on the network, and the engine has no authentication. The
+startup command controls the binding; the engine does not enforce it (`HOST`/`PORT` in `.env` are informational,
+and `python3 -m http.server` without `--bind` listens on every interface). Ports stay configurable: use another
+`--port` and point the frontend and `CORS_ORIGINS` at it. Open the dashboard at http://localhost:3000, which
+resolves to the loopback address; to open http://127.0.0.1:3000 instead, add that origin to `CORS_ORIGINS`.
+`scripts/demo_launcher.py` and the validation scripts already start their own servers on 127.0.0.1 only.
 
 ## Configuration
 
@@ -1227,7 +1250,7 @@ python scripts/recording_package.py inspect athletrix-recording-package-<id>-<ti
 python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/other.db --dry-run
 python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/other.db
 # 6. start the other engine on that file and reopen: same samples, periods (new ids, mapping under "imported") and figures
-DATABASE_PATH=/path/to/other.db uvicorn app.main:app --port 8001
+DATABASE_PATH=/path/to/other.db uvicorn app.main:app --host 127.0.0.1 --port 8001
 curl -s http://127.0.0.1:8001/api/v1/recordings/inventory
 curl -s http://127.0.0.1:8001/api/v1/recordings/<new id>/athletes/athlete-1/period-reviews
 ```
@@ -1616,11 +1639,12 @@ athlete's latest samples and 60-second summary. Full local demo, each line in
 its own terminal from this folder unless noted (activate `.venv` first):
 
 ```bash
-uvicorn app.main:app --reload                                   # 1. backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000              # 1. backend
 python scripts/register_demo_roster.py                          # 2. roster (once per database file; safe to rerun)
 python scripts/simulate_athlete.py --athlete-id athlete-1 --device-id simulator-1 --with-tracking   # 3a
 python scripts/simulate_athlete.py --athlete-id athlete-2 --device-id simulator-2 --with-tracking   # 3b
-python3 -m http.server 3000                                     # 4. frontend, from the Athletrix_Web folder
+python3 -m http.server 3000 --bind 127.0.0.1                    # 4. frontend, from the Athletrix_Web folder
+lsof -nP -iTCP:8000 -iTCP:3000 -sTCP:LISTEN                     # 5. both should show 127.0.0.1, never * or 0.0.0.0
 ```
 
 Then open http://localhost:3000, click **Live Demo** in the top navigation,
