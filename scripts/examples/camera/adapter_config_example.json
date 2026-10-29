@@ -1,0 +1,18 @@
+{
+  "format": "athletrix-camera-adapter-config",
+  "format_version": 1,
+  "source": "simulated",
+  "device_id": "synthetic-marker-cam-1",
+  "output_max_rate_hz": 10.0,
+  "min_observation_confidence": 0.25,
+  "max_extrapolation_m": 2.0,
+  "confidence_rule": "min_observation_confidence_in_window",
+  "estimator": {
+    "window_s": 0.5,
+    "min_points": 5,
+    "min_span_s": 0.3,
+    "max_gap_s": 0.3,
+    "min_speed_for_direction_mps": 0.3,
+    "max_fit_rms_m": 0.3
+  }
+}
