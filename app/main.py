@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.core.timing import TimingMiddleware
 from app.db import get_database
 
 
@@ -27,6 +28,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Outermost: receipt time and Server-Timing for every request (see app/core/timing.py).
+    app.add_middleware(TimingMiddleware)
     app.include_router(api_router, prefix="/api/v1")
     return app
 

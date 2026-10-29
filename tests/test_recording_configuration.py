@@ -110,12 +110,14 @@ def test_unknown_code_revision_and_bounded_adapter_input(client, frozen):
 def repack(files: dict[str, bytes], version: int) -> bytes:
     manifest = json.loads(files["manifest.json"])
     manifest["format_version"] = version
-    for name in ("recording.json", "samples.jsonl", "periods.json"):
-        manifest["members"][name] = {"sha256": hashlib.sha256(files[name]).hexdigest(), "bytes": len(files[name])}
+    names = ("recording.json", "samples.jsonl", "periods.json") + (("receipts.jsonl",) if version >= 2 else ())
+    manifest["members"] = {name: {"sha256": hashlib.sha256(files[name]).hexdigest(), "bytes": len(files[name])} for name in names}
+    if version < 2:
+        manifest["counts"].pop("receipts", None)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("manifest.json", json.dumps(manifest))
-        for name in ("recording.json", "samples.jsonl", "periods.json"):
+        for name in names:
             z.writestr(name, files[name])
     return buf.getvalue()
 

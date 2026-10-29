@@ -15,6 +15,11 @@ FORMAT (format "athletrix-recording-package", format_version 2; version 1 is sti
                     payloads exactly as stored (timestamps with their offsets, ids, sources, nulls, zeros, confidences)
     periods.json    the saved effort periods: original id, athlete_id, label, effort_start, effort_end (as saved) and
                     created_at
+    receipts.jsonl  (version 2 only, may be empty) receipt metadata for the samples that have it, one
+                    {"type", "athlete_id", "timestamp" (the sample's UTC instant), "received_at"} per line: when the engine
+                    where the recording was made received that sample live, on that engine's clock. Kept apart from
+                    samples.jsonl so the interchange format is unchanged; an importer stores it as origin "source_engine",
+                    never as a receipt by itself. Samples without a line had no receipt recorded.
   The manifest's checksums and counts let an importer detect accidental corruption; they are not a signature, and a
   package proves nothing about the accuracy of the measurements it carries. It is not a database backup: no registry,
   rolling history, device status, other recordings, configuration files, credentials, paths or logs are included.
@@ -51,8 +56,10 @@ from app.models.configuration import RecordingConfiguration
 FORMAT = "athletrix-recording-package"
 FORMAT_VERSION = 2
 SUPPORTED_VERSIONS = (1, 2)
-MEMBERS = ("manifest.json", "recording.json", "samples.jsonl", "periods.json")
+MEMBERS = ("manifest.json", "recording.json", "samples.jsonl", "periods.json")      # every version
 DATA_MEMBERS = ("recording.json", "samples.jsonl", "periods.json")
+V2_MEMBERS = ("receipts.jsonl",)                                                   # version 2 adds these
+ALL_MEMBERS = MEMBERS + V2_MEMBERS
 MODELS = {"physiological": PhysiologicalSample, "tracking": TrackingSample}
 
 # Bounds on what a reader will process (accidental or hostile oversized archives are refused, never extracted).
@@ -73,8 +80,9 @@ def sha256(data: bytes) -> str:
 # ---- writing ------------------------------------------------------------------------------------------------------------
 
 def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[str, dict[str, list]], periods: Sequence, settings: dict, generated_at: datetime,
-                  configuration: RecordingConfiguration | None = None) -> bytes:
-    """The ZIP bytes for one stopped recording. `samples[athlete_id][stream]` are the stored models, oldest first."""
+                  configuration: RecordingConfiguration | None = None, receipts: dict[str, dict[str, list]] | None = None) -> bytes:
+    """The ZIP bytes for one stopped recording. `samples[athlete_id][stream]` are the stored models, oldest first;
+    `receipts[athlete_id][stream]` the matching receipt metadata (dict or None) in the same order."""
     rec_doc = {**recording, "athletes": [a.model_dump(mode="json") for a in athletes],
                "configuration_at_start": configuration.model_dump(mode="json") if configuration is not None else None}
     lines = []
@@ -85,12 +93,21 @@ def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[st
         counts["physiological"] += len(p); counts["tracking"] += len(t)
         per_athlete[a.id] = {"physiological": len(p), "tracking": len(t)}
         lines.extend(json.dumps(r, ensure_ascii=False) for r in export_records(p, t))
+    receipt_lines = []
+    for a in athletes:
+        for stream in ("physiological", "tracking"):
+            for model, receipt in zip(samples.get(a.id, {}).get(stream, []), (receipts or {}).get(a.id, {}).get(stream, [])):
+                if receipt:
+                    receipt_lines.append({"type": stream, "athlete_id": a.id, "timestamp": iso(datetime.fromisoformat(to_utc_iso(model.timestamp))), "received_at": receipt["received_at"]})
+    order = {a.id: n for n, a in enumerate(athletes)}
+    receipt_lines.sort(key=lambda r: (order[r["athlete_id"]], r["timestamp"], r["type"] != "physiological"))   # same order as samples.jsonl
     periods_doc = [{"id": p.id, "athlete_id": p.athlete_id, "label": p.label, "effort_start": p.effort_start.isoformat().replace("+00:00", "Z"),
                     "effort_end": p.effort_end.isoformat().replace("+00:00", "Z"), "created_at": iso(p.created_at)} for p in periods]
     data = {
         "recording.json": json.dumps(rec_doc, ensure_ascii=False, indent=2).encode("utf-8"),
         "samples.jsonl": ("".join(line + "\n" for line in lines)).encode("utf-8"),
         "periods.json": json.dumps(periods_doc, ensure_ascii=False, indent=2).encode("utf-8"),
+        "receipts.jsonl": "".join(json.dumps(r) + "\n" for r in receipt_lines).encode("utf-8"),
     }
     manifest = {
         "format": FORMAT,
@@ -99,14 +116,14 @@ def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[st
         "description": "A portable copy of one stopped Athletrix recording: roster snapshot, every recorded sample and the saved effort periods. "
                        "Checksums detect accidental corruption only. Not a database backup and not evidence that the measurements are accurate.",
         "recording": {"id": recording["id"], "name": recording["name"], "started_at": recording["started_at"], "stopped_at": recording["stopped_at"]},
-        "counts": {"athletes": len(athletes), "physiological_samples": counts["physiological"], "tracking_samples": counts["tracking"], "samples_by_athlete": per_athlete, "periods": len(periods_doc)},
+        "counts": {"athletes": len(athletes), "physiological_samples": counts["physiological"], "tracking_samples": counts["tracking"], "samples_by_athlete": per_athlete, "periods": len(periods_doc), "receipts": len(receipt_lines)},
         "members": {name: {"sha256": sha256(blob), "bytes": len(blob)} for name, blob in data.items()},
         "settings_at_export": {**settings, "note": "Engine settings in force when this package was written. They are not necessarily the settings in force while the data was recorded or reviewed, and an importing engine applies its own settings."},
     }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
-        for name in DATA_MEMBERS:
+        for name in DATA_MEMBERS + V2_MEMBERS:
             z.writestr(name, data[name])
     return buf.getvalue()
 
@@ -130,6 +147,7 @@ class Package:
     periods: list[dict] = field(default_factory=list)                   # validated: label, start/end datetimes, created_at datetime, original id
     package_sha256: str = ""
     configuration: RecordingConfiguration | None = None                 # start-time snapshot; None = unavailable (version 1, or none recorded)
+    receipts: dict[tuple, str] = field(default_factory=dict)            # (athlete_id, stream, UTC instant text) -> received_at as in the file
 
     def summary(self) -> dict:
         def bounds(models):
@@ -145,7 +163,8 @@ class Package:
                           "physiological": {"count": len(self.samples[a.id]["physiological"]), "bounds": bounds(self.samples[a.id]["physiological"])},
                           "tracking": {"count": len(self.samples[a.id]["tracking"]), "bounds": bounds(self.samples[a.id]["tracking"])},
                           "periods": sum(1 for p in self.periods if p["athlete_id"] == a.id)} for a in self.athletes],
-            "counts": {"physiological_samples": sum(len(v["physiological"]) for v in self.samples.values()), "tracking_samples": sum(len(v["tracking"]) for v in self.samples.values()), "periods": len(self.periods)},
+            "counts": {"physiological_samples": sum(len(v["physiological"]) for v in self.samples.values()), "tracking_samples": sum(len(v["tracking"]) for v in self.samples.values()), "periods": len(self.periods),
+                       "receipts": len(self.receipts)},
             "settings_at_export": self.manifest.get("settings_at_export"),
             "configuration_at_start": {"status": "captured", "snapshot": self.configuration.model_dump(mode="json")} if self.configuration is not None
                                       else {"status": "unavailable", "snapshot": None},
@@ -181,9 +200,9 @@ def read_package(data: bytes) -> Package:
         fail()
     with z:
         infos = {i.filename: i for i in z.infolist()}
-        unexpected = sorted(n for n in infos if n not in MEMBERS)
+        unexpected = sorted(n for n in infos if n not in ALL_MEMBERS)
         if unexpected:
-            errors.append(f"unexpected members (only {', '.join(MEMBERS)} are allowed; nothing is extracted): {', '.join(unexpected[:10])}")
+            errors.append(f"unexpected members (only {', '.join(ALL_MEMBERS)} are allowed; nothing is extracted): {', '.join(unexpected[:10])}")
         missing = [n for n in MEMBERS if n not in infos]
         if missing:
             errors.append(f"missing required members: {', '.join(missing)}")
@@ -192,7 +211,7 @@ def read_package(data: bytes) -> Package:
         if errors:
             fail()
         blobs = {}
-        for name in MEMBERS:
+        for name in [n for n in ALL_MEMBERS if n in infos]:
             try:
                 blob = z.read(name)                       # read in memory by exact name; never written to disk
             except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
@@ -215,11 +234,18 @@ def read_package(data: bytes) -> Package:
     if manifest.get("format_version") not in SUPPORTED_VERSIONS:
         errors.append(f"unsupported format_version {manifest.get('format_version')!r}; this engine reads {', '.join(map(str, SUPPORTED_VERSIONS))}")
         fail()
+    version = manifest["format_version"]
+    if version >= 2 and "receipts.jsonl" not in blobs:
+        errors.append("missing required members: receipts.jsonl (format version 2)")
+    if version < 2 and "receipts.jsonl" in blobs:
+        errors.append("receipts.jsonl is not part of format version 1")
+    if errors:
+        fail()
     members = manifest.get("members")
     if not isinstance(members, dict):
         errors.append("manifest.json: members are missing")
         fail()
-    for name in DATA_MEMBERS:
+    for name in DATA_MEMBERS + (V2_MEMBERS if version >= 2 else ()):
         m = members.get(name)
         if not isinstance(m, dict) or m.get("sha256") != sha256(blobs[name]) or m.get("bytes") != len(blobs[name]):
             errors.append(f"{name}: checksum or size does not match the manifest (the file was changed or damaged)")
@@ -323,6 +349,38 @@ def read_package(data: bytes) -> Package:
     if not errors and (counts.get("physiological_samples") != got["physiological_samples"] or counts.get("tracking_samples") != got["tracking_samples"] or counts.get("athletes") != len(athletes)):
         errors.append(f"sample or athlete counts do not match the manifest (manifest {counts.get('physiological_samples')}/{counts.get('tracking_samples')}/{counts.get('athletes')}, file {got['physiological_samples']}/{got['tracking_samples']}/{len(athletes)})")
 
+    receipts: dict[tuple, str] = {}
+    if version >= 2 and not errors:
+        try:
+            receipt_text = blobs["receipts.jsonl"].decode("utf-8")
+        except UnicodeDecodeError:
+            receipt_text = None
+            errors.append("receipts.jsonl is not UTF-8")
+        for line_no, line in enumerate((receipt_text or "").splitlines(), start=1):
+            if len(errors) > MAX_ERRORS_REPORTED:
+                break
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError as exc:
+                errors.append(f"receipts.jsonl line {line_no}: not valid JSON ({exc.msg})")
+                continue
+            if not isinstance(r, dict) or set(r) != {"type", "athlete_id", "timestamp", "received_at"} or r.get("type") not in MODELS:
+                errors.append(f"receipts.jsonl line {line_no}: must be {{\"type\", \"athlete_id\", \"timestamp\", \"received_at\"}}")
+                continue
+            ts = _parse_dt(r["timestamp"], f"receipts.jsonl line {line_no} timestamp", errors)
+            received = _parse_dt(r["received_at"], f"receipts.jsonl line {line_no} received_at", errors)
+            if ts is None or received is None:
+                continue
+            key = (r["athlete_id"], r["type"], to_utc_iso(ts))
+            if key not in seen:
+                errors.append(f"receipts.jsonl line {line_no}: no {r['type']} sample for {r['athlete_id']!r} at {r['timestamp']} in samples.jsonl")
+            elif key in receipts:
+                errors.append(f"receipts.jsonl line {line_no}: a second receipt for the same sample")
+            else:
+                receipts[key] = iso(received)
+        if not errors and counts.get("receipts") != len(receipts):
+            errors.append(f"receipt count does not match the manifest (manifest {counts.get('receipts')}, file {len(receipts)})")
+
     periods: list[dict] = []
     if not isinstance(periods_raw, list):
         errors.append("periods.json must be a list")
@@ -364,7 +422,7 @@ def read_package(data: bytes) -> Package:
             errors.append(f"period count does not match the manifest (manifest {counts.get('periods')}, file {len(periods_raw)})")
     if errors:
         fail()
-    return Package(manifest=manifest, recording=rec, athletes=athletes, samples=samples, periods=periods, package_sha256=sha256(data), configuration=configuration)
+    return Package(manifest=manifest, recording=rec, athletes=athletes, samples=samples, periods=periods, package_sha256=sha256(data), configuration=configuration, receipts=receipts)
 
 
 def latest_sample_after_stop(pkg: Package) -> timedelta | None:

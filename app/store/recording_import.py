@@ -1,7 +1,9 @@
 """Import a validated portable recording package into a local database, atomically, with provenance.
 
 Everything is written in one BEGIN IMMEDIATE transaction: the recording (stopped, original start and stop times, a new
-id), its roster snapshot, the start-time configuration snapshot when the package carries one (origin "source_engine"), every sample exactly as normalised in the package, every saved period (new ids, exact bounds,
+id), its roster snapshot, the start-time configuration snapshot when the package carries one (origin "source_engine"), every sample exactly as normalised in the package, receipt metadata carried in the package
+(stored with origin "source_engine": received by the engine where the recording was made, never by this one; samples
+imported from a package without it have none), every saved period (new ids, exact bounds,
 original labels and creation times) and a `recording_imports` row mapping the new ids to the original ones. Any failure
 rolls the whole import back. The athlete registry, rolling history, device status and any active recording are never
 touched, and nothing existing is overwritten or merged.
@@ -69,7 +71,9 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
         for athlete_id, streams in pkg.samples.items():
             for stream, models in streams.items():
                 for m in models:
-                    c.execute(f"INSERT INTO {TABLES[stream]} (recording_id, athlete_id, ts_utc, payload) VALUES (?, ?, ?, ?)", (new_id, athlete_id, to_utc_iso(m.timestamp), m.model_dump_json()))
+                    received = pkg.receipts.get((athlete_id, stream, to_utc_iso(m.timestamp)))   # the source engine's receipt, never this engine's
+                    receipt = json.dumps({"received_at": received, "origin": "source_engine"}) if received else None
+                    c.execute(f"INSERT INTO {TABLES[stream]} (recording_id, athlete_id, ts_utc, payload, receipt) VALUES (?, ?, ?, ?, ?)", (new_id, athlete_id, to_utc_iso(m.timestamp), m.model_dump_json(), receipt))
                     counts[stream] += 1
                 if checkpoint:
                     checkpoint(f"samples:{athlete_id}:{stream}")

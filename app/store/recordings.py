@@ -10,6 +10,7 @@ later sample never enters a stopped recording. Nothing here deletes or uploads a
 
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 from collections.abc import Sequence
@@ -123,13 +124,26 @@ class RecordingStore:
             return [self._recording(c, r) for r in rows]
 
     # ---- samples ---------------------------------------------------------------------------------------------------------
-    def write_sample(self, c: sqlite3.Connection, recording_id: str, stream: str, sample) -> None:
-        """Insert or replace (equal instant) one accepted sample into the recording, inside the caller's transaction."""
+    def write_sample(self, c: sqlite3.Connection, recording_id: str, stream: str, sample, receipt: str | None = None) -> None:
+        """Insert or replace (equal instant) one accepted sample into the recording, inside the caller's transaction.
+
+        A replacement replaces the receipt metadata with the payload (the earlier arrival's receipt is not kept)."""
         c.execute(
-            f"INSERT INTO {TABLES[stream]} (recording_id, athlete_id, ts_utc, payload) VALUES (?, ?, ?, ?) "
-            f"ON CONFLICT(recording_id, athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload",
-            (recording_id, sample.athlete_id, to_utc_iso(sample.timestamp), sample.model_dump_json()),
+            f"INSERT INTO {TABLES[stream]} (recording_id, athlete_id, ts_utc, payload, receipt) VALUES (?, ?, ?, ?, ?) "
+            f"ON CONFLICT(recording_id, athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload, receipt = excluded.receipt",
+            (recording_id, sample.athlete_id, to_utc_iso(sample.timestamp), sample.model_dump_json(), receipt),
         )
+
+    def receipt_count(self, recording_id: str, athlete_id: str, stream: str) -> int:
+        """How many of the recorded rows carry receipt metadata (rows from before instrumentation have none)."""
+        with self.db.read() as c:
+            return c.execute(f"SELECT COUNT(receipt) FROM {TABLES[stream]} WHERE recording_id = ? AND athlete_id = ?", (recording_id, athlete_id)).fetchone()[0]
+
+    def all_with_receipts(self, recording_id: str, athlete_id: str, stream: str) -> list[tuple]:
+        """Every recorded sample with its receipt metadata (dict or None), oldest to newest."""
+        with self.db.read() as c:
+            rows = c.execute(f"SELECT payload, receipt FROM {TABLES[stream]} WHERE recording_id = ? AND athlete_id = ? ORDER BY ts_utc ASC", (recording_id, athlete_id)).fetchall()
+        return [(MODELS[stream].model_validate_json(r["payload"]), json.loads(r["receipt"]) if r["receipt"] else None) for r in rows]
 
     def retention(self, recording_id: str, athlete_id: str, stream: str) -> Retention:
         """Count and UTC bounds of the recorded rows for the athlete and stream."""

@@ -83,7 +83,7 @@ def test_accepted_samples_for_selected_athletes_are_recorded_as_normalised_and_o
     assert t[0]["speed_mps"] == 0.0 and t[0]["tracking_confidence"] == 0.0 and t[0]["source"] == "camera" and t[0]["device_id"] == "cam-7"
     assert rows(isolated_db, "recording_physiological_samples", rec, "a3") == [] and rows(isolated_db, "recording_physiological_samples", rec, "unregistered") == []
     d = recorded(client, rec, "a1")
-    assert d["physiological"] == {"sample_count": 1, "earliest_timestamp": "2026-10-26T20:00:00Z", "latest_timestamp": "2026-10-26T20:00:00Z"} and d["tracking"]["sample_count"] == 1
+    assert d["physiological"] == {"sample_count": 1, "earliest_timestamp": "2026-10-26T20:00:00Z", "latest_timestamp": "2026-10-26T20:00:00Z", "receipt_count": 1} and d["tracking"]["sample_count"] == 1
     assert recorded(client, rec, "a2")["physiological"]["sample_count"] == 0
 
 
@@ -166,7 +166,7 @@ def test_recording_rows_survive_a_restart_while_rolling_history_is_trimmed(tmp_p
         with TestClient(create_app()) as c:
             assert c.get(f"{REC}/active").json() == {"recording": None}
             d = next(e for e in c.get(f"{REC}/{rec}").json()["recorded"] if e["athlete"]["id"] == "a1")
-            assert d["physiological"] == {"sample_count": 5, "earliest_timestamp": "2026-10-26T19:59:30Z", "latest_timestamp": "2026-10-26T19:59:34Z"}, "recorded rows: all five, none after the stop"
+            assert d["physiological"] == {"sample_count": 5, "earliest_timestamp": "2026-10-26T19:59:30Z", "latest_timestamp": "2026-10-26T19:59:34Z", "receipt_count": 5}, "recorded rows: all five, none after the stop"
             hist = c.get("/api/v1/athletes/a1/physiological/history").json()
             assert [h["heart_rate_bpm"] for h in hist] == [201, 202], "rolling history: only its capped newest two"
             assert all(e["athlete"]["id"] == "a1" for e in c.get(f"{REC}/{rec}").json()["recorded"]), "a2 was never part of it"

@@ -110,12 +110,14 @@ def get_athlete_live(athlete_id: str) -> AthleteLive:
     with get_database().read():  # one consistent snapshot of the registry, both sample tables and the device-status table
         athlete = athlete_registry.get(athlete_id)
         sel = select_live([athlete_id], captured_at)[athlete_id]
+        receipts = {s: (store.receipt_at(athlete_id, sample.timestamp) if sample is not None else None)
+                    for s, store, sample in (("physiological", physiological_history_store, sel.physiological), ("tracking", tracking_history_store, sel.tracking))}
     return AthleteLive(
         athlete_id=athlete_id, captured_at=captured_at, registered=athlete is not None, athlete=athlete,
         physiological=sel.physiological, tracking=sel.tracking,
         physiological_age_seconds=sel.physiological_age_seconds, tracking_age_seconds=sel.tracking_age_seconds,
         physiological_newest_ahead_seconds=sel.physiological_newest_ahead_seconds, tracking_newest_ahead_seconds=sel.tracking_newest_ahead_seconds,
-        devices=sel.devices,
+        devices=sel.devices, physiological_receipt=receipts["physiological"], tracking_receipt=receipts["tracking"],
     )
 
 

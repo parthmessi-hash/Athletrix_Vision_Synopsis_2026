@@ -9,14 +9,26 @@ read happens inside the same serialized transaction as the stop. Validation and 
 unchanged and happen before this.
 """
 
+import json
+from datetime import datetime
+
 from app.store.recordings import recording_store
 from app.store.samples import SampleStore
 
 
-def ingest(store: SampleStore, stream: str, sample) -> None:
-    """Persist one validated sample: rolling store (insert or replace, trim) plus the active recording if it covers the athlete."""
+def live_receipt(received_at: datetime) -> str:
+    """Receipt metadata for a sample this engine received live (see app/core/timing.py)."""
+    return json.dumps({"received_at": received_at.isoformat().replace("+00:00", "Z"), "origin": "this_engine"})
+
+
+def ingest(store: SampleStore, stream: str, sample, received_at: datetime | None = None) -> None:
+    """Persist one validated sample: rolling store (insert or replace, trim) plus the active recording if it covers the athlete.
+
+    `received_at` (the request's receipt time) is stored as receipt metadata on both rows; it does not affect which row
+    is kept, membership, or ordering."""
+    receipt = live_receipt(received_at) if received_at is not None else None
     with store.db.transaction() as c:
-        store.write(c, sample)
+        store.write(c, sample, receipt)
         active = recording_store.active_in(c)
         if active is not None and sample.athlete_id in active.athlete_ids:
-            recording_store.write_sample(c, active.id, stream, sample)
+            recording_store.write_sample(c, active.id, stream, sample, receipt)

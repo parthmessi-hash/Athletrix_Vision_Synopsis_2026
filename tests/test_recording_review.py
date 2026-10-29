@@ -99,7 +99,7 @@ def test_recorded_data_and_window_read_only_the_recordings_rows_without_caps(cli
     rd = client.get(session_url(rec, "a1", "/recorded-data")).json()
     RecordedData.model_validate(rd)
     assert rd["recording"]["id"] == rec and rd["recording"]["status"] == "stopped" and rd["recording"]["started_at"] == iso(-10) and rd["recording"]["stopped_at"] == iso(0)
-    assert rd["physiological"] == {"sample_count": 10, "earliest_timestamp": iso(-10), "latest_timestamp": iso(-1)} and rd["tracking"]["sample_count"] == 10
+    assert rd["physiological"] == {"sample_count": 10, "earliest_timestamp": iso(-10), "latest_timestamp": iso(-1), "receipt_count": 10} and rd["tracking"]["sample_count"] == 10
     assert client.get("/api/v1/athletes/a1/retained-data").json()["tracking"]["sample_count"] == 3, "the rolling store kept only its cap"
     assert client.get(session_url(rec, "a2", "/recorded-data")).json()["physiological"]["sample_count"] == 0
     win = client.get(session_url(rec, "a1", "/window"), params={"seconds": 60, "end": iso(10)}).json()

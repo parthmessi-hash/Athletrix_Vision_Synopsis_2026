@@ -103,9 +103,7 @@ def get_recording(recording_id: str) -> RecordingDetail:
         rec = require_recording(recording_id)
         recorded = []
         for a in rec.athletes:
-            p, t = recording_store.retention(rec.id, a.id, "physiological"), recording_store.retention(rec.id, a.id, "tracking")
-            recorded.append(RecordedAthlete(athlete=a, physiological=RecordedStream(sample_count=p.count, earliest_timestamp=p.earliest, latest_timestamp=p.latest),
-                                            tracking=RecordedStream(sample_count=t.count, earliest_timestamp=t.earliest, latest_timestamp=t.latest)))
+            recorded.append(RecordedAthlete(athlete=a, physiological=recorded_stream(rec.id, a.id, "physiological"), tracking=recorded_stream(rec.id, a.id, "tracking")))
         with get_database().read() as c:
             imported = provenance(c, rec.id)
             configuration = recording_store.configuration_in(c, rec.id)
@@ -127,7 +125,7 @@ def require_member(rec: Recording, athlete_id: str) -> Athlete:
 
 def recorded_stream(rec_id: str, athlete_id: str, stream: str) -> RecordedStream:
     r = recording_store.retention(rec_id, athlete_id, stream)
-    return RecordedStream(sample_count=r.count, earliest_timestamp=r.earliest, latest_timestamp=r.latest)
+    return RecordedStream(sample_count=r.count, earliest_timestamp=r.earliest, latest_timestamp=r.latest, receipt_count=recording_store.receipt_count(rec_id, athlete_id, stream))
 
 
 @router.get("/{recording_id}/athletes/{athlete_id}/recorded-data", response_model=RecordedData)
@@ -500,13 +498,15 @@ def export_recording_package(recording_id: str) -> Response:
         rec = require_recording(recording_id)
         if rec.status != "stopped":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Recording '{rec.id}' is still active; stop it before exporting a package")
-        samples = {a.id: {stream: recording_store.all(rec.id, a.id, stream) for stream in ("physiological", "tracking")} for a in rec.athletes}
+        rows = {a.id: {stream: recording_store.all_with_receipts(rec.id, a.id, stream) for stream in ("physiological", "tracking")} for a in rec.athletes}
+        samples = {a: {s: [m for m, _ in v] for s, v in streams.items()} for a, streams in rows.items()}
+        receipts = {a: {s: [r for _, r in v] for s, v in streams.items()} for a, streams in rows.items()}
         periods = [p for a in rec.athletes for p in period_store.list(rec.id, a.id)]
         with get_database().read() as c:
             configuration = recording_store.configuration_in(c, rec.id).snapshot
     recording_doc = {"id": rec.id, "name": rec.name, "status": rec.status, "started_at": rec.started_at.isoformat().replace("+00:00", "Z"), "stopped_at": rec.stopped_at.isoformat().replace("+00:00", "Z")}
     settings_doc = {"distance_max_gap_seconds": settings.distance_max_gap_seconds, "distance_min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps}
-    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration)
+    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts)
     return Response(
         content=body, media_type="application/zip",
         headers={

@@ -10,6 +10,7 @@ so the two streams never need to share one; an explicit `max_samples` pins a sto
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import NamedTuple
 from typing import Generic, Protocol, TypeVar
@@ -69,10 +70,11 @@ class SampleStore(Generic[S]):
         with self.db.transaction() as c:
             self.write(c, sample)
 
-    def write(self, c, sample: S) -> None:
+    def write(self, c, sample: S, receipt: str | None = None) -> None:
         """The insert-or-replace plus trim, inside the caller's transaction (so other writes can commit with it or not at all).
 
-        The trim keeps the newest `max_samples` rows by recorded timestamp for this athlete and stream only; other
+        `receipt` is the optional receipt metadata (JSON text); an equal-instant replacement replaces it together with
+        the payload, so a row's receipt always belongs to the values it holds. The trim keeps the newest `max_samples` rows by recorded timestamp for this athlete and stream only; other
         athletes and the other stream are untouched. This is the only place a cap is applied.
         """
         athlete_id = sample.athlete_id  # type: ignore[attr-defined]
@@ -80,9 +82,9 @@ class SampleStore(Generic[S]):
         t = self._table
         cap = self.max_samples
         c.execute(
-            f"INSERT INTO {t} (athlete_id, ts_utc, payload) VALUES (?, ?, ?) "
-            f"ON CONFLICT(athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload",
-            (athlete_id, ts, sample.model_dump_json()),
+            f"INSERT INTO {t} (athlete_id, ts_utc, payload, receipt) VALUES (?, ?, ?, ?) "
+            f"ON CONFLICT(athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload, receipt = excluded.receipt",
+            (athlete_id, ts, sample.model_dump_json(), receipt),
         )
         c.execute(
             f"DELETE FROM {t} WHERE athlete_id = ? AND rowid IN "
@@ -135,6 +137,12 @@ class SampleStore(Generic[S]):
                 (athlete_id, to_utc_iso(start), to_utc_iso(end)),
             ).fetchall()
         return [self._row(r) for r in rows]
+
+    def receipt_at(self, athlete_id: str, instant: datetime) -> dict | None:
+        """Receipt metadata of the row stored at exactly `instant` for the athlete, or None (no row, or not recorded)."""
+        with self.db.read() as c:
+            row = c.execute(f"SELECT receipt FROM {self._table} WHERE athlete_id = ? AND ts_utc = ?", (athlete_id, to_utc_iso(instant))).fetchone()
+        return json.loads(row["receipt"]) if row and row["receipt"] else None
 
     def count(self, athlete_id: str) -> int:
         with self.db.read() as c:

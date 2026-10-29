@@ -1,8 +1,9 @@
 """Shared enums and base configuration for all Athletrix models."""
 
 from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class AthletrixModel(BaseModel):
@@ -29,3 +30,14 @@ class Posture(StrEnum):
     WALKING = "walking"
     RUNNING = "running"
     UNKNOWN = "unknown"
+
+
+class SampleReceipt(AthletrixModel):
+    """When an engine received a sample live: receipt metadata, never the sample's identity or ordering key.
+
+    `received_at` is the receiving engine's UTC wall clock at request receipt; it is on a different clock from the
+    sample's own `timestamp` (the sender's), so their difference mixes delivery delay with any clock offset.
+    """
+
+    received_at: AwareDatetime = Field(..., description="Receiving engine's UTC wall clock when the request reached it.")
+    origin: Literal["this_engine", "source_engine"] = Field(..., description="this_engine: received live here; source_engine: received by the engine where an imported recording was made.")

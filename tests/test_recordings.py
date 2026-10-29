@@ -96,7 +96,7 @@ def test_list_is_newest_first_and_detail_reports_recorded_counts(client, frozen)
     detail = client.get(f"{REC}/{second['id']}").json()
     RecordingDetail.model_validate(detail)
     assert detail["status"] == "active" and [e["athlete"]["id"] for e in detail["recorded"]] == ["a1", "a2"]
-    assert all(e["physiological"] == {"sample_count": 0, "earliest_timestamp": None, "latest_timestamp": None} and e["tracking"]["sample_count"] == 0 for e in detail["recorded"])
+    assert all(e["physiological"] == {"sample_count": 0, "earliest_timestamp": None, "latest_timestamp": None, "receipt_count": 0} and e["tracking"]["sample_count"] == 0 for e in detail["recorded"])
     assert client.get(f"{REC}/rec-nope").status_code == 404
 
 

@@ -17,6 +17,11 @@ Design
     open like the others and never pruned. `recording_configurations` holds the configuration snapshot captured when a
     recording started (origin "this_engine") or carried in an imported package ("source_engine"); recordings made before
     snapshots existed have no row, which means "unavailable", never a reconstruction.
+  - Optional receipt metadata (`receipt`, JSON text or NULL) on every sample row: when this engine received the sample
+    live (`{"received_at", "origin": "this_engine"}`) or, for imported recordings, when the original engine did
+    (`"origin": "source_engine"`). NULL means not recorded (rows written before the column existed, or stored by a tool
+    without a request). It never takes part in identity or ordering; an equal-instant replacement replaces it with the
+    payload. Older databases gain the nullable column when first opened by this code (existing rows keep NULL).
 Supported local setup: a single uvicorn process (the default; `--reload` is fine). The schema is
 created automatically when the database is first opened.
 """
@@ -49,12 +54,14 @@ CREATE TABLE IF NOT EXISTS physiological_samples (
     athlete_id TEXT NOT NULL,
     ts_utc     TEXT NOT NULL,
     payload    TEXT NOT NULL,
+    receipt    TEXT,
     PRIMARY KEY (athlete_id, ts_utc)
 );
 CREATE TABLE IF NOT EXISTS tracking_samples (
     athlete_id TEXT NOT NULL,
     ts_utc     TEXT NOT NULL,
     payload    TEXT NOT NULL,
+    receipt    TEXT,
     PRIMARY KEY (athlete_id, ts_utc)
 );
 CREATE TABLE IF NOT EXISTS recordings (
@@ -78,6 +85,7 @@ CREATE TABLE IF NOT EXISTS recording_physiological_samples (
     athlete_id   TEXT NOT NULL,
     ts_utc       TEXT NOT NULL,
     payload      TEXT NOT NULL,
+    receipt      TEXT,
     PRIMARY KEY (recording_id, athlete_id, ts_utc)
 );
 CREATE TABLE IF NOT EXISTS recording_tracking_samples (
@@ -85,6 +93,7 @@ CREATE TABLE IF NOT EXISTS recording_tracking_samples (
     athlete_id   TEXT NOT NULL,
     ts_utc       TEXT NOT NULL,
     payload      TEXT NOT NULL,
+    receipt      TEXT,
     PRIMARY KEY (recording_id, athlete_id, ts_utc)
 );
 CREATE TABLE IF NOT EXISTS recording_periods (
@@ -116,6 +125,9 @@ CREATE TABLE IF NOT EXISTS recording_imports (
 """
 
 
+SAMPLE_TABLES = ("physiological_samples", "tracking_samples", "recording_physiological_samples", "recording_tracking_samples")
+
+
 def to_utc_iso(ts: datetime) -> str:
     """Normalise a timezone-aware datetime to fixed-width UTC text, e.g. 2026-10-25T03:23:45.728588+00:00."""
     return ts.astimezone(UTC).isoformat(timespec="microseconds")
@@ -133,6 +145,9 @@ class Database:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
+        for table in SAMPLE_TABLES:   # databases written before receipt metadata existed: add the nullable column
+            if "receipt" not in {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN receipt TEXT")
         self.closed = False
 
     @contextmanager

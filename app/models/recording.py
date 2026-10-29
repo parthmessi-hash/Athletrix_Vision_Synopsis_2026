@@ -69,6 +69,7 @@ class RecordedStream(AthletrixModel):
     sample_count: int = Field(..., ge=0)
     earliest_timestamp: AwareDatetime | None = Field(None, description="Recorded timestamp of the oldest recorded sample (UTC); null if none.")
     latest_timestamp: AwareDatetime | None = Field(None, description="Recorded timestamp of the newest recorded sample (UTC); null if none.")
+    receipt_count: int = Field(0, ge=0, description="How many of these rows carry receipt metadata (none for rows stored before instrumentation existed).")
 
 
 class RecordedAthlete(AthletrixModel):

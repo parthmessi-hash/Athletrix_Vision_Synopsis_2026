@@ -1,7 +1,7 @@
 from pydantic import AwareDatetime, Field
 
 from app.models.athlete import Athlete
-from app.models.common import AthletrixModel
+from app.models.common import AthletrixModel, SampleReceipt
 from app.models.physiological import PhysiologicalSample
 from app.models.team import ReportedDevice
 from app.models.tracking import TrackingSample
@@ -30,3 +30,5 @@ class AthleteLive(AthletrixModel):
     physiological_newest_ahead_seconds: float | None = Field(None, gt=0, description="How far after captured_at the newest stored physiological sample is, when it is not yet current; null otherwise.")
     tracking_newest_ahead_seconds: float | None = Field(None, gt=0, description="How far after captured_at the newest stored tracking sample is, when it is not yet current; null otherwise.")
     devices: list[ReportedDevice] = Field(default_factory=list, description="Device ids named by the chosen samples with their latest status reports (same rules as the team overview).")
+    physiological_receipt: SampleReceipt | None = Field(None, description="When this engine received the chosen physiological sample; null if none or not recorded.")
+    tracking_receipt: SampleReceipt | None = Field(None, description="When this engine received the chosen tracking sample; null if none or not recorded.")

@@ -77,7 +77,7 @@ def test_engine_produced_edge_cases_round_trip_exactly(client, frozen, small_cap
     pkg_bytes = client.get(f"{REC}/{rec}/package.zip").content
     pkg = read_package(pkg_bytes)                                           # the importer's full validation accepts it
     s = pkg.summary()
-    assert s["counts"] == {"physiological_samples": 323, "tracking_samples": 321, "periods": 2}
+    assert s["counts"] == {"physiological_samples": 323, "tracking_samples": 321, "periods": 2, "receipts": 644}
     assert [a["physiological"]["count"] for a in s["athletes"]] == [321, 2, 0] and s["athletes"][2]["tracking"]["count"] == 0
     assert s["athletes"][0]["physiological"]["bounds"]["earliest"] == "2026-10-26T19:00:00Z", "a sample before started_at is kept"
     assert s["athletes"][1]["physiological"]["bounds"]["latest"] == "2026-10-26T20:05:25Z", "a sample after stopped_at, within the allowance, is kept"

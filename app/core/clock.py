@@ -19,6 +19,12 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def receipt_now() -> datetime:
+    """Backend UTC wall clock read for a request's receipt time (separate from utc_now so a request's own captured
+    instant is still read exactly once, and tests can control each independently)."""
+    return datetime.now(UTC)
+
+
 def future_skew_error(timestamp: datetime) -> str | None:
     """Return an error message if `timestamp` is too far ahead of now, else None."""
     now = utc_now()
