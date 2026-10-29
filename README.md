@@ -21,8 +21,10 @@ calculations, limitations and the next milestone).
 app/
   main.py            # app factory, CORS, router registration
   core/config.py     # settings (env vars / .env)
+  core/timing.py     # receipt time and Server-Timing for every request (developer timing)
+  core/configuration.py  # the configuration snapshot captured at recording start (models/configuration.py)
   api/router.py      # aggregates routers under /api/v1
-  api/health.py      # GET  /api/v1/health
+  api/health.py      # GET  /api/v1/health, GET /api/v1/clock (engine UTC time for clock-offset estimates)
   api/athletes.py    # POST /api/v1/athletes (register), GET /api/v1/athletes, GET /api/v1/athletes/{id}
                      # POST /api/v1/athletes/validate
                      # GET  /api/v1/athletes/{id}/physiological/latest, /tracking/latest
@@ -41,8 +43,11 @@ app/
                      # multi-athlete load check), convert_heart_rate_csv.py and
                      # convert_tracking_csv.py (CSV adapters), examples/fictional_replay.jsonl,
                      # examples/fictional_heart_rate.csv, examples/fictional_physiology.csv, examples/fictional_tracking.csv
+                     # recording_package.py (inspect/import packages), local_data.py (inventory and scoped removal),
+                     # verify_*.py (isolated end-to-end checks, including verify_evaluation_workflow.py)
   db.py              # SQLite storage layer (single source of truth; schema created at startup)
-  store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status
+  store/             # SQLite-backed athlete registry, sample histories (latest = newest row), device status,
+                     # recordings, saved periods, package import, removal plans (store/removal.py)
 tests/
 ```
 
@@ -990,8 +995,9 @@ Rules of this first version:
 - **An active recording survives a backend restart and stays active until it
   is stopped explicitly.** The dashboard shows the active recording in a
   persistent indicator for that reason.
-- There is no deletion, no cloud upload and no background pruning, so
-  recordings consume local disk until an explicit management feature exists.
+- There is no cloud upload and no background pruning, so recordings consume
+  local disk until removed with `scripts/local_data.py` (an explicit, offline,
+  dry-run-first CLI; see "Local data inventory and removal").
 
 ### What a recording preserves
 
@@ -1110,25 +1116,30 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 1)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 2)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
 with a safe filename `athletrix-recording-package-<id>-<UTC time>.zip`. It
-contains exactly four members:
+contains exactly five members (version 1 packages, written before 2026-10-28,
+have the first four and are still read):
 
 | Member | Content |
 |--------|---------|
-| `manifest.json` | `format`, `format_version` (1), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods) and `settings_at_export` |
-| `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording) and `athletes` (the roster snapshot, in roster order) |
+| `manifest.json` | `format`, `format_version` (2), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts) and `settings_at_export` |
+| `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording), `athletes` (the roster snapshot, in roster order) and `configuration_at_start` (the start-time snapshot, or null when the recording has none; see "Recording configuration snapshot") |
 | `samples.jsonl` | every recorded sample of every roster athlete in the existing `{type, sample}` interchange format, by athlete in roster order, then instant, physiological first at equal instants; payloads exactly as stored |
 | `periods.json` | saved periods: original `id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as saved), `created_at` |
+| `receipts.jsonl` | receipt metadata for the samples that have it: one `{type, athlete_id, timestamp, received_at}` per line, `received_at` being when the engine where the recording was made received the sample live (see "Timing instrumentation"); kept apart so `samples.jsonl` stays in the interchange format |
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
 `settings_at_export` records the engine settings when the file was written; it
 does not claim they were in force while the data was recorded or reviewed, and
-an importing engine applies its own settings. The checksums detect
+an importing engine applies its own settings; the start-time snapshot in
+`recording.json` is a separate, earlier record. An engine from before version 2
+refuses a version 2 package with "unsupported format_version 2" rather than
+silently dropping the new fields. The checksums detect
 accidental corruption only. The package is not a database backup and not
 evidence that the measurements are accurate: it holds no registry, rolling
 history, device status, other recordings, configuration, credentials, paths or
@@ -1275,8 +1286,9 @@ point), field data to check timing and confidence handling, and decisions
 about the engine settings for the sport.
 
 **Storage limits.** Recordings and imported packages live in the local SQLite
-file and are never pruned; there is no deletion or archive management yet, so
-they consume disk until such a feature exists (a 10-minute, 20-athlete,
+file and are never pruned automatically; `scripts/local_data.py` removes one
+recording or one athlete explicitly, but there is no archive management, so
+they consume disk until removed (a 10-minute, 20-athlete,
 1 Hz + 10 Hz recording measured about 90 MB in the long run below). One recording can be
 active at a time, and one backend process should write a database file.
 
@@ -1437,6 +1449,169 @@ recorded sample and replays identically into a second isolated backend. Exit 0
 when every check passed. The transaction-rollback case (a failed recording
 write leaves the rolling store unchanged) is covered by the backend test
 `tests/test_recording_ingest.py`, since it cannot be induced from outside.
+
+## Recording configuration snapshot (`configuration_at_start`)
+
+When a recording starts, the engine stores a small versioned snapshot (snapshot version 1) of the configuration in
+force, in the same transaction that creates the recording. `GET /api/v1/recordings/{id}` returns it as
+`configuration_at_start`:
+
+```json
+{"status": "captured", "origin": "this_engine", "note": "...",
+ "snapshot": {"snapshot_version": 1, "captured_at": "2026-10-28T18:00:00Z",
+   "engine": {"application": "Athletrix Engine", "version": "0.1.0", "code_revision": null, "package_format_version": 2},
+   "movement": {"distance_max_gap_seconds": 3.0, "distance_min_confidence": 0.5, "high_speed_threshold_mps": 5.0},
+   "retention": {"physiological_retention_samples": 300, "tracking_retention_samples": 300},
+   "timing": {"max_future_timestamp_skew_seconds": 5.0},
+   "effort_review": {"min_effort_seconds": 1.0, "max_effort_seconds": 120.0, "before_seconds": 10.0, "after_seconds": 30.0},
+   "operator_supplied": {"note": "wearable bridge v0.3, 1 Hz", "metadata": {"sample_rate_hz": 1}, "verified_by_engine": false}}}
+```
+
+- **What it holds**: only the settings that shape acquisition, storage and calculation, the application version as
+  configured (`APP_VERSION`), and a code revision **only if** one was supplied at startup with `CODE_REVISION` (for
+  example `CODE_REVISION=$(git rev-parse --short HEAD) uvicorn ...`). The engine never runs git; unset means
+  `null`, i.e. unknown. Nothing else is read from the environment: no paths, hosts, ports, CORS origins, usernames
+  or secrets.
+- **Operator-supplied adapter information**: `POST /api/v1/recordings` accepts an optional
+  `adapter_configuration` with a `note` (up to 500 characters) and flat `metadata` (up to 32 keys; string, number,
+  boolean or null values; strings up to 200 characters). It is stored as given with `verified_by_engine: false`:
+  the engine checks none of it.
+- **Three different settings records, never mixed**: `configuration_at_start` (what was in force when acquisition
+  began), a package's `settings_at_export` (when the file was written), and the settings the engine applies now
+  (reported with every review as `distance_rules`). Changing settings later, restarting, or exporting never alters
+  the snapshot.
+- **Origin**: `this_engine` when captured here; `source_engine` when it arrived in an imported package (it is then
+  the snapshot of the engine where the recording was made, and stays so if the recording is exported again).
+- **Compatibility**: recordings made before snapshots existed, and recordings imported from version 1 packages,
+  have `status: "unavailable"` with a note saying the settings at their start are unknown. Nothing is reconstructed
+  from current settings. Older databases gain the empty `recording_configurations` table when first opened.
+
+## Timing instrumentation (receipt time, Server-Timing, developer timing panel)
+
+The sample `timestamp` is the **source observation time**: supplied by the sender on the sender's clock. It remains
+the only identity and ordering key (newest-record selection, equal-instant replacement, history order and recording
+windows are unchanged). The engine now adds, separately:
+
+| Measurement | Where | Clock | Meaning |
+|---|---|---|---|
+| Backend receipt time | `receipt.received_at` on every sample row; `physiological_receipt` / `tracking_receipt` in `GET /athletes/{id}/live`; `receipts.jsonl` in packages | engine UTC wall clock | read once when the request's headers reach the application, before the body is read and validated |
+| Server processing interval | `Server-Timing: app;dur=<ms>` header on every response (exposed to the dashboard via CORS) | engine monotonic | from that same receipt point to the start of the response; for a sample POST it covers validation, waiting for the database lock, the write and the commit; not stored |
+| Browser request duration | developer timing panel | browser monotonic (`performance.now`) | fetch start to response body parsed |
+| Browser DOM update / next frame | developer timing panel | browser monotonic | body parsed to the cards' DOM writes done, and to the next animation frame; rendering proxies, not proof of when pixels appeared |
+| Receipt → DOM (estimate) | developer timing panel | cross-clock | browser wall clock at the DOM update, corrected by the measured offset, minus `received_at`; includes waiting for the next poll |
+| Source → DOM (cross-clock) | developer timing panel | cross-clock | the same minus the sample timestamp; also depends on the sender's clock |
+
+Rules and compatibility:
+
+- Persisted wall-clock times are UTC; durations within one process use monotonic clocks.
+- `receipt` is `{"received_at", "origin"}`. `origin: "this_engine"` means this engine received it live;
+  `"source_engine"` means the engine where an imported recording was made received it. **Imported samples never
+  appear to have been received live by the destination.** NULL (shown as `null`, counted by `receipt_count` in a
+  recording's per-stream detail) means not recorded: rows stored before this column existed, rows written by tools
+  without a request, and samples from version 1 packages.
+- **Equal-instant replacement** replaces the receipt together with the values: the row's receipt is always the
+  arrival that delivered the values it holds, and the earlier arrival's receipt is not kept anywhere.
+- A delayed sample keeps its own timestamp; its receipt time is later than those of samples with newer
+  timestamps, and it does not become the current reading.
+- **Replay** (`scripts/replay_samples.py`) posts samples live, so the destination records the replay time as their
+  receipt; the interchange JSONL never carries receipts.
+- Older databases gain the nullable `receipt` column on the four sample tables when first opened; existing rows keep
+  NULL and nothing else changes.
+- `GET /api/v1/clock` returns the engine's UTC time to microseconds for clock-offset estimates.
+
+**Clock alignment method.** The developer panel probes `/api/v1/clock` every 10 s, reading the browser wall clock
+before (t0) and after (t1): offset = engine time - (t0 + t1)/2, keeping the probe with the shortest round trip,
+uncertainty ± round trip / 2 (an asymmetric path can be off by up to that). A wall-clock adjustment on either computer
+invalidates it. A cross-clock subtraction is therefore an **estimate within the stated uncertainty**, never a
+verified receipt-to-display latency, and source → DOM additionally depends on how the sender's clock relates to the
+engine's.
+
+**Developer timing panel.** Open the dashboard with `?timing=1` (for example `http://localhost:3000/?timing=1#demo`).
+The normal coach view shows and measures nothing and makes no extra requests. The panel lists the six measurements
+above (last, median, p95, max, n) for the live-card poll, measures display delay only at a sample's first display,
+drops replies that arrive after an athlete or mode change, excludes polls made while the tab was hidden, and offers
+**Download JSON**. Polling stops while another page of the site is shown instead of Dashboard; it continues in a
+background browser tab, although the browser may slow timers. Measure with Dashboard open in the visible foreground
+tab.
+
+**Measured once on this Mac (2026-10-28, fictional data).** `demo_launcher.py --athletes 2` (1 Hz per stream, sender
+in-process on the same machine), Chrome, Dashboard visible in the foreground with `?timing=1`, 127 polls, 254 first
+displays, none while hidden:
+
+| Measurement | median | p95 | max |
+|---|---|---|---|
+| HTTP request duration (live poll) | 14.5 ms | 30.1 ms | 75.7 ms |
+| Engine processing (Server-Timing) | 5.1 ms | 14.5 ms | 40.0 ms |
+| DOM update after response | 0.4 ms | 1.4 ms | 12.1 ms |
+| Next animation frame after response | 4.9 ms | 93.1 ms | 114.6 ms |
+| Receipt → DOM, first display (estimate, ± 6.8 ms) | 503 ms | 593 ms | 723 ms |
+| Source → receipt (same machine, same clock) | 6 ms | 13 ms | 71 ms |
+
+Clock offset engine minus browser: 2.0 ms ± 6.8 ms (best of 17 probes). Receipt → DOM is dominated by the 1 s poll
+interval (a sample waits for the next poll); minimum 420 ms. These are separate observations on one computer over
+localhost, not a device, network or display-latency validation, and **not** evidence that the research plan's
+two-second target is met for real devices. Simulation write latency (from `validate_team_scale.py`) is a fourth,
+separate figure and is not combined with any of these.
+
+## Local data inventory and removal (`scripts/local_data.py`)
+
+```bash
+python scripts/local_data.py inventory --database data/other.db                          # read-only counts, recordings, athletes
+python scripts/local_data.py remove-recording <rec id> --database data/other.db          # dry run: exactly what would go
+python scripts/local_data.py remove-recording <rec id> --database data/other.db --execute --confirm <rec id>
+python scripts/local_data.py remove-athlete <athlete id> --database data/other.db [--include-device-status <device id>]
+python scripts/local_data.py remove-athlete <athlete id> --database data/other.db --execute --confirm <athlete id>
+#   add --json for a machine-readable plan; exit 0 done/clean dry run, 1 unknown/refused/in use/failed, 2 bad arguments
+```
+
+| Scope | Removed | Kept |
+|---|---|---|
+| `remove-recording` | the recording row, roster snapshot (`recording_athletes`), recorded samples (both streams), saved periods, start-time snapshot, import provenance | registry, rolling history, device status, every other recording |
+| `remove-athlete` | registry entry, rolling samples, and in every recording that athlete's membership, recorded samples and saved periods; a recording whose roster becomes empty is removed entirely; removed period ids are dropped from an import mapping | shared recordings (row, snapshot, other athletes' samples, periods and reviews); device status unless named with `--include-device-status` and no other athlete's samples name that device |
+
+- **Dry run first.** Without `--execute` the database is opened read-only and the exact tables, row counts,
+  relationships, kept records, refusals and limitations are printed. No data changes (SQLite may create empty
+  `-wal`/`-shm` sidecar files when it opens a WAL database read-only). `--execute` requires `--confirm` with the
+  exact id. A missing database file is never created; an unknown id changes nothing.
+- **Concurrency.** Execution takes SQLite's exclusive lock, which SQLite refuses while another connection that has
+  used the file is attached; a running engine always is, so stop it first. This is SQLite file locking, not a check
+  of process names, and it is not reliable on network file systems.
+- **Atomic.** The plan is recomputed under the lock and applied in one transaction; any failure rolls everything back.
+  Active recordings, and athletes in an active recording, are refused.
+- **Device status** is keyed by device id (the model has no athlete), and a device id may be reused, so it is only
+  reported unless explicitly named; a device that other athletes' samples also name is refused.
+- **Logical deletion, not erasure.** `secure_delete` is on for the transaction and the WAL is checkpointed and
+  truncated afterwards, but deleted content may survive in free file-system blocks or SSD cells, snapshots and
+  backups. The tool cannot remove exported JSONL/CSV/JSON files or packages already copied elsewhere (including other
+  engines that imported them), camera footage, adapter logs, backups, Time Machine or cloud copies, or external
+  systems. Free text such as recording names, period labels and operator notes is not rewritten (a note that mentions
+  the athlete id is reported). It is **not** a complete consent-withdrawal or secure-erasure procedure.
+- Older databases without the newer tables or columns can be inventoried and cleaned; no schema is added.
+
+## One reproducible evaluation (`scripts/verify_evaluation_workflow.py`)
+
+```bash
+python scripts/verify_evaluation_workflow.py          # isolated engines and temporary files; exit 0 when every check passed
+```
+
+Exercises the batch's features together with fictional data: the snapshot captured at start (and unchanged after a
+restart with another setting), nulls, zeros, an equal-instant replacement and a delayed arrival, receipt times bounded
+by the script's own clock around each POST (same machine), Server-Timing never above the client round trip, the
+package round trip with snapshot and receipts arriving as `source_engine`, identical samples and reviews, a version 1
+package and a database with the tables as written before this batch, removal dry run, an athlete removal that leaves
+the other athlete's samples and reviews identical, a recording removal that keeps rolling data and the other
+recording, a forced failure that rolls back and a running engine that blocks execution. The JSON report under
+`reports/` (ignored by git) lists expected versus actual per check, failures, unknowns and limitations. Measured on
+this Mac on 2026-10-28: 43 of 43 checks passed.
+
+## Before real-device or human-participant evaluation
+
+Not done in software and still required: a real wearable or camera adapter and its own logs; a measured relation
+between each device clock and the engine clock (receipt time now makes delivery delay observable, but source
+timestamps from another clock are not corrected); display timing measured on the actual sideline computer and
+browser; an agreed procedure for exports, packages, backups and footage outside the database (the removal tool covers
+one database file only); authentication or a physically controlled computer; and the approvals and procedures that
+govern human participants, which no code here provides.
 
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 

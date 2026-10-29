@@ -177,6 +177,17 @@ curl -fsS -o athlete-1.jsonl "http://127.0.0.1:8000/api/v1/athletes/athlete-1/re
 python scripts/replay_samples.py athlete-1.jsonl --url http://127.0.0.1:8010      # a second backend with its own DATABASE_PATH
 #    dashboard: Recorded -> Download retained samples (saved on this computer, uploaded nowhere)
 
+# 3p. local data inventory and removal (offline; dry run by default; stop the engine that uses the file first)
+python scripts/local_data.py inventory --database /path/to/file.db
+python scripts/local_data.py remove-athlete <id> --database /path/to/file.db                     # what would go, kept, refused
+python scripts/local_data.py remove-athlete <id> --database /path/to/file.db --execute --confirm <id>
+#    also remove-recording <rec id>; --include-device-status DEVICE_ID; logical deletion only (see README)
+
+# 3q. record the code revision in each recording's start snapshot (optional; the engine never runs git)
+CODE_REVISION=$(git rev-parse --short HEAD) uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 3r. developer timing panel (opt-in): open http://localhost:3000/?timing=1#demo with Dashboard in the visible foreground tab
+
 # 4. frontend, from the Athletrix_Web folder (loopback only)
 python3 -m http.server 3000 --bind 127.0.0.1
 
@@ -496,8 +507,10 @@ Implemented today is listed above; the following are **not** implemented:
   wearable or camera system has been connected, so measurement accuracy, real
   heart-rate behaviour, tracking quality, real device clock agreement and
   full-match behaviour with real traffic are not established.
-- Recordings are a first version: one active at a time, no deletion, no
-  upload, no automatic start, no management of disk use; an active recording
+- Recordings are a first version: one active at a time, no upload, no
+  automatic start or pruning; removal only through the offline
+  `scripts/local_data.py` (one recording or one athlete, logical deletion in
+  one database file, not erasure of exports, packages, backups or footage); an active recording
   survives a restart until stopped explicitly. Saved periods are manual
   selections in stopped recordings: no editing or deletion, no automatic
   event detection, no cross-athlete comparison, and a period never freezes a
@@ -558,7 +571,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (479 tests as of this handoff)
+# engine: full suite, isolated temporary databases (687 tests as of 2026-10-28)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -598,7 +611,9 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "61 tests, 61 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "62 tests, 62 passed"
+# evaluation of snapshots, timing metadata, package round trip and removal on isolated engines (about 15 s)
+python scripts/verify_evaluation_workflow.py
 # recording flow on an isolated backend (seconds; exit 0 means every check passed)
 python scripts/verify_recording_flow.py
 # saved-period workflow on an isolated backend (seconds; exit 0 means every check passed)
@@ -621,6 +636,20 @@ open "http://localhost:3000/?engine=0#demo"
 | 5. Portable workflow verification | Done: `scripts/verify_portable_workflow.py`, 27 of 27 checks |
 | 6. Longer recorded run | Done: `validate_team_scale.py --record --athlete-read-interval 1`, 10 min, 20 athletes, 132000 of 132000 accepted; team, individual and recording reads all ok; about 90 MB |
 | 7. Final verification and documentation | Done: full suite, browser harness 61 of 61, real dashboard check, older-database compatibility on isolated copies |
+
+## Checkpoint: evaluation and data-management batch (2026-10-28)
+
+| Milestone | State |
+|-----------|-------|
+| 1. Loopback startup instructions | Done: both READMEs, status commands and the public page's help use `--host 127.0.0.1` / `--bind 127.0.0.1`; `lsof` listener check documented; the engine does not enforce binding |
+| 2. Configuration snapshot at recording start | Done: `configuration_at_start` (snapshot v1, `CODE_REVISION`, optional unverified `adapter_configuration`), kept through restarts, packages (format v2) and imports; older recordings and v1 packages report "unavailable" |
+| 3. Timing instrumentation | Done: per-row `receipt` (`this_engine` / `source_engine`), `Server-Timing`, `GET /clock`, receipts in the live snapshot and `receipts.jsonl`; opt-in `?timing=1` dashboard panel; one foreground measurement recorded in the README (receipt to DOM median about 0.5 s with a 1 s poll, estimate ± 6.8 ms) |
+| 4. Local data inventory and removal | Done: `scripts/local_data.py` (recording / athlete scopes, dry run, exact-id confirmation, SQLite exclusive lock, one transaction, rollback); logical deletion only |
+| 5. One reproducible evaluation | Done: `scripts/verify_evaluation_workflow.py`, 43 of 43 checks |
+| 6. Documentation and final verification | Done: README sections, this checkpoint, full suite, browser harness 62 of 62, dashboard checks |
+
+Still not established: real device clocks and adapters, display timing on the sideline computer, removal beyond one
+database file (exports, packages, backups, footage), authentication, and anything about human participants.
 
 ## 10. Recommended next milestone
 
