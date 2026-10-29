@@ -14,7 +14,9 @@ Design
     samples for selected athletes outside the rolling caps; a partial unique index allows one active
     recording at a time. `recording_periods` holds named, manually selected effort periods of a stopped
     recording (a selection only: label and exact instants, no calculation). The tables are created on
-    open like the others and never pruned.
+    open like the others and never pruned. `recording_configurations` holds the configuration snapshot captured when a
+    recording started (origin "this_engine") or carried in an imported package ("source_engine"); recordings made before
+    snapshots existed have no row, which means "unavailable", never a reconstruction.
 Supported local setup: a single uvicorn process (the default; `--reload` is fine). The schema is
 created automatically when the database is first opened.
 """
@@ -97,6 +99,11 @@ CREATE TABLE IF NOT EXISTS recording_periods (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recording_periods_by_athlete ON recording_periods (recording_id, athlete_id, start_utc);
+CREATE TABLE IF NOT EXISTS recording_configurations (
+    recording_id TEXT PRIMARY KEY,
+    origin       TEXT NOT NULL,
+    snapshot     TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS recording_imports (
     recording_id         TEXT PRIMARY KEY,
     source_recording_id  TEXT NOT NULL,

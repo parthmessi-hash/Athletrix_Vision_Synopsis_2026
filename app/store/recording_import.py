@@ -1,7 +1,7 @@
 """Import a validated portable recording package into a local database, atomically, with provenance.
 
 Everything is written in one BEGIN IMMEDIATE transaction: the recording (stopped, original start and stop times, a new
-id), its roster snapshot, every sample exactly as normalised in the package, every saved period (new ids, exact bounds,
+id), its roster snapshot, the start-time configuration snapshot when the package carries one (origin "source_engine"), every sample exactly as normalised in the package, every saved period (new ids, exact bounds,
 original labels and creation times) and a `recording_imports` row mapping the new ids to the original ones. Any failure
 rolls the whole import back. The athlete registry, rolling history, device status and any active recording are never
 touched, and nothing existing is overwritten or merged.
@@ -21,7 +21,7 @@ from datetime import datetime
 from app.core.recording_package import Package, iso
 from app.db import Database, to_utc_iso
 from app.store.periods import new_period_id
-from app.store.recordings import TABLES, new_recording_id
+from app.store.recordings import TABLES, RecordingStore, new_recording_id
 
 
 class AlreadyImported(Exception):
@@ -61,6 +61,8 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
         c.execute("INSERT INTO recordings (id, name, started_at, stopped_at) VALUES (?, ?, ?, ?)", (new_id, rec["name"].strip(), to_utc_iso(started), to_utc_iso(stopped)))
         for a in pkg.athletes:
             c.execute("INSERT INTO recording_athletes (recording_id, athlete_id, name, jersey_number, sport, team_id) VALUES (?, ?, ?, ?, ?, ?)", (new_id, a.id, a.name, a.jersey_number, a.sport, a.team_id))
+        if pkg.configuration is not None:   # the source engine's start-time snapshot, kept as such; absent = unavailable
+            RecordingStore.write_configuration(c, new_id, "source_engine", pkg.configuration)
         if checkpoint:
             checkpoint("recording")
         counts = {"physiological": 0, "tracking": 0}

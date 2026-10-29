@@ -17,6 +17,7 @@ from datetime import datetime
 
 from app.db import Database, get_database, to_utc_iso
 from app.models import Athlete, PhysiologicalSample, TrackingSample
+from app.models.configuration import RecordingConfiguration, RecordingConfigurationStatus
 from app.models.recording import Recording
 from app.store.samples import Retention
 
@@ -66,8 +67,9 @@ class RecordingStore:
         return self._recording(c, row) if row else None
 
     # ---- lifecycle ---------------------------------------------------------------------------------------------------
-    def start(self, name: str, athletes: Sequence[Athlete], started_at: datetime) -> Recording:
-        """Create an active recording with a roster snapshot. Raises RecordingConflict if one is already active."""
+    def start(self, name: str, athletes: Sequence[Athlete], started_at: datetime, configuration: RecordingConfiguration | None = None) -> Recording:
+        """Create an active recording with a roster snapshot and, when given, its start-time configuration snapshot, in one
+        transaction. Raises RecordingConflict if one is already active."""
         with self.db.transaction() as c:
             active = self.active_in(c)
             if active is not None:
@@ -77,7 +79,28 @@ class RecordingStore:
             for a in athletes:
                 c.execute("INSERT INTO recording_athletes (recording_id, athlete_id, name, jersey_number, sport, team_id) VALUES (?, ?, ?, ?, ?, ?)",
                           (recording_id, a.id, a.name, a.jersey_number, a.sport, a.team_id))
+            if configuration is not None:
+                self.write_configuration(c, recording_id, "this_engine", configuration)
             return self._get_in(c, recording_id)
+
+    # ---- start-time configuration snapshot --------------------------------------------------------------------------
+    @staticmethod
+    def write_configuration(c: sqlite3.Connection, recording_id: str, origin: str, configuration: RecordingConfiguration) -> None:
+        c.execute("INSERT INTO recording_configurations (recording_id, origin, snapshot) VALUES (?, ?, ?)", (recording_id, origin, configuration.model_dump_json()))
+
+    def configuration_in(self, c: sqlite3.Connection, recording_id: str) -> RecordingConfigurationStatus:
+        """The recording's start-time snapshot, or "unavailable" when none was stored (older recordings and packages)."""
+        row = c.execute("SELECT origin, snapshot FROM recording_configurations WHERE recording_id = ?", (recording_id,)).fetchone()
+        if row is None:
+            return RecordingConfigurationStatus(status="unavailable", note="No configuration snapshot was stored for this recording (it was made, or packaged, before snapshots existed). "
+                                                "The settings in force at its start are unknown; current settings are not a substitute.")
+        note = ("Captured by this engine in the transaction that started the recording." if row["origin"] == "this_engine" else
+                "Captured by the engine where the recording was made and carried in the imported package; this engine's own settings may differ.")
+        return RecordingConfigurationStatus(status="captured", origin=row["origin"], snapshot=RecordingConfiguration.model_validate_json(row["snapshot"]), note=note)
+
+    def configuration(self, recording_id: str) -> RecordingConfigurationStatus:
+        with self.db.read() as c:
+            return self.configuration_in(c, recording_id)
 
     def stop(self, recording_id: str, stopped_at: datetime) -> Recording | None:
         """Stop the recording; an already stopped one is returned unchanged. None if unknown."""

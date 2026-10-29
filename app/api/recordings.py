@@ -18,6 +18,7 @@ from app.api.athletes import JSONL_MEDIA_TYPE, WINDOW_END, WINDOW_SECONDS, resol
 from app.core import clock
 from app.core.availability import session_stream_availability
 from app.core.config import get_settings
+from app.core.configuration import capture_configuration
 from app.core.effort import AFTER_SECONDS, BEFORE_SECONDS, EffortRequestError, parse_effort_timestamp, period_bounds, review_effort, select_period, validate_effort
 from app.core.export import export_records, to_jsonl
 from app.core.recording_package import FORMAT as PACKAGE_FORMAT, FORMAT_VERSION as PACKAGE_VERSION, build_package
@@ -43,15 +44,19 @@ def start_recording(body: RecordingStart) -> Recording:
     """Start a recording for the named registered athletes; records samples accepted from now on, never existing history.
 
     The whole selection is validated first: any unregistered id rejects the request and nothing is created. Only one
-    recording can be active at a time (409 otherwise). The roster details of the selected athletes are snapshotted.
+    recording can be active at a time (409 otherwise). The roster details of the selected athletes are snapshotted, and
+    so is the engine configuration in force (see GET /recordings/{id} `configuration_at_start`), together with any
+    `adapter_configuration` the operator supplied, which is stored as given and not verified.
     """
     with get_database().read():
         athletes = [athlete_registry.get(a) for a in body.athlete_ids]
     unknown = [a for a, found in zip(body.athlete_ids, athletes) if found is None]
     if unknown:
         raise HTTPException(status_code=422, detail=f"unregistered athlete ids: {', '.join(unknown)}; register them first (nothing was created)")
+    started_at = clock.utc_now()
+    configuration = capture_configuration(get_settings(), started_at, body.adapter_configuration, PACKAGE_VERSION)
     try:
-        return recording_store.start(body.name, athletes, clock.utc_now())
+        return recording_store.start(body.name, athletes, started_at, configuration)
     except RecordingConflict as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
@@ -103,7 +108,8 @@ def get_recording(recording_id: str) -> RecordingDetail:
                                             tracking=RecordedStream(sample_count=t.count, earliest_timestamp=t.earliest, latest_timestamp=t.latest)))
         with get_database().read() as c:
             imported = provenance(c, rec.id)
-    return RecordingDetail(**rec.model_dump(), recorded=recorded, imported=imported)
+            configuration = recording_store.configuration_in(c, rec.id)
+    return RecordingDetail(**rec.model_dump(), recorded=recorded, imported=imported, configuration_at_start=configuration)
 
 
 # ---- session review: queries over one recording's samples only -------------------------------------------------------
@@ -484,7 +490,8 @@ def export_recording_package(recording_id: str) -> Response:
     """Download one stopped recording as a portable package: manifest, recording and roster snapshot, every recorded sample, saved periods.
 
     Read in one database snapshot; every recorded sample is included (no rolling cap or history page applies). The
-    settings in the manifest are labelled as settings at export time. Not a database backup: no registry, rolling
+    settings in the manifest are labelled as settings at export time; the start-time configuration snapshot, when the
+    recording has one, travels separately in recording.json. Not a database backup: no registry, rolling
     history, device status, other recordings, configuration, credentials, paths or logs.
     """
     captured_at = clock.utc_now()
@@ -495,9 +502,11 @@ def export_recording_package(recording_id: str) -> Response:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Recording '{rec.id}' is still active; stop it before exporting a package")
         samples = {a.id: {stream: recording_store.all(rec.id, a.id, stream) for stream in ("physiological", "tracking")} for a in rec.athletes}
         periods = [p for a in rec.athletes for p in period_store.list(rec.id, a.id)]
+        with get_database().read() as c:
+            configuration = recording_store.configuration_in(c, rec.id).snapshot
     recording_doc = {"id": rec.id, "name": rec.name, "status": rec.status, "started_at": rec.started_at.isoformat().replace("+00:00", "Z"), "stopped_at": rec.stopped_at.isoformat().replace("+00:00", "Z")}
     settings_doc = {"distance_max_gap_seconds": settings.distance_max_gap_seconds, "distance_min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps}
-    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at)
+    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration)
     return Response(
         content=body, media_type="application/zip",
         headers={

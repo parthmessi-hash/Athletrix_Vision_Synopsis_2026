@@ -66,12 +66,12 @@ def unzip(body: bytes) -> dict[str, bytes]:
 
 def test_package_holds_the_whole_recording_as_stored_with_checksums(client, stopped):
     r = client.get(f"{REC}/{stopped['rec']}/package.zip")
-    assert r.status_code == 200 and r.headers["content-type"] == "application/zip" and r.headers["X-Athletrix-Format"] == "athletrix-recording-package/1"
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip" and r.headers["X-Athletrix-Format"] == "athletrix-recording-package/2"
     assert r.headers["Content-Disposition"] == f'attachment; filename="athletrix-recording-package-{stopped["rec"]}-20261026T200820Z.zip"'
     files = unzip(r.content)
     assert sorted(files) == ["manifest.json", "periods.json", "recording.json", "samples.jsonl"]
     manifest = json.loads(files["manifest.json"])
-    assert manifest["format"] == "athletrix-recording-package" and manifest["format_version"] == 1 and manifest["generated_at"] == "2026-10-26T20:08:20Z"
+    assert manifest["format"] == "athletrix-recording-package" and manifest["format_version"] == 2 and manifest["generated_at"] == "2026-10-26T20:08:20Z"
     for name in ("recording.json", "samples.jsonl", "periods.json"):
         assert manifest["members"][name] == {"sha256": hashlib.sha256(files[name]).hexdigest(), "bytes": len(files[name])}
     assert manifest["counts"] == {"athletes": 2, "physiological_samples": 320, "tracking_samples": 320, "samples_by_athlete": {"a2": {"physiological": 0, "tracking": 0}, "a1": {"physiological": 320, "tracking": 320}}, "periods": 2}
@@ -79,6 +79,9 @@ def test_package_holds_the_whole_recording_as_stored_with_checksums(client, stop
     rec = json.loads(files["recording.json"])
     assert rec["id"] == stopped["rec"] and rec["status"] == "stopped" and rec["started_at"] == "2026-10-26T20:00:01Z" and rec["stopped_at"] == "2026-10-26T20:06:40Z"
     assert [a["id"] for a in rec["athletes"]] == ["a2", "a1"] and rec["athletes"][1]["name"] == "Fictional a1"
+    cfg = rec["configuration_at_start"]
+    assert cfg["captured_at"] == "2026-10-26T20:00:01Z" and cfg["movement"]["high_speed_threshold_mps"] == 5.0 and cfg["retention"] == {"physiological_retention_samples": 3, "tracking_retention_samples": 3}
+    assert "settings_at_export" not in cfg and cfg["engine"]["code_revision"] is None, "the start-time snapshot is separate from the export-time settings; an unsupplied revision stays unknown"
     lines = [json.loads(line) for line in files["samples.jsonl"].decode().splitlines()]
     assert len(lines) == 640 and all(set(x) == {"type", "sample"} for x in lines), "every recorded sample, beyond the rolling caps and the 300-row history page"
     assert [x["type"] for x in lines[:2]] == ["physiological", "tracking"]

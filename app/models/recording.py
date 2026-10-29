@@ -4,6 +4,7 @@ from pydantic import AwareDatetime, Field, field_validator
 
 from app.models.athlete import Athlete
 from app.models.common import AthletrixModel
+from app.models.configuration import AdapterConfiguration, RecordingConfigurationStatus
 from app.models.effort import EffortReview
 from app.models.summary import AthleteSummary
 from app.models.window import AthleteWindow
@@ -14,6 +15,7 @@ class RecordingStart(AthletrixModel):
 
     name: str = Field(..., min_length=1, max_length=120, description="User-provided name, e.g. 'Tuesday practice'.")
     athlete_ids: list[str] = Field(..., min_length=1, description="Registered athlete ids to record; fixed for the recording's lifetime.")
+    adapter_configuration: AdapterConfiguration | None = Field(None, description="Optional adapter note and flat metadata supplied by the operator; stored in the start-time snapshot as supplied, not verified.")
 
     @field_validator("name")
     @classmethod
@@ -93,6 +95,7 @@ class RecordingDetail(Recording):
 
     recorded: list[RecordedAthlete] = Field(..., description="One entry per selected athlete, in roster order.")
     imported: RecordingProvenance | None = Field(None, description="Import provenance when the recording came from a portable package; null for one recorded on this engine.")
+    configuration_at_start: RecordingConfigurationStatus = Field(..., description="Engine configuration captured when the recording started, or status 'unavailable'. Distinct from a package's settings_at_export and from the settings this engine applies now.")
 
 
 class ActiveRecording(AthletrixModel):

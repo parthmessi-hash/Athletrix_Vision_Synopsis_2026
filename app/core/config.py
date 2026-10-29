@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     # next sample is accepted, and a raised cap never brings trimmed rows back.
     physiological_retention_samples: int = Field(300, gt=0)
     tracking_retention_samples: int = Field(300, gt=0)
+    # Optional code revision to record in each recording's start-time configuration snapshot, e.g. the output of
+    # `git rev-parse --short HEAD` supplied by whoever starts the engine. Stored as given and never checked; the
+    # engine does not run git. Unset means "unknown".
+    code_revision: str | None = Field(None, pattern=r"^[A-Za-z0-9._+/-]{1,64}$")
+
+    @field_validator("code_revision", mode="before")
+    @classmethod
+    def _blank_revision_is_unknown(cls, v):
+        return v.strip() or None if isinstance(v, str) else v
 
     @field_validator("physiological_retention_samples", "tracking_retention_samples", mode="before")
     @classmethod

@@ -1,12 +1,14 @@
 """Portable recording packages: a versioned ZIP that carries one stopped recording to another local engine.
 
-FORMAT (format "athletrix-recording-package", format_version 1)
+FORMAT (format "athletrix-recording-package", format_version 2; version 1 is still read)
   A ZIP archive (deflate) with exactly these members, all UTF-8:
     manifest.json   format, format_version, generated_at, the recording reference, member list with SHA-256 and byte
                     counts, record counts, and `settings_at_export` (the engine settings in force when the package was
                     written; NOT necessarily the settings in force while the data was acquired or reviewed)
     recording.json  the recording: original id, name, status ("stopped"), started_at and stopped_at (the backend's
-                    clock while recording) and the roster snapshot (`athletes`, in roster order)
+                    clock while recording), the roster snapshot (`athletes`, in roster order) and, from version 2,
+                    `configuration_at_start`: the snapshot captured when the recording started (app/models/configuration.py),
+                    or null when the recording has none. Version 1 packages have no such key: unavailable, never inferred.
     samples.jsonl   every recorded sample of every roster athlete, both streams, in the existing replay-compatible
                     interchange format: one {"type": "physiological"|"tracking", "sample": {...}} per line, ordered by
                     athlete in roster order, then recorded instant, physiological before tracking at equal instants;
@@ -44,10 +46,11 @@ from app.core.effort import MAX_EFFORT_SECONDS, MIN_EFFORT_SECONDS, EffortReques
 from app.core.export import export_records
 from app.db import to_utc_iso
 from app.models import Athlete, PhysiologicalSample, TrackingSample
+from app.models.configuration import RecordingConfiguration
 
 FORMAT = "athletrix-recording-package"
-FORMAT_VERSION = 1
-SUPPORTED_VERSIONS = (1,)
+FORMAT_VERSION = 2
+SUPPORTED_VERSIONS = (1, 2)
 MEMBERS = ("manifest.json", "recording.json", "samples.jsonl", "periods.json")
 DATA_MEMBERS = ("recording.json", "samples.jsonl", "periods.json")
 MODELS = {"physiological": PhysiologicalSample, "tracking": TrackingSample}
@@ -69,9 +72,11 @@ def sha256(data: bytes) -> str:
 
 # ---- writing ------------------------------------------------------------------------------------------------------------
 
-def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[str, dict[str, list]], periods: Sequence, settings: dict, generated_at: datetime) -> bytes:
+def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[str, dict[str, list]], periods: Sequence, settings: dict, generated_at: datetime,
+                  configuration: RecordingConfiguration | None = None) -> bytes:
     """The ZIP bytes for one stopped recording. `samples[athlete_id][stream]` are the stored models, oldest first."""
-    rec_doc = {**recording, "athletes": [a.model_dump(mode="json") for a in athletes]}
+    rec_doc = {**recording, "athletes": [a.model_dump(mode="json") for a in athletes],
+               "configuration_at_start": configuration.model_dump(mode="json") if configuration is not None else None}
     lines = []
     counts = {"physiological": 0, "tracking": 0}
     per_athlete = {}
@@ -124,6 +129,7 @@ class Package:
     samples: dict[str, dict[str, list]] = field(default_factory=dict)   # athlete_id -> stream -> models, as in the file
     periods: list[dict] = field(default_factory=list)                   # validated: label, start/end datetimes, created_at datetime, original id
     package_sha256: str = ""
+    configuration: RecordingConfiguration | None = None                 # start-time snapshot; None = unavailable (version 1, or none recorded)
 
     def summary(self) -> dict:
         def bounds(models):
@@ -141,6 +147,8 @@ class Package:
                           "periods": sum(1 for p in self.periods if p["athlete_id"] == a.id)} for a in self.athletes],
             "counts": {"physiological_samples": sum(len(v["physiological"]) for v in self.samples.values()), "tracking_samples": sum(len(v["tracking"]) for v in self.samples.values()), "periods": len(self.periods)},
             "settings_at_export": self.manifest.get("settings_at_export"),
+            "configuration_at_start": {"status": "captured", "snapshot": self.configuration.model_dump(mode="json")} if self.configuration is not None
+                                      else {"status": "unavailable", "snapshot": None},
         }
 
 
@@ -252,6 +260,16 @@ def read_package(data: bytes) -> Package:
                 errors.append(f"recording.json: athlete {n + 1} is invalid ({exc.errors()[0]['msg']})")
         if len({a.id for a in athletes}) != len(athletes):
             errors.append("recording.json: athlete ids repeat in the roster")
+    configuration = None
+    if "configuration_at_start" in rec:
+        if manifest["format_version"] < 2:
+            errors.append("recording.json: configuration_at_start is not part of format version 1")
+        elif rec["configuration_at_start"] is not None:
+            try:
+                configuration = RecordingConfiguration.model_validate(rec["configuration_at_start"])
+            except ValidationError as exc:
+                first = exc.errors()[0]
+                errors.append(f"recording.json: configuration_at_start is invalid ({'.'.join(map(str, first['loc']))}: {first['msg']})")
     if errors:
         fail()
 
@@ -346,7 +364,7 @@ def read_package(data: bytes) -> Package:
             errors.append(f"period count does not match the manifest (manifest {counts.get('periods')}, file {len(periods_raw)})")
     if errors:
         fail()
-    return Package(manifest=manifest, recording=rec, athletes=athletes, samples=samples, periods=periods, package_sha256=sha256(data))
+    return Package(manifest=manifest, recording=rec, athletes=athletes, samples=samples, periods=periods, package_sha256=sha256(data), configuration=configuration)
 
 
 def latest_sample_after_stop(pkg: Package) -> timedelta | None:

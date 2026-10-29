@@ -1,6 +1,6 @@
 """Inspect, validate and import Athletrix portable recording packages on this computer.
 
-A package (format athletrix-recording-package, version 1) is downloaded from a stopped recording with
+A package (format athletrix-recording-package, version 2; version 1 is still read) is downloaded from a stopped recording with
 GET /api/v1/recordings/{id}/package.zip. This tool reads it locally; nothing is uploaded anywhere.
 
 USAGE
@@ -72,6 +72,16 @@ def describe(summary: dict, out: Callable[[str], None]) -> None:
         out(f"  {a['id']} · {a['name']} #{a['jersey_number']} · {a['sport']} · physiological {b(a['physiological'])} · tracking {b(a['tracking'])} · periods {a['periods']}")
     s = summary.get("settings_at_export") or {}
     out(f"Settings at export (informational; the destination applies its own): max gap {s.get('distance_max_gap_seconds')} s, min confidence {s.get('distance_min_confidence')}, high-speed threshold {s.get('high_speed_threshold_mps')} m/s")
+    cfg = summary.get("configuration_at_start") or {}
+    snap = cfg.get("snapshot")
+    if snap:
+        m, r, e = snap["movement"], snap["retention"], snap["engine"]
+        supplied = " · operator-supplied adapter information present (not verified)" if snap.get("operator_supplied") else ""
+        out(f"Configuration at recording start (captured by the source engine): {e['application']} {e['version']}, code revision {e['code_revision'] or 'unknown'} · "
+            f"max gap {m['distance_max_gap_seconds']} s, min confidence {m['distance_min_confidence']}, high-speed {m['high_speed_threshold_mps']} m/s · "
+            f"caps {r['physiological_retention_samples']}/{r['tracking_retention_samples']}{supplied}")
+    else:
+        out("Configuration at recording start: unavailable (not recorded for this recording, or a version 1 package); it is not reconstructed.")
 
 
 def destination_state(path: Path, package_sha256: str) -> dict:
