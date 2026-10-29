@@ -1195,6 +1195,36 @@ A null is an **empty cell**; a real zero is written as `0` or `0.0`. The
 detailed per-period `review.json` remains the place for exact samples and
 calculation details.
 
+### Proving the portable workflow (`scripts/verify_portable_workflow.py`)
+
+```bash
+python scripts/verify_portable_workflow.py          # two isolated engines, fictional data; exit 0 when every check passed
+```
+
+A source engine (rolling caps 50/50) records three fictional athletes with
+unequal rates (physiology 1 Hz, tracking 4 Hz), missing heart rates, real
+zeros, low-confidence tracking points, a gap, samples delivered late with
+their original timestamps and an equal-instant replacement, plus a
+hand-checkable athlete (speeds 2, 4, 6 m/s; heart rate 100, null, 104).
+The recording is stopped, periods are saved (two with the same label), and
+the package is exported to the run's temporary folder. The script then shows
+that dry runs write nothing (a missing destination is not created, an existing
+one stays byte-for-byte identical), that a corrupted package and a forced
+failure in the middle of the sample import leave the destination unchanged,
+and that a real import followed by a destination start and restart
+reproduces the samples line for line, the roster, the recording times, the
+labels and exact bounds under new ids with a complete id mapping, and the
+single review, batch review, CSV and detailed JSON of every period, identical
+to the source under the same settings. Movement figures are cross-checked
+against an independent calculation from the samples that were sent, and the
+hand-checkable period against values worked out by hand in the script (8 m,
+0.5 s and 2.75 m at or above 5 m/s, three samples with two measured and a mean
+of 102 bpm). Finally the destination is restarted with a 3 m/s threshold: the
+reported rules and the affected figures change (1.5 s by hand) while the
+imported samples and saved selections stay identical, and the earlier snapshot
+still records 5 m/s. This is a software replay test with fictional values,
+not validation of real physiology or of wearable or camera accuracy.
+
 ### Save, restart, reopen, export: a reproducible example
 
 ```bash
