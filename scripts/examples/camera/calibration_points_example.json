@@ -1,0 +1,101 @@
+{
+  "format": "athletrix-calibration-points",
+  "format_version": 1,
+  "camera_id": "fictional-example-cam",
+  "image": {
+    "width": 960,
+    "height": 540
+  },
+  "fit_points": [
+    {
+      "label": "corner A",
+      "image": [
+        120.0,
+        420.0
+      ],
+      "field": [
+        0,
+        0
+      ]
+    },
+    {
+      "label": "corner B",
+      "image": [
+        840.0,
+        440.0
+      ],
+      "field": [
+        40,
+        0
+      ]
+    },
+    {
+      "label": "corner C",
+      "image": [
+        851.9,
+        240.7
+      ],
+      "field": [
+        40,
+        20
+      ]
+    },
+    {
+      "label": "corner D",
+      "image": [
+        185.2,
+        222.2
+      ],
+      "field": [
+        0,
+        20
+      ]
+    },
+    {
+      "label": "centre spot",
+      "image": [
+        500.0,
+        326.9
+      ],
+      "field": [
+        20,
+        10
+      ]
+    },
+    {
+      "label": "mark E",
+      "image": [
+        339.6,
+        273.6
+      ],
+      "field": [
+        10,
+        15
+      ]
+    }
+  ],
+  "check_points": [
+    {
+      "label": "check 1",
+      "image": [
+        666.7,
+        382.4
+      ],
+      "field": [
+        30,
+        5
+      ]
+    },
+    {
+      "label": "check 2",
+      "image": [
+        234.5,
+        339.6
+      ],
+      "field": [
+        5,
+        8
+      ]
+    }
+  ]
+}
