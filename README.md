@@ -1160,8 +1160,12 @@ python scripts/recording_package.py import  athletrix-recording-package-<id>-<ti
 #   --json for a machine-readable summary; exit 0 success, 1 invalid/refused/failed, 2 bad arguments
 ```
 
+- **Coordination.** A real import takes the destination's maintenance lease
+  (see "Local data inventory and removal") and refuses while an engine of this
+  version has that file open; an engine started during the import refuses to
+  open the file until the import finishes. Dry runs and `inspect` take no lease.
 - **Validation first.** The whole package is checked in memory before
-  anything is written: supported `format_version`, exactly the four members
+  anything is written: supported `format_version`, exactly that version's members (four in v1, five in v2)
   (nothing is ever extracted to disk; oversized archives are refused),
   checksums and sizes, counts, every sample against the engine's own models,
   roster membership, no duplicate or conflicting sample for one athlete,
@@ -1494,7 +1498,7 @@ windows are unchanged). The engine now adds, separately:
 
 | Measurement | Where | Clock | Meaning |
 |---|---|---|---|
-| Backend receipt time | `receipt.received_at` on every sample row; `physiological_receipt` / `tracking_receipt` in `GET /athletes/{id}/live`; `receipts.jsonl` in packages | engine UTC wall clock | read once when the request's headers reach the application, before the body is read and validated |
+| Application receipt (request-entry) time | `receipt.received_at` on every sample row; `physiological_receipt` / `tracking_receipt` in `GET /athletes/{id}/live`; `receipts.jsonl` in packages | engine UTC wall clock | read once when the engine's application begins handling the request (after the server parsed its headers, before the body is read and validated); **not** when the first byte reached the computer: network-stack and server queueing time before that point is not included |
 | Server processing interval | `Server-Timing: app;dur=<ms>` header on every response (exposed to the dashboard via CORS) | engine monotonic | from that same receipt point to the start of the response; for a sample POST it covers validation, waiting for the database lock, the write and the commit; not stored |
 | Browser request duration | developer timing panel | browser monotonic (`performance.now`) | fetch start to response body parsed |
 | Browser DOM update / next frame | developer timing panel | browser monotonic | body parsed to the cards' DOM writes done, and to the next animation frame; rendering proxies, not proof of when pixels appeared |
@@ -1503,7 +1507,10 @@ windows are unchanged). The engine now adds, separately:
 
 Rules and compatibility:
 
-- Persisted wall-clock times are UTC; durations within one process use monotonic clocks.
+- Persisted wall-clock times are UTC; durations within one process use monotonic clocks, and no monotonic reading is
+  ever stored or compared across restarts or machines.
+- Rejected samples (HTTP 422 for an invalid body, or a timestamp more than 5 s ahead of engine time) store nothing:
+  no row, no receipt, and an existing row at that instant keeps its values and receipt.
 - `receipt` is `{"received_at", "origin"}`. `origin: "this_engine"` means this engine received it live;
   `"source_engine"` means the engine where an imported recording was made received it. **Imported samples never
   appear to have been received live by the destination.** NULL (shown as `null`, counted by `receipt_count` in a
@@ -1573,9 +1580,16 @@ python scripts/local_data.py remove-athlete <athlete id> --database data/other.d
   relationships, kept records, refusals and limitations are printed. No data changes (SQLite may create empty
   `-wal`/`-shm` sidecar files when it opens a WAL database read-only). `--execute` requires `--confirm` with the
   exact id. A missing database file is never created; an unknown id changes nothing.
-- **Concurrency.** Execution takes SQLite's exclusive lock, which SQLite refuses while another connection that has
-  used the file is attached; a running engine always is, so stop it first. This is SQLite file locking, not a check
-  of process names, and it is not reliable on network file systems.
+- **Concurrency (fail closed, two layers).** Stop the engine first. (1) A cooperative maintenance lease: every engine
+  of this version holds a shared `flock` on `<database>.athletrix-lock` while its database is open; removal and
+  package import take it exclusively and refuse while it is held, and an engine refuses to open the file while a
+  tool holds it. The operating system releases it when a process exits, so a crash leaves no stale lock. (2) SQLite's
+  exclusive lock, which SQLite refuses while another connection that has read the file is attached; a running engine
+  always has (verified idle, after writes and under sustained writes). Layer 2 alone was found **not** to detect a
+  connection that has opened but not yet read the file, or an idle connection to a rollback-journal database, which
+  is why layer 1 exists. The lease is cooperative: it does not stop engines from before it existed, an `sqlite3` shell
+  or other programs (layer 2 still catches those that have read the file), and neither layer is a process check or
+  reliable on network file systems. The empty `.athletrix-lock` file stays next to the database (git-ignored).
 - **Atomic.** The plan is recomputed under the lock and applied in one transaction; any failure rolls everything back.
   Active recordings, and athletes in an active recording, are refused.
 - **Device status** is keyed by device id (the model has no athlete), and a device id may be reused, so it is only
@@ -1586,7 +1600,8 @@ python scripts/local_data.py remove-athlete <athlete id> --database data/other.d
   engines that imported them), camera footage, adapter logs, backups, Time Machine or cloud copies, or external
   systems. Free text such as recording names, period labels and operator notes is not rewritten (a note that mentions
   the athlete id is reported). It is **not** a complete consent-withdrawal or secure-erasure procedure.
-- Older databases without the newer tables or columns can be inventoried and cleaned; no schema is added.
+- Older databases without the newer tables or columns can be inventoried and cleaned; no schema is added. Receipt
+  metadata lives in the sample rows, so it is removed with them.
 
 ## One reproducible evaluation (`scripts/verify_evaluation_workflow.py`)
 
@@ -1600,9 +1615,10 @@ by the script's own clock around each POST (same machine), Server-Timing never a
 package round trip with snapshot and receipts arriving as `source_engine`, identical samples and reviews, a version 1
 package and a database with the tables as written before this batch, removal dry run, an athlete removal that leaves
 the other athlete's samples and reviews identical, a recording removal that keeps rolling data and the other
-recording, a forced failure that rolls back and a running engine that blocks execution. The JSON report under
-`reports/` (ignored by git) lists expected versus actual per check, failures, unknowns and limitations. Measured on
-this Mac on 2026-10-28: 43 of 43 checks passed.
+recording, a forced failure that rolls back, imported settings that do not change the destination's own, and a
+real running engine that makes removal and import refuse with nothing changed. Each removal scenario runs on its own
+copy of a stopped database. The JSON report under `reports/` (ignored by git) lists expected versus actual per check
+(pass/fail), unknowns and limitations. Measured on this Mac on 2026-10-28: 46 of 46 checks passed.
 
 ## Before real-device or human-participant evaluation
 

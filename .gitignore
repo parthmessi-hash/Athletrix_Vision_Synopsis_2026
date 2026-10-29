@@ -14,3 +14,5 @@ data/
 
 # validation reports written by scripts/validate_team_scale.py
 reports/
+# maintenance lease files next to local databases (app/core/db_lease.py)
+*.athletrix-lock

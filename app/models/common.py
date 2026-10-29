@@ -33,11 +33,12 @@ class Posture(StrEnum):
 
 
 class SampleReceipt(AthletrixModel):
-    """When an engine received a sample live: receipt metadata, never the sample's identity or ordering key.
+    """When an engine's application received a sample live: receipt metadata, never the sample's identity or ordering key.
 
-    `received_at` is the receiving engine's UTC wall clock at request receipt; it is on a different clock from the
+    `received_at` is the receiving engine's UTC wall clock when its application began handling the request (request
+    entry, before the body was read); it is not when the first byte reached the computer. it is on a different clock from the
     sample's own `timestamp` (the sender's), so their difference mixes delivery delay with any clock offset.
     """
 
-    received_at: AwareDatetime = Field(..., description="Receiving engine's UTC wall clock when the request reached it.")
+    received_at: AwareDatetime = Field(..., description="Application receipt (request-entry) time: the receiving engine's UTC wall clock when its application began handling the request.")
     origin: Literal["this_engine", "source_engine"] = Field(..., description="this_engine: received live here; source_engine: received by the engine where an imported recording was made.")

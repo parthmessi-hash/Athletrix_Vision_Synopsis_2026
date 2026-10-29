@@ -27,9 +27,9 @@ WHAT IMPORT DOES
 
   The archive is read in memory by exact member name; nothing is extracted to disk, and oversized archives are refused.
 
-  Stop the destination engine before importing into its database, or import into a separate file, so a running backend
-  and this tool do not write the same file at once (SQLite would serialise them, but a running engine would not show
-  the new recording in views it already rendered).
+  Stop the destination engine before importing into its database, or import into a separate file. The import takes the
+  database's maintenance lease (app/core/db_lease.py) and refuses while an engine of this version has the file open; an
+  engine started during the import refuses to open it until the import finishes.
 
 EXIT CODES
   0 success (or a clean dry run) · 1 the package is invalid or the import was refused or failed · 2 bad arguments
@@ -48,6 +48,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.recording_package import MAX_PACKAGE_BYTES, PackageError, read_package  # noqa: E402
+from app.core.db_lease import Lease, LeaseUnavailable  # noqa: E402
 from app.db import Database  # noqa: E402
 from app.store.recording_import import AlreadyImported, import_package, previous_imports  # noqa: E402
 
@@ -148,7 +149,12 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
             else:
                 out("An import would create one new stopped recording with new ids; the registry, rolling history and any active recording would not change.")
         return 1 if refused else 0
-    db = Database(dest)
+    try:
+        lease = Lease(dest, exclusive=True)   # refuses while an engine (or another tool) uses this file; see app/core/db_lease.py
+    except LeaseUnavailable as exc:
+        out(f"REFUSED: {exc}")
+        return 1
+    db = Database(dest, lease=False)
     try:
         res = import_package(db, pkg, now(), allow_duplicate=args.allow_duplicate, checkpoint=checkpoint)
     except AlreadyImported as exc:
@@ -159,6 +165,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
         return 1
     finally:
         db.close()
+        lease.release()
     result = {"ok": True, "recording_id": res.recording_id, "source_recording_id": res.source_recording_id, "period_id_map": res.period_id_map, "samples": res.samples, "imported_at": res.imported_at.isoformat()}
     if args.json:
         out(json.dumps({**result, "package": summary}, indent=2))

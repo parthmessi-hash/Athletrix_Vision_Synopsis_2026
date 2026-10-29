@@ -17,9 +17,10 @@ folder and on free localhost ports, and is removed at the end)
      the export-time settings and reviews follow the new value. Exports the package, inspects it, dry-runs and imports
      it into a destination engine: the snapshot and receipts arrive with origin "source_engine", samples and reviews
      are identical.
-  4. Removal (engines stopped): a dry run changes no data; removing eval-01 in the destination leaves eval-02's
-     recorded samples and reviews identical; a forced failure part-way rolls back completely; removing R1 in the
-     source keeps R2 and all rolling data; a running engine blocks execution.
+  4. Removal: a running destination engine makes removal and import refuse with nothing changed. Then each
+     scenario runs on its own copy of a stopped database, so one cannot invalidate another: dry runs change no data;
+     a forced failure part-way rolls back completely; removing eval-01 leaves eval-02's recorded samples and reviews
+     identical (checked on an engine started on that copy); removing R1 keeps R2 and all rolling data.
   5. Older formats: a version 1 package (no snapshot, no receipts) and a database with the tables as written before
      this batch both open, report the snapshot as unavailable and receipts as absent, export, import and clean up.
   Writes a short JSON report (reports/ is ignored by git): expected versus actual per check, failures, unknowns and
@@ -155,7 +156,7 @@ class Checks:
 
     def __call__(self, name: str, expected, actual, ok: bool | None = None) -> bool:
         passed = (expected == actual) if ok is None else bool(ok)
-        self.items.append({"check": name, "expected": expected, "actual": actual, "passed": passed})
+        self.items.append({"check": name, "expected": expected, "actual": actual, "passed": passed, "status": "pass" if passed else "fail"})
         return passed
 
 
@@ -282,6 +283,8 @@ def run(out: Callable[[str], None], workdir: Path, backend_factory: Callable = B
             check("samples identical after the round trip", True, same)
             dbatch = {a: c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{a}/period-reviews").json() for a in (A1, A2)}
             check("batch reviews identical under the same settings", [[strip(i["review"]) for i in batch[a]["items"]] for a in (A1, A2)], [[strip(i["review"]) for i in dbatch[a]["items"]] for a in (A1, A2)])
+            check("the imported start snapshot does not change the destination's own settings (snapshot 4.0, destination reviews 6.0)", [4.0, 6.0],
+                  [dcfg["snapshot"]["movement"]["high_speed_threshold_mps"], dbatch[A1]["distance_rules"]["high_speed_threshold_mps"]])
             v1 = to_v1(package)
             (workdir / "evaluation-v1.zip").write_bytes(v1)
         dest.stop()
@@ -293,45 +296,70 @@ def run(out: Callable[[str], None], workdir: Path, backend_factory: Callable = B
             v1_detail = c.get(f"{dest.base_url}/api/v1/recordings/{v1_id}").json()
             check("version 1 import: snapshot unavailable, no receipts", ["unavailable", 0], [v1_detail["configuration_at_start"]["status"], sum(e[s]["receipt_count"] for e in v1_detail["recorded"] for s in ("physiological", "tracking"))])
             check("version 1 import: same samples", True, c.get(f"{dest.base_url}/api/v1/recordings/{v1_id}/athletes/{A2}/recorded-samples.jsonl").text.splitlines() == [json.dumps(x, ensure_ascii=False) for x in rows[A2]])
+            running_before = dump(dest.db_path)
             code, text = cli(local_data.main, "remove-athlete", A1, "--database", dest.db_path, "--execute", "--confirm", A1)
-            check("removal refused while the destination engine runs", True, code == 1 and "another connection has it open" in text)
+            check("removal refused while the destination engine runs", True, code == 1 and "REFUSED" in text)
+            code, text = cli(recording_package.main, "import", pkg_path, "--database", dest.db_path, "--allow-duplicate")
+            check("import refused while the destination engine runs", True, code == 1 and "REFUSED" in text)
+            check("nothing changed while the engine ran", True, dump(dest.db_path) == running_before)
         dest.stop()
 
-        # ---- removal on the stopped destination ----
-        before_hash = file_hash(dest.db_path)
-        code, text = cli(local_data.main, "remove-athlete", A1, "--database", dest.db_path, "--json")
-        plan = json.loads(text)
-        check("athlete dry run changes no data", [0, before_hash], [code, file_hash(dest.db_path)])
-        before_dump = dump(dest.db_path)
+        # ---- independent removal scenarios, each on its own copy of a stopped database ----
+        def copy_of(src: Path, name: str) -> Path:
+            target = workdir / name
+            a, b2 = sqlite3.connect(f"file:{src}?mode=ro", uri=True), sqlite3.connect(target)
+            a.backup(b2); b2.close(); a.close()
+            return target
+
+        def engine_on(path: Path):
+            e = backend_factory(extra={"HIGH_SPEED_THRESHOLD_MPS": "6.0"})
+            e.db_path.write_bytes(path.read_bytes())
+            e.start()
+            return e
+
+        dry = copy_of(dest.db_path, "scenario-dry-run.db")
+        before_hash, before_dump = file_hash(dry), dump(dry)
+        code, text = cli(local_data.main, "remove-athlete", A1, "--database", dry, "--json")
+        cli(local_data.main, "remove-recording", new_r1, "--database", dry)
+        check("dry runs change no data (file bytes and contents)", [0, before_hash, True], [code, file_hash(dry), dump(dry) == before_dump])
+
+        failing = copy_of(dest.db_path, "scenario-failure.db")
+        before_dump = dump(failing)
         def boom(stage, calls=[]):  # noqa: B006
             calls.append(stage)
             if len(calls) == 2:
                 raise RuntimeError("simulated failure part-way")
-        code, text = cli(local_data.main, "remove-athlete", A1, "--database", dest.db_path, "--execute", "--confirm", A1, checkpoint=boom)
-        check("failed deletion rolls back completely", [1, True], [code, dump(dest.db_path) == before_dump])
-        code, text = cli(local_data.main, "remove-athlete", A1, "--database", dest.db_path, "--execute", "--confirm", A1)
-        check("athlete removal executes", 0, code)
-        left = sum(query(dest.db_path, f"SELECT COUNT(*) FROM {t} WHERE athlete_id = ?", A1)[0][0] for t in ("recording_athletes", "recording_physiological_samples", "recording_tracking_samples", "recording_periods"))
-        check("no rows of the removed athlete remain", 0, left)
-        dest.start()
-        with httpx.Client(timeout=30) as c:
-            d = dest.base_url
-            kept = c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{A2}/recorded-samples.jsonl").text.splitlines() == [json.dumps(x, ensure_ascii=False) for x in rows[A2]]
-            kept_batch = [strip(i["review"]) for i in c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{A2}/period-reviews").json()["items"]] == [strip(i["review"]) for i in dbatch[A2]["items"]]
-            gone = c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{A1}/period-reviews").status_code
-            check("the other athlete's samples and reviews are intact; the removed one is no longer a member", [True, True, 404], [kept, kept_batch, gone])
-        dest.stop()
+        code, text = cli(local_data.main, "remove-athlete", A1, "--database", failing, "--execute", "--confirm", A1, checkpoint=boom)
+        check("failed deletion rolls back completely", [1, True], [code, dump(failing) == before_dump])
 
-        # ---- recording removal on the stopped source ----
-        rolling_before = {t: query(source.db_path, f"SELECT * FROM {t} ORDER BY 1, 2") for t in ("athletes", "physiological_samples", "tracking_samples")}
-        code, _ = cli(local_data.main, "remove-recording", r1, "--database", source.db_path, "--execute", "--confirm", r1)
+        athlete_copy = copy_of(dest.db_path, "scenario-athlete.db")
+        code, text = cli(local_data.main, "remove-athlete", A1, "--database", athlete_copy, "--execute", "--confirm", A1)
+        check("athlete removal executes", 0, code)
+        left = sum(query(athlete_copy, f"SELECT COUNT(*) FROM {t} WHERE athlete_id = ?", A1)[0][0] for t in ("recording_athletes", "recording_physiological_samples", "recording_tracking_samples", "recording_periods"))
+        check("no rows of the removed athlete remain", 0, left)
+        e = engine_on(athlete_copy)
+        try:
+            with httpx.Client(timeout=30) as c:
+                d = e.base_url
+                kept = c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{A2}/recorded-samples.jsonl").text.splitlines() == [json.dumps(x, ensure_ascii=False) for x in rows[A2]]
+                kept_batch = [strip(i["review"]) for i in c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{A2}/period-reviews").json()["items"]] == [strip(i["review"]) for i in dbatch[A2]["items"]]
+                gone = c.get(f"{d}/api/v1/recordings/{new_r1}/athletes/{A1}/period-reviews").status_code
+                check("the other athlete's samples and reviews are intact; the removed one is no longer a member", [True, True, 404], [kept, kept_batch, gone])
+        finally:
+            e.cleanup()
+
+        rec_copy = copy_of(source.db_path, "scenario-recording.db")
+        rolling_before = {t: query(rec_copy, f"SELECT * FROM {t} ORDER BY 1, 2") for t in ("athletes", "physiological_samples", "tracking_samples")}
+        code, _ = cli(local_data.main, "remove-recording", r1, "--database", rec_copy, "--execute", "--confirm", r1)
         check("recording removal executes", 0, code)
-        check("removed recording leaves no rows", 0, sum(query(source.db_path, f"SELECT COUNT(*) FROM {t} WHERE recording_id = ?", r1)[0][0] for t in ("recording_athletes", "recording_physiological_samples", "recording_tracking_samples", "recording_periods", "recording_configurations")))
-        check("rolling data and the registry unchanged", True, {t: query(source.db_path, f"SELECT * FROM {t} ORDER BY 1, 2") for t in rolling_before} == rolling_before)
-        source.start()
-        with httpx.Client(timeout=30) as c:
-            check("the other recording is intact", r2_jsonl, c.get(f"{source.base_url}/api/v1/recordings/{r2}/athletes/{A3}/recorded-samples.jsonl").text)
-        source.stop()
+        check("removed recording leaves no rows", 0, sum(query(rec_copy, f"SELECT COUNT(*) FROM {t} WHERE recording_id = ?", r1)[0][0] for t in ("recording_athletes", "recording_physiological_samples", "recording_tracking_samples", "recording_periods", "recording_configurations")))
+        check("rolling data and the registry unchanged", True, {t: query(rec_copy, f"SELECT * FROM {t} ORDER BY 1, 2") for t in rolling_before} == rolling_before)
+        e = engine_on(rec_copy)
+        try:
+            with httpx.Client(timeout=30) as c:
+                check("the other recording is intact", r2_jsonl, c.get(f"{e.base_url}/api/v1/recordings/{r2}/athletes/{A3}/recorded-samples.jsonl").text)
+        finally:
+            e.cleanup()
 
         # ---- a database with the tables as written before this batch ----
         older = Backend()
@@ -363,6 +391,7 @@ def run(out: Callable[[str], None], workdir: Path, backend_factory: Callable = B
         dest.cleanup()
 
     unknowns.append("Receipt bounds are checked against this script's clock on the same machine; with a separate sender or another computer, source-to-receipt differences mix delivery delay with clock offset.")
+    unknowns.append("Receipt time is application request entry; time in the network stack and in the server before the application sees a request is not measured.")
     return {"tool": "verify_evaluation_workflow", "generated_at": datetime.now(UTC).isoformat(), "fictional_data": True,
             "checks": check.items, "failures": [i["check"] for i in check.items if not i["passed"]], "unknowns": unknowns,
             "measured_on_this_machine": {"posts": len(posts), "server_timing_ms": {"median": server_ms[len(server_ms) // 2], "max": server_ms[-1]},

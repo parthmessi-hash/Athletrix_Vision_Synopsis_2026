@@ -15,10 +15,14 @@ Two scopes:
 A plan is computed first and reported exactly (tables, row counts, relationships, refusals, limitations). Execution
 recomputes the plan inside one exclusive transaction and deletes in it; any failure rolls everything back.
 
-Concurrent access: execution opens the file with SQLite's EXCLUSIVE locking mode and BEGIN EXCLUSIVE. SQLite refuses
-that while any other connection that has used the file is attached (a running engine always is, since it creates its
-schema on open), and while it is held no engine can open the file. This is SQLite's own file locking, not a process
-check; it is unreliable on network file systems that do not implement locks.
+Concurrent access (fail closed, two layers):
+  1. the cooperative maintenance lease (app/core/db_lease.py): an engine of this version holds it shared while its
+     database is open, so execution refuses while one runs, and no engine of this version opens the file meanwhile;
+  2. SQLite's EXCLUSIVE locking mode plus BEGIN EXCLUSIVE, which SQLite refuses while another connection that has read
+     the file is attached. A running engine always has (it creates its schema on open); tested idle, after writes and
+     under sustained writes. It does NOT detect a connection that was opened but has not read the file yet, or an idle
+     connection to a database in rollback-journal mode; that is why layer 1 exists.
+Neither layer is a process check, and neither is reliable on network file systems. Stop the engine before removal.
 
 Removal is logical deletion. `secure_delete` is enabled for the transaction so SQLite overwrites the freed content it
 writes, and the WAL is checkpointed and truncated afterwards, but copies may remain in file-system blocks, snapshots,
@@ -33,6 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.core.db_lease import Lease, LeaseUnavailable
 from app.store.recordings import TABLES as RECORDING_SAMPLE_TABLES
 
 ROLLING_SAMPLE_TABLES = ("physiological_samples", "tracking_samples")
@@ -250,7 +255,20 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
 # ---- execution --------------------------------------------------------------------------------------------------------------
 
 def execute(path: Path, make_plan: Callable[[sqlite3.Connection], Plan], *, checkpoint: Callable[[str], None] | None = None) -> Plan:
-    """Recompute the plan under an exclusive lock and apply it in that one transaction; roll back on any failure."""
+    """Recompute the plan under both locks and apply it in one transaction; roll back on any failure."""
+    if not path.is_file():
+        raise FileNotFoundError(f"{path} does not exist; nothing to remove (no file was created)")
+    try:
+        lease = Lease(path, exclusive=True)
+    except LeaseUnavailable as exc:
+        raise DatabaseInUse(str(exc)) from exc
+    try:
+        return _execute_locked(path, make_plan, checkpoint)
+    finally:
+        lease.release()
+
+
+def _execute_locked(path: Path, make_plan, checkpoint) -> Plan:
     c = open_exclusive(path)          # BEGIN EXCLUSIVE is already open
     try:
         try:

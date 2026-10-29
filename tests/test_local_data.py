@@ -178,8 +178,8 @@ def test_removing_a_recording_keeps_rolling_data_and_other_recordings(client, wo
     assert after == {k: v for k, v in world["reviews"].items() if k[0] != r1}, "the imported copy and R3 still review identically"
 
 
-def test_a_failure_partway_rolls_everything_back_and_a_running_engine_blocks_execution(world):
-    path, r1 = world["path"], world["r1"]
+def test_a_failure_partway_rolls_everything_back(world):
+    path = world["path"]
     before = dump(path)
     calls = []
     def boom(stage):
@@ -189,13 +189,59 @@ def test_a_failure_partway_rolls_everything_back_and_a_running_engine_blocks_exe
     code, text = run("remove-athlete", "a1", "--database", path, "--execute", "--confirm", "a1", checkpoint=boom)
     assert code == 1 and "rolled back completely" in text and len(calls) == 3
     assert dump(path) == before
-    engine = Database(path)   # an engine holding the file open, as a running backend does
+
+
+def test_concurrent_access_is_refused_by_both_layers(world):
+    path, r1 = world["path"], world["r1"]
+    before = dump(path)
+    engine = Database(path)   # an engine of this version: holds the shared maintenance lease while open
     try:
         code, text = run("remove-recording", r1, "--database", path, "--execute", "--confirm", r1)
-        assert code == 1 and "another connection has it open" in text
+        assert code == 1 and "holds its lease" in text and "nothing was changed" in text
     finally:
         engine.close()
+    older = sqlite3.connect(path)   # a client outside the lease (an older engine, a shell) that has read the file
+    older.execute("SELECT COUNT(*) FROM recordings").fetchone()
+    try:
+        code, text = run("remove-recording", r1, "--database", path, "--execute", "--confirm", r1)
+        assert code == 1 and "another connection has it open" in text, "the SQLite layer still catches it"
+    finally:
+        older.close()
+    from app.core.db_lease import Lease, LeaseUnavailable
+    with Lease(path, exclusive=True):   # a maintenance tool at work: the engine refuses to open the file
+        with pytest.raises(LeaseUnavailable, match="maintenance tool"):
+            Database(path)
     assert dump(path) == before
+
+
+def test_a_real_running_engine_blocks_removal_and_import(world, tmp_path, client):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from validate_team_scale import IsolatedBackend
+    spec = importlib.util.spec_from_file_location("recording_package_cli2", Path(__file__).resolve().parents[1] / "scripts" / "recording_package.py")
+    pkg_cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(pkg_cli)
+    db = Database(world["path"]); set_database(db)
+    try:
+        package = tmp_path / "r1.zip"
+        package.write_bytes(client.get(f"{REC}/{world['r1']}/package.zip").content)
+    finally:
+        db.close()
+    backend = IsolatedBackend()
+    try:
+        import shutil
+        shutil.copy(world["path"], backend.db_path)
+        backend.start()
+        before = dump(backend.db_path)
+        code, text = run("remove-athlete", "a1", "--database", backend.db_path, "--execute", "--confirm", "a1")
+        assert code == 1 and "REFUSED" in text and "nothing was changed" in text
+        lines = []
+        assert pkg_cli.main(["import", str(package), "--database", str(backend.db_path), "--allow-duplicate"], out=lines.append) == 1 and "REFUSED" in lines[0]
+        assert dump(backend.db_path) == before
+        backend.stop()
+        code, text = run("remove-athlete", "a1", "--database", backend.db_path, "--execute", "--confirm", "a1")
+        assert code == 0, "once the engine has stopped, removal proceeds"
+    finally:
+        backend.cleanup()
 
 
 def test_active_recordings_are_refused(client, world):

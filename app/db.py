@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.core.config import get_settings
+from app.core.db_lease import Lease
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS athletes (
@@ -134,10 +135,16 @@ def to_utc_iso(ts: datetime) -> str:
 
 
 class Database:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, lease: bool = True) -> None:
+        """Open (and create) the database. A file database holds a shared maintenance lease while open (see
+        app/core/db_lease.py) and refuses to open while a maintenance tool holds it; `lease=False` is only for a tool
+        that already holds the exclusive lease itself."""
         self.path = str(path)
+        self._lease = None
         if self.path != ":memory:":
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            if lease:
+                self._lease = Lease(self.path, exclusive=False)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=5.0)
         self._conn.row_factory = sqlite3.Row
@@ -172,6 +179,8 @@ class Database:
             if not self.closed:
                 self._conn.close()
                 self.closed = True
+                if self._lease is not None:
+                    self._lease.release()
 
 
 # ---- process-wide current database ----------------------------------------

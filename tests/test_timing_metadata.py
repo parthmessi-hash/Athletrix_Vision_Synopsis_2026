@@ -147,3 +147,17 @@ def test_older_databases_gain_the_nullable_column_and_keep_their_rows(client, cl
         assert client.get("/api/v1/athletes/a1/live").json()["physiological_receipt"]["received_at"] == "2026-10-27T18:00:00Z"
     finally:
         db.close()
+
+
+def test_rejected_samples_store_nothing_and_leave_existing_receipts(client, clocks):
+    clocks["now"] = T0 + timedelta(seconds=10)
+    clocks["receipt"] = T0 + timedelta(seconds=10, milliseconds=5)
+    hr(client, "a1", T0, 100)
+    first = client.get("/api/v1/athletes/a1/live").json()["physiological_receipt"]
+    clocks["receipt"] = T0 + timedelta(seconds=11)
+    bad = client.post("/api/v1/samples/physiological", json={"athlete_id": "a1", "timestamp": z(T0), "source": "simulated", "device_id": "sim", "heart_rate_bpm": 5})
+    future = client.post("/api/v1/samples/physiological", json={"athlete_id": "a1", "timestamp": z(T0 + timedelta(seconds=30)), "source": "simulated", "device_id": "sim", "heart_rate_bpm": 120})
+    assert bad.status_code == 422 and future.status_code == 422
+    live = client.get("/api/v1/athletes/a1/live").json()
+    assert live["physiological"]["heart_rate_bpm"] == 100 and live["physiological_receipt"] == first and live["physiological_newest_ahead_seconds"] is None
+    assert len(client.get("/api/v1/athletes/a1/physiological/history?limit=10").json()) == 1

@@ -571,7 +571,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (687 tests as of 2026-10-28)
+# engine: full suite, isolated temporary databases (690 tests as of 2026-10-28)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -643,9 +643,9 @@ open "http://localhost:3000/?engine=0#demo"
 |-----------|-------|
 | 1. Loopback startup instructions | Done: both READMEs, status commands and the public page's help use `--host 127.0.0.1` / `--bind 127.0.0.1`; `lsof` listener check documented; the engine does not enforce binding |
 | 2. Configuration snapshot at recording start | Done: `configuration_at_start` (snapshot v1, `CODE_REVISION`, optional unverified `adapter_configuration`), kept through restarts, packages (format v2) and imports; older recordings and v1 packages report "unavailable" |
-| 3. Timing instrumentation | Done: per-row `receipt` (`this_engine` / `source_engine`), `Server-Timing`, `GET /clock`, receipts in the live snapshot and `receipts.jsonl`; opt-in `?timing=1` dashboard panel; one foreground measurement recorded in the README (receipt to DOM median about 0.5 s with a 1 s poll, estimate ± 6.8 ms) |
-| 4. Local data inventory and removal | Done: `scripts/local_data.py` (recording / athlete scopes, dry run, exact-id confirmation, SQLite exclusive lock, one transaction, rollback); logical deletion only |
-| 5. One reproducible evaluation | Done: `scripts/verify_evaluation_workflow.py`, 43 of 43 checks |
+| 3. Timing instrumentation | Done: per-row `receipt` (application receipt = request-entry time, not network arrival; `this_engine` / `source_engine`), `Server-Timing`, `GET /clock`, receipts in the live snapshot and `receipts.jsonl`; opt-in `?timing=1` dashboard panel; one foreground measurement recorded in the README (receipt to DOM median about 0.5 s with a 1 s poll, estimate ± 6.8 ms) |
+| 4. Local data inventory and removal | Done: `scripts/local_data.py` (recording / athlete scopes, dry run, exact-id confirmation, one transaction, rollback); fail-closed concurrency: cooperative `flock` lease held by every engine and taken by removal and import, plus SQLite's exclusive lock; refusal tested against a real running engine; logical deletion only |
+| 5. One reproducible evaluation | Done: `scripts/verify_evaluation_workflow.py`, 46 of 46 checks, each removal scenario on its own database copy |
 | 6. Documentation and final verification | Done: README sections, this checkpoint, full suite, browser harness 62 of 62, dashboard checks |
 
 Still not established: real device clocks and adapters, display timing on the sideline computer, removal beyond one

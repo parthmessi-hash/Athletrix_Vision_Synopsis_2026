@@ -1,12 +1,16 @@
 """Receipt time and server processing interval for API requests (developer timing instrumentation).
 
 Definitions (see README "Timing instrumentation"):
-  - Backend receipt time: this engine's UTC wall clock, read once by this middleware when the request's headers reach
-    the application (before the body is read, parsed and validated). For an accepted sample it is stored with the row
+  - Application receipt time (request entry): this engine's UTC wall clock, read once by this middleware when the
+    application begins handling the request, after the server has parsed its headers and before the body is read,
+    parsed and validated. It is NOT when the first byte reached the computer or the server's socket; time spent in
+    the network stack and in uvicorn before the application sees the request is not included. For an accepted sample it is stored with the row
     as receipt metadata (`{"received_at": ..., "origin": "this_engine"}`); it is never the sample's identity or order.
   - Server processing interval: the monotonic time from that same point to the start of the response, sent as
     `Server-Timing: app;dur=<milliseconds>`. For a sample POST it covers body read, validation, the wait for the
-    database lock, the write and the commit. It is not stored, and it excludes network time on either side.
+    database lock, the write and the commit. It is not stored, and it excludes network time on either side. Monotonic
+    readings are only ever subtracted within this process; none is persisted or compared across restarts or machines.
+Rejected requests (invalid bodies, future-dated samples) store nothing, so no receipt exists for them.
 The middleware is outermost, so it also adds `Server-Timing` to `Access-Control-Expose-Headers` for cross-origin
 requests (merged with whatever a route already exposes), letting the dashboard read the header.
 """
