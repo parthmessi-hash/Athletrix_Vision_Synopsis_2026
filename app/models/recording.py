@@ -67,10 +67,22 @@ class RecordedAthlete(AthletrixModel):
     tracking: RecordedStream
 
 
+class RecordingProvenance(AthletrixModel):
+    """Where an imported recording came from: the original recording id, the package and the id mapping of its saved periods."""
+
+    source_recording_id: str
+    package_sha256: str
+    package_format: str
+    package_generated_at: str
+    imported_at: AwareDatetime
+    period_id_map: dict[str, str] = Field(..., description="Original saved-period id -> id on this engine.")
+
+
 class RecordingDetail(Recording):
     """A recording with its per-athlete recorded counts and bounds (the samples accepted for it, as stored)."""
 
     recorded: list[RecordedAthlete] = Field(..., description="One entry per selected athlete, in roster order.")
+    imported: RecordingProvenance | None = Field(None, description="Import provenance when the recording came from a portable package; null for one recorded on this engine.")
 
 
 class ActiveRecording(AthletrixModel):

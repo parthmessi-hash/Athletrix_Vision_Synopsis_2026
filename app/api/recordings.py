@@ -29,6 +29,7 @@ from app.models.recording import (
 from app.models.period import PeriodCreate, SavedPeriod
 from app.store.athletes import athlete_registry
 from app.store.periods import period_store
+from app.store.recording_import import provenance
 from app.store.recordings import RecordingConflict, recording_store
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
@@ -81,7 +82,9 @@ def get_recording(recording_id: str) -> RecordingDetail:
             p, t = recording_store.retention(rec.id, a.id, "physiological"), recording_store.retention(rec.id, a.id, "tracking")
             recorded.append(RecordedAthlete(athlete=a, physiological=RecordedStream(sample_count=p.count, earliest_timestamp=p.earliest, latest_timestamp=p.latest),
                                             tracking=RecordedStream(sample_count=t.count, earliest_timestamp=t.earliest, latest_timestamp=t.latest)))
-    return RecordingDetail(**rec.model_dump(), recorded=recorded)
+        with get_database().read() as c:
+            imported = provenance(c, rec.id)
+    return RecordingDetail(**rec.model_dump(), recorded=recorded, imported=imported)
 
 
 # ---- session review: queries over one recording's samples only -------------------------------------------------------

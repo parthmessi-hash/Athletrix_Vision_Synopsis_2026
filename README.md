@@ -1116,6 +1116,49 @@ unchanged. The format is defined in `app/core/recording_package.py`.
 curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/package.zip"
 ```
 
+### Inspecting and importing a package locally (`scripts/recording_package.py`)
+
+```bash
+python scripts/recording_package.py inspect athletrix-recording-package-<id>-<time>.zip                       # validate and summarise; opens no database
+python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/dest.db --dry-run
+python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/dest.db
+python scripts/recording_package.py import  athletrix-recording-package-<id>-<time>.zip --database /path/to/dest.db --allow-duplicate
+#   --json for a machine-readable summary; exit 0 success, 1 invalid/refused/failed, 2 bad arguments
+```
+
+- **Validation first.** The whole package is checked in memory before
+  anything is written: supported `format_version`, exactly the four members
+  (nothing is ever extracted to disk; oversized archives are refused),
+  checksums and sizes, counts, every sample against the engine's own models,
+  roster membership, no duplicate or conflicting sample for one athlete,
+  stream and instant, saved periods against the effort rules (label, timezone,
+  1 to 120 s, not ending after their creation), and the timestamp policy below.
+- **Dry run** (`--dry-run`) validates everything and looks at the destination
+  read-only (does it exist, was this package already imported there); it
+  writes nothing and does not even create the file.
+- **Import** needs an explicit `--database` and writes, in **one
+  transaction**, a new stopped recording with the original name, start and
+  stop times, the roster snapshot, every sample exactly as normalised in the
+  package and every saved period with its original label and exact bounds,
+  all under **new ids**. A `recording_imports` row keeps the provenance:
+  the original recording id, the package SHA-256, format and generation time,
+  the import time and the mapping of original period ids to new ones;
+  `GET /recordings/{id}` shows it as `imported`. Any failure rolls the whole
+  import back.
+- **Never touched:** the athlete registry (the roster snapshot is enough),
+  rolling history, device status, an active recording, or any existing
+  recording. Nothing is overwritten or merged.
+- **Repeated import:** a package already imported into that database (same
+  SHA-256) is refused; `--allow-duplicate` imports it as a separate recording
+  with its own new ids and provenance row.
+- **Timestamp policy:** an import is historical data, not live ingestion.
+  Recording times and sample timestamps are kept exactly; nothing is rebased
+  and arrival-time rules are not re-applied, except that no sample may be
+  timestamped more than the live 5 s skew allowance after the recording's stop
+  time, because a live engine could not have accepted it.
+- Import into a separate file, or stop the destination engine first, so a
+  running backend and the tool do not use one file at the same time.
+
 ### Save, restart, reopen, export: a reproducible example
 
 ```bash

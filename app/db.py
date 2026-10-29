@@ -97,6 +97,15 @@ CREATE TABLE IF NOT EXISTS recording_periods (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recording_periods_by_athlete ON recording_periods (recording_id, athlete_id, start_utc);
+CREATE TABLE IF NOT EXISTS recording_imports (
+    recording_id         TEXT PRIMARY KEY,
+    source_recording_id  TEXT NOT NULL,
+    package_sha256       TEXT NOT NULL,
+    package_format       TEXT NOT NULL,
+    package_generated_at TEXT NOT NULL,
+    imported_at          TEXT NOT NULL,
+    period_id_map        TEXT NOT NULL
+);
 """
 
 
