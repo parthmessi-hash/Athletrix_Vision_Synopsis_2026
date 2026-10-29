@@ -142,3 +142,10 @@ def test_active_unknown_nonmember_and_no_periods(client, scene, frozen):
     empty = client.get(f"{REC}/{live}/athletes/a3/period-reviews").json()
     assert empty["items"] == [] and empty["rules"]["before_seconds"] == 10.0
     assert client.get(f"{REC}/{live}/athletes/a3/period-reviews.csv").text.count("\r\n") == 1, "only the header row"
+
+
+def test_inventory_counts_per_recording(client, scene):
+    inv = client.get(f"{REC}/inventory").json()
+    assert len(inv) == 1 and inv[0]["id"] == scene and inv[0]["status"] == "stopped"
+    assert (inv[0]["roster_size"], inv[0]["physiological_samples"], inv[0]["tracking_samples"], inv[0]["saved_periods"], inv[0]["imported"]) == (2, 11, 11, 4, False)
+    assert inv[0]["athletes"][0]["id"] == "a1", "the plain recording fields are kept, so list consumers keep working"

@@ -51,6 +51,16 @@ class Recording(AthletrixModel):
     athletes: list[Athlete] = Field(..., description="Roster snapshot of the selected athletes as registered at the start.")
 
 
+class RecordingInventoryItem(Recording):
+    """A recording with the size of what it holds: roster size, recorded samples per stream (all athletes), saved periods, import flag."""
+
+    roster_size: int = Field(..., ge=0)
+    physiological_samples: int = Field(..., ge=0)
+    tracking_samples: int = Field(..., ge=0)
+    saved_periods: int = Field(..., ge=0)
+    imported: bool = Field(..., description="True when the recording came from a portable package (see the recording detail for provenance).")
+
+
 class RecordedStream(AthletrixModel):
     """Count and recorded-timestamp bounds of one athlete's samples in one stream of a recording. Not coverage."""
 

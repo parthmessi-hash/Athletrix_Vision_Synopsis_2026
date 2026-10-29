@@ -230,6 +230,7 @@ Endpoints, all under `/api/v1`:
 | `GET /athletes/{id}/retained-samples.jsonl` | Download of every retained sample for the athlete, both streams, as replayable JSON Lines (`application/x-ndjson`, attachment filename, record-count headers): one consistent read, oldest first with physiological before tracking at equal instants, written as stored. 404 when neither stream has rows. A snapshot of retained rows, not an archive or backup. |
 | `POST /recordings` | Start a recording for registered athletes (201); 422 naming unknown ids or an invalid selection, nothing created; 409 while another is active |
 | `GET /recordings`, `GET /recordings/active`, `GET /recordings/{id}` | All recordings newest first; the active one or null; detail with roster snapshot and recorded counts and bounds per athlete and stream (404 unknown) |
+| `GET /recordings/inventory` | Every recording (newest first) with the plain recording fields plus `roster_size`, `physiological_samples`, `tracking_samples`, `saved_periods` and `imported`; one read |
 | `POST /recordings/{id}/stop` | Stop at backend time now; an already stopped recording is returned unchanged |
 | `GET /recordings/{id}/athletes/{aid}/period-reviews`, `.../period-reviews.csv` | Batch review of the athlete's saved periods in a stopped recording (409 while active): one captured time, one settings capture, one read, the single review's functions; listed by start, never ranked; CSV with documented columns, empty cells for null, formula-safe labels |
 | `GET /recordings/{id}/package.zip` | Portable package of a stopped recording (409 while active): `manifest.json` (format `athletrix-recording-package/1`, checksums, counts, settings at export), `recording.json` (times and roster snapshot), `samples.jsonl` (every recorded sample in the interchange format), `periods.json`; one read; not a database backup |
@@ -574,7 +575,7 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "58 tests, 58 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "60 tests, 60 passed"
 # recording flow on an isolated backend (seconds; exit 0 means every check passed)
 python scripts/verify_recording_flow.py
 # saved-period workflow on an isolated backend (seconds; exit 0 means every check passed)

@@ -24,7 +24,7 @@ from app.core.recording_package import FORMAT as PACKAGE_FORMAT, FORMAT_VERSION 
 from app.core.summary import summarize_window
 from app.db import get_database
 from app.models import Athlete, TrackingRules
-from app.models.recording import AppliedDistanceRules, PeriodBatchReview, PeriodReviewItem
+from app.models.recording import AppliedDistanceRules, PeriodBatchReview, PeriodReviewItem, RecordingInventoryItem
 from app.models.recording import (
     ActiveRecording, RecordedAthlete, RecordedData, RecordedStream, Recording, RecordingDetail, RecordingEffortReview, RecordingRef, RecordingStart, RecordingSummary, RecordingWindow,
     SessionEffortAvailability, SessionHeartRateAvailability, SessionWindowAvailability,
@@ -66,6 +66,22 @@ def list_recordings() -> list[Recording]:
 def get_active_recording() -> ActiveRecording:
     """The active recording, or null. An active recording persists across backend restarts until stopped."""
     return ActiveRecording(recording=recording_store.active())
+
+
+@router.get("/inventory", response_model=list[RecordingInventoryItem])
+def recording_inventory() -> list[RecordingInventoryItem]:
+    """Every recording, newest start first, with roster size, recorded sample counts per stream, saved periods and an import flag; one read."""
+    with get_database().read() as c:
+        recs = recording_store.list()
+        def counts(table):
+            return {r[0]: r[1] for r in c.execute(f"SELECT recording_id, COUNT(*) FROM {table} GROUP BY recording_id").fetchall()}
+        phys, track, periods = counts("recording_physiological_samples"), counts("recording_tracking_samples"), counts("recording_periods")
+        try:
+            imported = {r[0] for r in c.execute("SELECT recording_id FROM recording_imports").fetchall()}
+        except Exception:  # noqa: BLE001
+            imported = set()
+    return [RecordingInventoryItem(**r.model_dump(), roster_size=len(r.athletes), physiological_samples=phys.get(r.id, 0), tracking_samples=track.get(r.id, 0),
+                                   saved_periods=periods.get(r.id, 0), imported=r.id in imported) for r in recs]
 
 
 def require_recording(recording_id: str) -> Recording:
