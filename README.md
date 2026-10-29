@@ -1153,9 +1153,17 @@ python scripts/recording_package.py import  athletrix-recording-package-<id>-<ti
   with its own new ids and provenance row.
 - **Timestamp policy:** an import is historical data, not live ingestion.
   Recording times and sample timestamps are kept exactly; nothing is rebased
-  and arrival-time rules are not re-applied, except that no sample may be
-  timestamped more than the live 5 s skew allowance after the recording's stop
-  time, because a live engine could not have accepted it.
+  and arrival-time rules are not re-applied. Because recording membership is
+  decided by acceptance while the recording is active, not by timestamp, a
+  legitimate package can hold samples timestamped **before** `started_at`
+  (delayed or replayed data) and samples up to 5 s **after** `stopped_at`
+  (accepted just before the stop within the live future-timestamp
+  allowance); both import. The only timestamp rule is the bound live
+  ingestion implies: nothing later than `stopped_at` + 5 s, which a live
+  engine could not have accepted. Tests export and import exactly these edge
+  cases (an hour-early sample, a sample 5 s after the stop, equal-instant
+  replacement in another offset, nulls, zeros, an athlete with no samples,
+  repeated labels, more rows than the rolling caps and the history page).
 - Import into a separate file, or stop the destination engine first, so a
   running backend and the tool do not use one file at the same time.
 
@@ -1256,6 +1264,9 @@ python scripts/validate_team_scale.py --athletes 20 --duration 600 --physiologic
     --physiological-cap 300 --tracking-cap 3000 --record --session-read-interval 15 --size-interval 60
 ```
 
+`--athlete-read-interval N` adds an individual coherent live read
+(`GET /athletes/{id}/live`, rotating athletes) every N seconds; each must name
+its athlete, never show a negative age and never move backwards.
 `--record` starts a recording covering every athlete before the timed run,
 adds a session window read of the active recording every
 `--session-read-interval` seconds (rotating athletes) next to the team
@@ -1270,31 +1281,43 @@ request latency (the round trip) and the recorded timestamp (the tick's own
 instant, never rewritten) are reported separately; nothing catches up by
 rewriting timestamps and nothing is dropped to hide overload.
 
-Observed on this Mac (8 CPUs, macOS, Python 3.14; fictional data, one run,
-no threshold, not a capacity or match claim):
+Observed on this Mac (8 CPUs, macOS, Python 3.14; fictional data, one run on
+2026-10-28 with team overview reads every 2 s, individual live reads every
+1 s and recording window reads every 15 s; no threshold, not a capacity,
+hardware or match claim):
+
+```bash
+python scripts/validate_team_scale.py --athletes 20 --duration 600 --physiological-rate 1 --tracking-rate 10 \
+    --physiological-cap 300 --tracking-cap 3000 --record --session-read-interval 15 --athlete-read-interval 1
+```
 
 | | Physiological 1 Hz | Tracking 10 Hz |
 |---|---|---|
 | Scheduled / attempted / accepted | 12000 / 12000 / 12000 | 120000 / 120000 / 120000 |
 | Failed / timeout (unknown) / omitted / unsent | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
 | Delivered rate | 1.0 Hz over 600.0 s | 10.0 Hz over 600.0 s |
-| Write latency p50 / p95 / max | 7.6 / 14.6 / 112.2 ms | 7.7 / 14.8 / 250.6 ms |
-| Scheduling lateness p50 / p95 / max | 17.2 / 29.5 / 75.4 ms | 18.4 / 37.5 / 358.5 ms |
+| Write latency p50 / p95 / max | 7.7 / 15.1 / 87.7 ms | 7.7 / 15.6 / 326.3 ms |
+| Scheduling lateness p50 / p95 / max | 13.0 / 25.0 / 106.6 ms | 14.1 / 34.1 / 334.1 ms |
 | Rolling rows per athlete (span) | 300 (299.0 s) | 3000 (299.9 s) |
 | Recorded rows per athlete (span) | 600 (599.0 s) | 6000 (599.9 s) |
 
-Team overview reads: 300 of 300 ok (p50 6.1 ms, p95 12.2 ms, max 15.4 ms),
-every consistency check passed. Session window reads: 40 of 40 ok (p50
-12.1 ms, p95 42.7 ms, max 78.9 ms), each naming only its athlete. Recorded
-rows equalled accepted samples for all 20 athletes and were identical after a
-backend restart. Database size: 0.4 MB at the start, 15.4 MB after 60 s,
-60.1 MB after 300 s (when the rolling caps filled), 90.0 MB at 600 s and
-unchanged after the stop and the restart; after the caps filled, growth was
-about 6 MB per minute, all of it the recording. Effort reviews of the first
-athlete (20 s each) matched the independent calculation: early 201 tracking
-samples, 16.72 m; middle 201, 159.71 m with 20.0 s at or above 5 m/s; late
-201, 25.02 m. The run took 600.09 s from start to the last response and its
-backend and temporary folder were removed afterwards.
+| Reads during the run | OK | Latency p50 / p95 / max | Checks |
+|---|---|---|---|
+| Team overview, every 2 s | 300 of 300 | 6.6 / 13.0 / 43.5 ms | all passed |
+| Individual live, every 1 s, rotating | 600 of 600 | 5.6 / 15.7 / 126.6 ms | all passed (own athlete, no negative age, never backwards) |
+| Recording window, every 15 s, rotating | 40 of 40 | 22.6 / 86.8 / 128.3 ms | all passed |
+
+Recorded rows equalled accepted samples for all 20 athletes and were identical
+after a backend restart. Database size (file plus WAL and shared-memory
+sidecars): 0.4 MB at the start, 15.4 MB after 60 s, 60.1 MB after 300 s (when
+the rolling caps filled), 90.0 MB at 600 s, unchanged after the stop and the
+restart; after the caps filled, growth was about 6 MB per minute, all of it
+the recording. Early, middle and late 20 s effort reviews of the first
+athlete matched the independent calculation (201 tracking samples each;
+16.72 m, 159.94 m with 20.0 s at or above 5 m/s, and 25.02 m). The run took
+600.13 s from start to last response; its backend and temporary folder were
+removed afterwards. An earlier run without individual live reads gave
+matching figures.
 
 ### Proving the portable workflow (`scripts/verify_portable_workflow.py`)
 

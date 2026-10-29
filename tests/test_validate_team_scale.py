@@ -537,3 +537,14 @@ def test_record_flags_parse_with_documented_defaults():
     args = vt.build_parser().parse_args(["--record"])
     assert args.record is True and args.session_read_interval == 15.0 and args.size_interval == 60.0
     assert vt.build_parser().parse_args([]).record is False, "default behaviour is unchanged"
+
+
+def test_individual_live_reads_name_their_athlete_and_never_go_backwards(client):
+    clock = FakeClock()
+    cfg = vt.RunConfig(athletes=3, duration_s=4, physiological_rate_hz=1.0, tracking_rate_hz=2.0, workers=1, read_interval_s=0, athlete_read_interval_s=0.5)
+    vt.register_team("", cfg, out=lambda s: None, client=client, clock=clock)
+    res = vt.run_load("http://test", cfg, make_client=lambda: BorrowedAll(client), clock=clock, sleep=clock.sleep, start_utc=datetime.now(UTC) - timedelta(seconds=30))
+    assert len(res.athlete_reads) == 8 and all(r.outcome == "ok" for r in res.athlete_reads)
+    assert {r.detail for r in res.athlete_reads} == {vt.athlete_id(i) for i in range(3)}, "athletes rotate"
+    assert all(v is True for r in res.athlete_reads for v in r.checks.values())
+    assert vt.build_parser().parse_args([]).athlete_read_interval == 0.0, "off unless asked for"

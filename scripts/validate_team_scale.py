@@ -333,6 +333,7 @@ class RunConfig:
     tracking_cap: int = DEFAULT_RETENTION_CAP
     recording_id: str | None = None             # an active recording covering the athletes (--record); session reads use it
     session_read_interval_s: float = 0.0        # occasional session window reads of the active recording; 0 disables them
+    athlete_read_interval_s: float = 0.0        # individual coherent live reads (GET /athletes/{id}/live), rotating athletes; 0 disables them
 
     def cap_for(self, stream: str) -> int:
         return self.physiological_cap if stream == "physiological" else self.tracking_cap
@@ -365,6 +366,7 @@ class RunResult:
     start_utc: datetime
     plan: Plan
     session_reads: list = field(default_factory=list)   # ReadRecord per session window read of the active recording
+    athlete_reads: list = field(default_factory=list)   # ReadRecord per individual live read
 
 
 def run_load(
@@ -420,6 +422,10 @@ def run_load(
         for k in range(int(cfg.duration_s // cfg.session_read_interval_s) + 1):
             if k * cfg.session_read_interval_s > 0:
                 events.append((k * cfg.session_read_interval_s, 4, "session_read", (k,)))
+    if cfg.athlete_read_interval_s > 0:
+        for k in range(int(cfg.duration_s // cfg.athlete_read_interval_s) + 1):
+            if k * cfg.athlete_read_interval_s > 0:
+                events.append((k * cfg.athlete_read_interval_s, 5, "athlete_read", (k,)))
     if cfg.read_interval_s > 0:
         n_reads = int(cfg.duration_s // cfg.read_interval_s) + 1
         for k in range(n_reads):
@@ -471,6 +477,44 @@ def run_load(
             reads.append(rec)
 
     session_reads: list[ReadRecord] = []
+    athlete_reads: list[ReadRecord] = []
+    athlete_previous: dict = {}
+
+    def athlete_read_job(k: int, due: float) -> None:
+        """GET one athlete's coherent live snapshot (rotating): it must name that athlete, never show a negative age, and never go backwards."""
+        a = athlete_id(k % cfg.athletes)
+        if clock() > deadline:
+            rec = ReadRecord(k, due, None, None, "unsent", None, {}, "deadline passed")
+        else:
+            sent = clock(); t0 = clock()
+            try:
+                r = client.get(f"{base_url}/api/v1/athletes/{a}/live")
+                latency = clock() - t0
+                if r.status_code == 200:
+                    body = r.json()
+                    checks = {"names_this_athlete": body.get("athlete_id") == a and all((body.get(s) or {}).get("athlete_id", a) == a for s in STREAMS),
+                              "ages_never_negative": all((body.get(f"{s}_age_seconds") is None) or body[f"{s}_age_seconds"] >= 0 for s in STREAMS)}
+                    with lock:
+                        prev = athlete_previous.get(a, {})
+                        ok = True
+                        for s in STREAMS:
+                            ts = (body.get(s) or {}).get("timestamp")
+                            if ts:
+                                t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                                if s in prev and t < prev[s]:
+                                    ok = False
+                                prev[s] = t
+                        athlete_previous[a] = prev
+                    checks["latest_never_goes_backwards"] = ok
+                    rec = ReadRecord(k, due, sent - start, latency, "ok", 200, checks, a)
+                else:
+                    rec = ReadRecord(k, due, sent - start, latency, "http_error", r.status_code, {}, r.text[:200])
+            except httpx.TimeoutException as exc:
+                rec = ReadRecord(k, due, sent - start, clock() - t0, "timeout", None, {}, type(exc).__name__)
+            except httpx.HTTPError as exc:
+                rec = ReadRecord(k, due, sent - start, clock() - t0, "connection_error", None, {}, type(exc).__name__)
+        with lock:
+            athlete_reads.append(rec)
 
     def session_read_job(k: int, due: float) -> None:
         """GET the active recording's 60 s window for one athlete (rotating): samples must name that athlete only."""
@@ -517,6 +561,8 @@ def run_load(
                     futures.append(pool.submit(status_job, i, status_s, battery, due))
                 elif kind == "session_read":
                     futures.append(pool.submit(session_read_job, args[0], due))
+                elif kind == "athlete_read":
+                    futures.append(pool.submit(athlete_read_job, args[0], due))
                 else:
                     futures.append(pool.submit(read_job, args[0], due))
             for f in futures:
@@ -537,7 +583,8 @@ def run_load(
     records.sort(key=lambda r: (r.scheduled_s, r.athlete, r.stream, r.tick))
     reads.sort(key=lambda r: r.tick)
     session_reads.sort(key=lambda r: r.tick)
-    return RunResult(records, reads, statuses, actual, start_utc, plan, session_reads)
+    athlete_reads.sort(key=lambda r: r.tick)
+    return RunResult(records, reads, statuses, actual, start_utc, plan, session_reads, athlete_reads)
 
 
 # ---- statistics ---------------------------------------------------------------------------------------------------
@@ -1024,9 +1071,16 @@ def effort_reviews(client: httpx.Client, base_url: str, rec_id: str, cfg: RunCon
             accepted[datetime.fromisoformat(r.payload["timestamp"])] = r
     timed_out = any(r.athlete == a and r.stream == "tracking" and r.outcome == "timeout" for r in records)
     out = []
-    for name, lo in (("early", 10.0), ("middle", cfg.duration_s / 2), ("late", cfg.duration_s - 40.0)):
-        start, end = start_utc + timedelta(seconds=lo), start_utc + timedelta(seconds=lo + 20)
-        review = client.get(f"{base_url}/api/v1/recordings/{rec_id}/athletes/{a}/effort-review", params={"effort_start": start.isoformat(), "effort_end": end.isoformat()}).json()
+    length = min(20.0, max(1.0, cfg.duration_s / 3))                 # 20 s reviews, shorter only for very short runs
+    places = (("early", min(10.0, cfg.duration_s / 6)), ("middle", (cfg.duration_s - length) / 2), ("late", max(0.0, cfg.duration_s - length - 20.0)))
+    for name, lo in places:
+        start, end = start_utc + timedelta(seconds=lo), start_utc + timedelta(seconds=lo + length)
+        resp = client.get(f"{base_url}/api/v1/recordings/{rec_id}/athletes/{a}/effort-review", params={"effort_start": start.isoformat(), "effort_end": end.isoformat()})
+        if resp.status_code != 200:
+            out.append({"name": name, "effort_start": start.isoformat(), "effort_end": end.isoformat(), "tracking_samples": None, "distance_m": None, "high_speed_s": None,
+                        "heart_rate_during": None, "matches_independent_calculation": False, "detail": f"HTTP {resp.status_code}: {resp.text[:200]}"})
+            continue
+        review = resp.json()
         exp = independent_movement([r for t, r in sorted(accepted.items()) if start <= t <= end])
         m = review["movement"]
         ok = m["sample_count"] == exp["sample_count"] and close(m["estimated_distance_m"], exp["estimated_distance_m"]) and close(m["high_speed_duration_seconds"], exp["high_speed_duration_seconds"])
@@ -1077,6 +1131,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--read-interval", type=float, default=DEFAULT_READ_INTERVAL_S, help=f"seconds between overview reads during ingestion; 0 disables them (default {DEFAULT_READ_INTERVAL_S:g})")
     p.add_argument("--record", action="store_true", help="start a recording covering every athlete before the run, stop it afterwards, and report rolling versus recorded data, database sizes, a restart check and early/middle/late effort reviews")
     p.add_argument("--session-read-interval", type=float, default=15.0, help="with --record: seconds between session window reads of the active recording; 0 disables them (default 15)")
+    p.add_argument("--athlete-read-interval", type=float, default=0.0, help="seconds between individual live reads (GET /athletes/{id}/live, rotating athletes) during the run; 0 disables them (default 0)")
     p.add_argument("--size-interval", type=float, default=60.0, help="with --record: seconds between database size checkpoints during the run (default 60)")
     p.add_argument("--scenario", choices=("healthy", "interrupted"), default="healthy", help="healthy: every sample on time; interrupted: paused tracking streams, late physiological samples and device statuses for a few athletes (needs >= 3 athletes and >= 13 ticks)")
     return p
@@ -1090,7 +1145,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
     if args.physiological_cap < 1 or args.tracking_cap < 1:
         out("retention caps must be positive integers")
         return 2
-    cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers, read_interval_s=max(0.0, args.read_interval), scenario=args.scenario,
+    cfg = RunConfig(athletes=args.athletes, duration_s=args.duration, rate_hz=args.rate, timeout_s=args.timeout, workers=args.workers, read_interval_s=max(0.0, args.read_interval), scenario=args.scenario, athlete_read_interval_s=max(0.0, args.athlete_read_interval),
                     physiological_rate_hz=args.physiological_rate, tracking_rate_hz=args.tracking_rate, physiological_cap=args.physiological_cap, tracking_cap=args.tracking_cap)
     try:
         plan = scenario_plan(cfg.scenario, cfg.athletes, cfg)
@@ -1137,6 +1192,10 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
             verification = verify(client, backend.base_url, records, cfg, start_utc)
             overview_verification = verify_overview(client, backend.base_url, records, result.statuses, cfg, plan)
         report = build_report(cfg, backend_info, records, actual_s, start_utc, verification, reads=result.reads, statuses=result.statuses, setup=setup, overview_verification=overview_verification, plan=plan)
+        ar = result.athlete_reads
+        report["athlete_live_reads"] = {"interval_s": cfg.athlete_read_interval_s, "expected": len(ar), "ok": sum(1 for x in ar if x.outcome == "ok"), "failed": sum(1 for x in ar if x.outcome not in ("ok", "unsent")),
+                                        "timeout": sum(1 for x in ar if x.outcome == "timeout"), "unsent": sum(1 for x in ar if x.outcome == "unsent"),
+                                        "checks_failed": sorted({k for x in ar for k, v in x.checks.items() if v is False}), "latency_s": summarize([x.latency_s for x in ar if x.latency_s is not None])}
         if args.record:
             out("Stopping the recording, comparing rolling and recorded data, restarting the backend and reviewing early, middle and late efforts…")
             sizes.mark("end of the run")
@@ -1179,6 +1238,11 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
         print_summary(report, out)
         out(f"JSON report: {report_path}")
         v = report["verification"]["overall"]
+        al = report["athlete_live_reads"]
+        if al["expected"]:
+            g = lambda x: "n/a" if x is None else f"{x * 1000:.1f} ms"  # noqa: E731
+            out(f"Individual live reads (GET /athletes/{{id}}/live every {al['interval_s']:g} s, rotating): {al['ok']}/{al['expected']} ok, {al['failed']} failed (timeout {al['timeout']}), {al['unsent']} unsent, checks failed {al['checks_failed'] or 'none'}, latency p50 {g(al['latency_s']['p50'])} p95 {g(al['latency_s']['p95'])} max {g(al['latency_s']['max'])}")
+            report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
         if args.record:
             rr = report["recording"]
             f = lambda x: "n/a" if x is None else f"{x * 1000:.1f} ms"  # noqa: E731
@@ -1189,14 +1253,14 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
             out(f"  session window reads: {sr['ok']}/{sr['expected']} ok, {sr['failed']} failed, {sr['unsent']} unsent, checks failed {sr['checks_failed'] or 'none'}, latency p50 {f(sr['latency_s']['p50'])} p95 {f(sr['latency_s']['p95'])} max {f(sr['latency_s']['max'])}")
             out("  database size: " + " · ".join(f"{p['label']} {p['bytes'] / 1e6:.1f} MB" for p in rr["database_bytes"]))
             for e in rr["effort_reviews"]:
-                out(f"  {e['name']:6s} effort {e['effort_start']} +20 s: {e['tracking_samples']} tracking samples, distance {e['distance_m'] if e['distance_m'] is None else round(e['distance_m'], 2)} m, high-speed {e['high_speed_s'] if e['high_speed_s'] is None else round(e['high_speed_s'], 2)} s, heart rate during {e['heart_rate_during']} · matches independent calculation: {e['matches_independent_calculation']}")
+                out(f"  {e['name']:6s} effort {e['effort_start']} to {e['effort_end']}: {e['tracking_samples']} tracking samples, distance {e['distance_m'] if e['distance_m'] is None else round(e['distance_m'], 2)} m, high-speed {e['high_speed_s'] if e['high_speed_s'] is None else round(e['high_speed_s'], 2)} s, heart rate during {e['heart_rate_during']} · matches independent calculation: {e['matches_independent_calculation']}")
             report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
         ov_ok = all(x is True for x in report["overview_verification"].get("checks", {}).values())   # unknown is not a pass
         reads_ok = not report["reads"]["checks_failed"] and report["reads"]["unsent"] == 0
-        rec_ok = True
+        rec_ok = not report["athlete_live_reads"]["checks_failed"] and report["athlete_live_reads"]["unsent"] == 0 and report["athlete_live_reads"]["failed"] == 0
         if args.record:
             rr = report["recording"]
-            rec_ok = rr["recorded_equals_accepted_per_athlete"] and rr["survives_restart"] and not rr["session_reads"]["checks_failed"] and all(e["matches_independent_calculation"] is True for e in rr["effort_reviews"])
+            rec_ok = rec_ok and rr["recorded_equals_accepted_per_athlete"] and rr["survives_restart"] and not rr["session_reads"]["checks_failed"] and all(e["matches_independent_calculation"] is True for e in rr["effort_reviews"])
         return 0 if v["failed"] == 0 and report["requests"]["unsent"] == 0 and ov_ok and reads_ok and rec_ok else 1
     finally:
         if not stopping["done"]:

@@ -148,7 +148,7 @@ python scripts/compare_retention.py --athletes 20 --duration 60 --physiological-
 
 # 3o. a 10-minute recorded run: 20 athletes, 1 Hz / 10 Hz, caps 300/3000, an active recording, team and session reads,
 #     database sizes, restart check, early/middle/late reviews (about 11 minutes; report under reports/)
-python scripts/validate_team_scale.py --athletes 20 --duration 600 --physiological-rate 1 --tracking-rate 10 --physiological-cap 300 --tracking-cap 3000 --record
+python scripts/validate_team_scale.py --athletes 20 --duration 600 --physiological-rate 1 --tracking-rate 10 --physiological-cap 300 --tracking-cap 3000 --record --session-read-interval 15 --athlete-read-interval 1
 
 # 3k. explicit local recording: start for registered athletes, inspect, stop (one active at a time; survives restarts until stopped)
 curl -s -X POST http://127.0.0.1:8000/api/v1/recordings -H 'content-type: application/json' -d '{"name":"Tuesday practice","athlete_ids":["athlete-1","athlete-2"]}'
@@ -595,7 +595,7 @@ curl -s "http://127.0.0.1:8010/api/v1/athletes/athlete-3/effort-review?effort_st
 # dashboard switch Review to Recorded, enter 2026-10-20T10:00:02Z, click Review (after replaying the example)
 
 # frontend: timeline behaviour tests (frontend served on port 3000; no engine needed)
-open http://localhost:3000/tests/timeline_confidence.test.html      # expect "60 tests, 60 passed"
+open http://localhost:3000/tests/timeline_confidence.test.html      # expect "61 tests, 61 passed"
 # recording flow on an isolated backend (seconds; exit 0 means every check passed)
 python scripts/verify_recording_flow.py
 # saved-period workflow on an isolated backend (seconds; exit 0 means every check passed)
@@ -616,8 +616,8 @@ open "http://localhost:3000/?engine=0#demo"
 | 3. Batch review of saved periods + CSV | Done: `.../period-reviews`, `.../period-reviews.csv` |
 | 4. Dashboard: inventory, package download, review table, CSV | Done (frontend) |
 | 5. Portable workflow verification | Done: `scripts/verify_portable_workflow.py`, 27 of 27 checks |
-| 6. Longer recorded run | Done: `validate_team_scale.py --record`, 10 min, 20 athletes, 132000 of 132000 accepted, about 90 MB |
-| 7. Final verification and documentation | Done: full suite, browser harness 60 of 60, real dashboard check, older-database compatibility on isolated copies |
+| 6. Longer recorded run | Done: `validate_team_scale.py --record --athlete-read-interval 1`, 10 min, 20 athletes, 132000 of 132000 accepted; team, individual and recording reads all ok; about 90 MB |
+| 7. Final verification and documentation | Done: full suite, browser harness 61 of 61, real dashboard check, older-database compatibility on isolated copies |
 
 ## 10. Recommended next milestone
 
