@@ -1087,6 +1087,35 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 1)
+
+`GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
+(409 while active, 404 if unknown) as a ZIP read from one database snapshot,
+with a safe filename `athletrix-recording-package-<id>-<UTC time>.zip`. It
+contains exactly four members:
+
+| Member | Content |
+|--------|---------|
+| `manifest.json` | `format`, `format_version` (1), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods) and `settings_at_export` |
+| `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording) and `athletes` (the roster snapshot, in roster order) |
+| `samples.jsonl` | every recorded sample of every roster athlete in the existing `{type, sample}` interchange format, by athlete in roster order, then instant, physiological first at equal instants; payloads exactly as stored |
+| `periods.json` | saved periods: original `id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as saved), `created_at` |
+
+Every recorded sample is included, independent of the rolling caps and the
+300-row history page. Recording times are kept apart from sample timestamps.
+`settings_at_export` records the engine settings when the file was written; it
+does not claim they were in force while the data was recorded or reviewed, and
+an importing engine applies its own settings. The checksums detect
+accidental corruption only. The package is not a database backup and not
+evidence that the measurements are accurate: it holds no registry, rolling
+history, device status, other recordings, configuration, credentials, paths or
+logs. The per-athlete JSONL and the period review JSON downloads are
+unchanged. The format is defined in `app/core/recording_package.py`.
+
+```bash
+curl -OJ "http://127.0.0.1:8000/api/v1/recordings/<id>/package.zip"
+```
+
 ### Save, restart, reopen, export: a reproducible example
 
 ```bash

@@ -18,6 +18,7 @@ from app.core.availability import session_stream_availability
 from app.core.config import get_settings
 from app.core.effort import AFTER_SECONDS, BEFORE_SECONDS, EffortRequestError, parse_effort_timestamp, period_bounds, review_effort, select_period, validate_effort
 from app.core.export import export_records, to_jsonl
+from app.core.recording_package import FORMAT as PACKAGE_FORMAT, FORMAT_VERSION as PACKAGE_VERSION, build_package
 from app.core.summary import summarize_window
 from app.db import get_database
 from app.models import Athlete, TrackingRules
@@ -358,6 +359,45 @@ def export_period_review(recording_id: str, athlete_id: str, period_id: str) -> 
             "Content-Disposition": f'attachment; filename="{period_review_filename(rec.id, athlete_id, period.id, captured_at)}"',
             "X-Athletrix-Format": f"{PERIOD_REVIEW_FORMAT}/{PERIOD_REVIEW_VERSION}", "X-Athletrix-Recording-Id": rec.id, "X-Athletrix-Period-Id": period.id,
             "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Format, X-Athletrix-Recording-Id, X-Athletrix-Period-Id",
+        },
+    )
+
+
+# ---- portable recording package (stopped recordings only) ----------------------------------------------------------------
+
+def package_filename(rec: Recording, captured_at: datetime) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", rec.id).strip("._") or "recording"
+    return f"athletrix-recording-package-{safe}-{captured_at.strftime('%Y%m%dT%H%M%SZ')}.zip"
+
+
+@router.get(
+    "/{recording_id}/package.zip",
+    responses={200: {"content": {"application/zip": {}}, "description": "Portable recording package (see app/core/recording_package.py)"}, 404: {"description": "Unknown recording"}, 409: {"description": "The recording is still active"}},
+)
+def export_recording_package(recording_id: str) -> Response:
+    """Download one stopped recording as a portable package: manifest, recording and roster snapshot, every recorded sample, saved periods.
+
+    Read in one database snapshot; every recorded sample is included (no rolling cap or history page applies). The
+    settings in the manifest are labelled as settings at export time. Not a database backup: no registry, rolling
+    history, device status, other recordings, configuration, credentials, paths or logs.
+    """
+    captured_at = clock.utc_now()
+    settings = get_settings()
+    with get_database().read():
+        rec = require_recording(recording_id)
+        if rec.status != "stopped":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Recording '{rec.id}' is still active; stop it before exporting a package")
+        samples = {a.id: {stream: recording_store.all(rec.id, a.id, stream) for stream in ("physiological", "tracking")} for a in rec.athletes}
+        periods = [p for a in rec.athletes for p in period_store.list(rec.id, a.id)]
+    recording_doc = {"id": rec.id, "name": rec.name, "status": rec.status, "started_at": rec.started_at.isoformat().replace("+00:00", "Z"), "stopped_at": rec.stopped_at.isoformat().replace("+00:00", "Z")}
+    settings_doc = {"distance_max_gap_seconds": settings.distance_max_gap_seconds, "distance_min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps}
+    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at)
+    return Response(
+        content=body, media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{package_filename(rec, captured_at)}"',
+            "X-Athletrix-Format": f"{PACKAGE_FORMAT}/{PACKAGE_VERSION}", "X-Athletrix-Recording-Id": rec.id,
+            "Access-Control-Expose-Headers": "Content-Disposition, X-Athletrix-Format, X-Athletrix-Recording-Id",
         },
     )
 
