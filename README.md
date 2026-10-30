@@ -1652,12 +1652,13 @@ browser; an agreed procedure for exports, packages, backups and footage outside 
 one database file only); authentication or a physically controlled computer; and the approvals and procedures that
 govern human participants, which no code here provides.
 
-## Camera adapter prototype (synthetic markers; `camera_adapter/`)
+## Camera adapter (`camera_adapter/`): synthetic markers, real-video person tracking, continuity
 
-A first, local path from video to the engine: **video/frame observations -> field calibration -> movement estimates
--> TrackingSample -> engine -> dashboard and recording**. It establishes the adapter's geometry, timestamps, movement
-calculations and integration using a **generated video with coloured markers**. It does not detect people, identify
-players or assess performance.
+A local path from video to the engine: **video/frame observations -> field calibration -> movement estimates ->
+TrackingSample -> engine -> dashboard and recording**. Two extractors feed it: a **generated video with coloured
+markers** (kept unchanged as the reproducible regression fixture) and an optional **person detector + ByteTrack** for a
+local video file (section 7). Nothing here identifies players (assignment is an explicit, reviewed operator step),
+reads jerseys, classifies soccer roles or assesses performance, and no real sideline footage has been evaluated yet.
 
 ### Install and run
 
@@ -1671,8 +1672,9 @@ python scripts/verify_camera_pipeline.py --serve-frontend "../Athletrix Fixed We
 ```
 
 The adapter core (`observations`, `calibration`, `estimator`, `pipeline`) is plain Python and runs with the engine's
-own requirements; only `synthetic_video.py` and the two check scripts need OpenCV/NumPy. After installation everything
-runs offline. Reports go to `reports/` and generated videos to a temporary folder (both git-ignored).
+own requirements; only `synthetic_video.py`, `synthetic_people.py` and the video checks need OpenCV/NumPy, and only
+`person_video.py` needs the optional video packages and a model file. `python scripts/camera_synthetic_check.py
+estimator` is plain Python. After installation everything runs offline. Reports go to `reports/` and generated videos to a temporary folder (both git-ignored).
 
 ### 1. Observation contract (`camera_adapter/observations.py`, internal format)
 
@@ -1788,26 +1790,145 @@ threshold; they say nothing about athletes, real footage, lighting, occlusion by
 ### 5. Through the engine (`scripts/verify_camera_pipeline.py`)
 
 On an isolated engine: two fictional athletes, a recording started with the adapter configuration as unverified
-operator metadata, the 559 samples sent as live-paced playback with a fictional 1 Hz heart-rate feed alongside. 14 of
-14 checks passed: every sample submitted (0 failed, 0 unsent), recorded tracking samples identical to the exported ones
-per athlete, rolling history, live snapshots naming the right athlete with `source: simulated` and the adapter's device
-id, the start snapshot carrying the calibration hash and estimator settings, and a package import keeping every
-sample and the snapshot. Engine distances over known phases versus the analytic path: 28.39 vs 28.0 m, 10.18 vs 10.0 m,
-21.19 vs 21.0 m, 16.28 vs 16.0 m (noise adds length). That run predates continuity segments: the engine's own distance rule then spanned red's 1.0 s gap behind the occluder by integrating the average of the two endpoint speeds (a trapezoid, not x/y positions; intervals up to `DISTANCE_MAX_GAP_SECONDS`, 3 s). With `segment_id` (below) that interval is now excluded; the adapter itself never invents samples. The
-dashboard showed the stream through the existing cards and timelines ("Live · reported source: simulated · device:
-synthetic-marker-cam-1"; the speed timeline follows the designed profile). With 10 Hz tracking and the cards' 1 s poll,
-the cards show about one sample in ten (all are stored and charted); the developer timing panel measured receipt to DOM
-update of the displayed samples at a median of 117 ms (11–216 ms, ± 0.9 ms clock uncertainty) on localhost, not a
-real-camera or two-second-target result.
+operator metadata, the samples sent as live-paced playback with a fictional 1 Hz heart-rate feed alongside. Re-run on
+2026-10-29 with continuity segments: **16 of 16 checks passed**: every sample submitted (0 failed, 0 unsent), recorded
+tracking samples identical to the exported ones, rolling history, live snapshots naming the right athlete with
+`source: simulated` and the adapter's device id, the start snapshot carrying the calibration hash and estimator
+settings, red's pass behind the occluder recorded as a continuity break the engine does not integrate across, every
+recorded sample carrying the adapter's `segment_id`, and a package import keeping every sample and the snapshot.
 
-### Next requirements for real player tracking
+| Phase (video seconds) | Analytic path | Engine distance | Included time | Continuity breaks |
+|---|---|---|---|---|
+| red 3–12 s, passing behind the occluder | 28.0 m | 24.24 m | 8.00 of 9 s | 1 |
+| red 15–21 s, far side | 10.0 m | 10.18 m | 6.00 s | 0 |
+| blue 2–10.5 s | 21.0 m | 21.19 m | 8.50 s | 0 |
+| blue 16–25 s, 4 m-radius curve | 16.0 m | 16.28 m | 9.00 s | 0 |
 
-The synthetic marker extractor must be replaced or supplemented by validated **person detection**, **multi-object
-tracking** through occlusions and crossings, **athlete assignment** (identity) with an auditable operator step, and,
-where needed, **ball and event detection**; plus lens-distortion calibration, a measured capture-time mapping for the
-camera, real-footage ground truth (for example surveyed positions or a reference system) to measure errors, and the
-approvals that govern filming people. The prototype cannot know whether a pass was the right decision. A proposed,
-unimplemented design for individual performance review is in `docs/individual-performance-design-note.md`.
+Before continuity segments the first phase read 28.39 m because the engine bridged red's hidden 1.0 s (the adapter had
+reset, but the engine's own 3 s gap rule joined the samples either side). Now the hidden second and the estimator's
+warm-up after it are excluded: the 24.24 m covers 8.0 s, and the dashboard and reviews say so through
+`included_duration_seconds` and `continuity_break_count`. Remaining distances are a little long because noise adds
+length. Earlier dashboard run (before this change): with 10 Hz tracking and the cards' 1 s poll, the cards show about
+one sample in ten (all are stored and charted); receipt-to-DOM median 117 ms on localhost.
+
+### 6. Continuity (`segment_id`) and suppressed estimates
+
+Every adapter sample carries `segment_id = "cam-<run tag>-<n>"`. A new segment starts at an athlete's first sample and
+after every estimator **reset** (gap over `max_gap_s` = 0.3 s, temporary track change, assignment conflict) or
+**suppressed estimate** (fit residual over `max_fit_rms_m`); rate-limit skips do not break a segment. The run tag is a
+hash of the observation file and the time mapping, so the same file sent twice at different anchors never shares a
+label. The engine never integrates distance or high-speed time between samples of different segments (see the data
+model section); streams without labels keep the gap and confidence rules. `emit_segment_id: false` in the adapter
+configuration reproduces the earlier behaviour for comparison. The adapter log lists every segment with what started
+it, and every skip with its reason (`warm_up`, `fit_residual`, `rate_limit`, `low_confidence`, `outside_calibration`,
+`unassigned`, `assignment_conflict`).
+
+**Confidence** stays separate from accuracy: `tracking_confidence` is the lowest extractor score in the estimator's
+window ("min_observation_confidence_in_window"). For synthetic markers that score is the visible fraction of the disc;
+for the person detector it is the detector's score. Both measurements below show high scores with wrong positions
+(a marker emerging from an occluder at 0.51; a drawn figure whose legs are hidden by a board at a median 0.75, minimum 0.50, against 0.86 with legs visible), so the score is a
+quality hint for the engine's 0.5 rule, never a probability that the position is right.
+
+### 7. Real-video person tracking (optional; `camera_adapter/person_video.py`, `scripts/camera_track_video.py`)
+
+```bash
+pip install -r requirements-vision.txt -r requirements-video.txt
+pip install --no-deps trackers==2.6.1             # see requirements-video.txt for why --no-deps
+python scripts/fetch_person_model.py --model yolox_s   # explicit, once: 35.9 MB into models/ (git-ignored), SHA-256 checked
+python scripts/camera_track_video.py VIDEO.mp4 --model models/yolox_s.onnx \
+    --config scripts/examples/camera/video_tracking_config_example.json \
+    --out camera-work/obs.jsonl --log camera-work/track-log.json \
+    --gallery camera-work/tracks.png --annotate camera-work/review.mp4 --assignments-template camera-work/assignments.json
+```
+
+- **Detector**: YOLOX-S, the official ONNX export from Megvii's YOLOX release 0.1.1rc0 (Apache-2.0; COCO-pretrained),
+  run through OpenCV's DNN module (no PyTorch, no ONNX Runtime). Only class "person" is kept. The file is fetched by an
+  explicit command and **verified against a pinned SHA-256 before every run**; processing never downloads anything and
+  refuses a different file (`--allow-unpinned-model` exists for a deliberately chosen other model, whose SHA-256 is then
+  logged). The pin is the hash observed at first fetch (upstream publishes none): it detects a changed file, it does not
+  prove the original.
+- **Tracker**: ByteTrack (Zhang et al., 2022) as implemented in Roboflow's maintained `trackers` package (Apache-2.0),
+  with `supervision` (MIT) for its detection container. Chosen over the original research repository (not packaged,
+  pinned to old dependencies), over `supervision`'s own ByteTrack (removed from recent releases in favour of
+  `trackers`) and over Ultralytics' trackers (AGPL-3.0, which would impose copyleft terms on the project). The tracker
+  is updated with each frame's video time.
+- **Output**: observations in the existing format v1 (no contract change): frame, `video_time_s` = frame / fps,
+  temporary `trk-<n>` ids, the box's bottom-centre as the ground point, the detector's score, `athlete_id` null. Boxes
+  cut by the bottom image edge or under 12 px tall, and ByteTrack's unconfirmed tracks, produce no observation and are
+  counted. The log records the model name, SHA-256 and licence, every setting, package versions, the video's SHA-256
+  and properties, decoder timestamp mismatches (dropped or duplicated frames, variable frame rate), per-track first and
+  last frames with every loss and reappearance, skips by reason, and frames per second with detector and tracker time.
+- **Assignment aid**: `--gallery` writes one image with two crops per temporary track and the frame it starts at;
+  `--annotate` writes an MP4 with boxes, ids and scores and the banner "ASSIGNMENT AID - temporary track ids, not
+  verified identity". `--assignments-template` writes a valid `athletrix-track-assignments` file with **no assignments**
+  and every track listed under `tracks_to_review`: an operator adds only the tracks they confirmed, with a frame range
+  limited to what they checked. New or uncertain tracks therefore stay unassigned and never produce athlete samples.
+- **Not claimed**: jersey-number recognition, re-identification after a long loss (a person who leaves and returns gets
+  a new id), soccer-role classification (players, referees, coaches and spectators are all "person"), ball detection.
+- **Real footage**: no clip with verified permission for this use is in the project, so **real-footage evaluation is
+  pending**. Use only footage you have permission to process; keep outputs in `camera-work/` (ignored by git).
+
+### 8. Drawn-figure check through the real detector (`camera_synthetic_check.py people`), 2026-10-29
+
+`camera_adapter/synthetic_people.py` draws five cartoon figures (no footage of any person) on a fictional 24 x 14 m area
+seen by a virtual 1280x720 pinhole camera at 25 fps for 20 s; the analytic foot positions are the truth. Red runs the
+near side (0 -> 4 m/s -> 0); blue runs the other way 2.5 m farther and passes behind red in the image; yellow jogs the
+far side behind a 0.9 m board that hides its legs; white walks out of view and back; black (referee-like) is never
+assigned. The operator's assignment is simulated from each track's first observation.
+
+| Measurement | Result |
+|---|---|
+| Speed (YOLOX-S on CPU, this Mac) | 11.1 frames/s, detector 89 ms/frame, tracker 0.3 ms/frame: 0.44x real time for 720p |
+| Tracks | 6 temporary tracks for 5 figures: white got a new id after leaving and re-entering the view; 4 short losses (1–3 frames) kept their ids |
+| Detection near the feet, frames in view | red 0.996, blue 0.998, yellow 0.870, white 0.986, black 0.996 |
+| Identity mismatches (assigned box nearer another figure) | none, including the red/blue crossing |
+| Calibration check points | 0.041 m rms, 0.058 m max |
+| Position error, median / p95 | red 0.014 / 0.088 m, blue 0.020 / 0.112 m, white 0.109 / 0.208 m, yellow 0.140 / 0.314 m (legs visible) |
+| Steady speed error, median / p95 | red 0.008 / 0.11 m/s, blue 0.013 / 0.28 m/s, yellow 0.010 / 0.75 m/s, white 0.10 / 0.69 m/s |
+| **Yellow behind the board (legs hidden)** | **ground point 2.45 m median, 2.73 m max off**: the box ends at the board's top edge, so its bottom-centre maps far behind the feet, while the detector's score only drops to a median 0.75 (minimum 0.50; 0.86 with legs visible), still above the engine's 0.5 rule |
+| Engine distance, red 2–8 s | 16.05 m vs 16.0 m path (5.88 s included, 0 continuity breaks) |
+
+So the plumbing, ids, logs and geometry work on drawn figures, and the bottom-of-box ground point fails badly under
+lower-body occlusion without lowering the score. Drawn figures on a clean striped field have none of the kits, motion
+blur, crowds, shadows, lighting changes, camera shake or compression of real footage.
+
+### 9. Estimator configurations (`camera_synthetic_check.py estimator`), 2026-10-29
+
+Plain Python, about 5 s, analytic observations through the pinhole camera (no rendering): stationary, constant speed
+near and far, acceleration and deceleration, a 3 m-radius turn, a 2 m-radius cut and a far-side sprint start, each
+clean, with 0.5 px and 1.5 px pixel noise, a 1 s partial-occlusion bias (3 px, score 0.55), a 1.0 s gap and a track
+change. A **development** split and a **held-out** split (another camera, other places, speeds 15 % higher, other
+seeds). The selection rule was fixed before the held-out split was computed: replace the default only if a candidate is
+better on BOTH steady-speed p95 under noise and distance error over the included time, keeps clean response-lag p95 at
+or below 0.5 s and leaves no clean speed change unsettled. Held-out results (development in the JSON report):
+
+| Configuration | Position p95 | Steady speed p95 (noise) | Steady accel p95 | Lag median / p95 (clean) | Unavailable median | Distance error median | Stationary phantom distance, 0.5 / 1.5 px |
+|---|---|---|---|---|---|---|---|
+| window 0.3 s | 0.28 m | 4.10 m/s | 33.1 m/s² | 0.03 / 0.10 s | 0.57 s | 2.64 m | 7.8 / 20.7 m |
+| **window 0.5 s (default)** | 0.24 m | 1.34 m/s | 8.0 m/s² | 0.29 / 0.38 s | 0.81 s | 1.34 m | 3.1 / 10.1 m |
+| window 0.8 s | 0.19 m | 0.73 m/s | 1.9 m/s² | 0.55 / 5.1 s | 1.07 s | 0.89 m | 1.7 / 4.8 m |
+| window 1.0 s | 0.19 m | 0.65 m/s | 1.7 m/s² | 0.76 / 5.2 s | 1.28 s | 0.79 m | 1.3 / 3.7 m |
+
+Decision on the development split: **no candidate met every condition; the 0.5 s default stays**. Longer windows cut
+noise but respond 0.5–0.8 s late and, in the tight turns, never settle within 0.2 m/s: a quadratic over 0.8–1.0 s
+cannot follow a 3 m-radius circle, so speed stays biased for the whole turn (the 5.1–5.2 s lag p95). Shorter windows
+respond within 0.1 s but are very noisy. Difficult cases and **documented limitations**: (1) pixel noise makes speed
+(a magnitude) biased upward, so a **stationary athlete accumulates phantom distance** (3–10 m over 8 s at the default),
+which matters for real footage where box jitter is larger than 1.5 px; (2) a 1.5 px jitter on the far side drives the
+fit residual over its limit, suppressing most far-side estimates; (3) a 3 px occlusion bias moves position by
+0.35–0.84 m on the far side. Throughput was 55,000–84,000 observations per second in plain Python, far above any
+camera's rate. A future improvement (not implemented) would be a stationary dead-band or a motion model chosen on new
+development data and re-checked on fresh held-out data.
+
+### Remaining requirements for real player tracking
+
+Real-footage evaluation with permission and ground truth (surveyed positions or a reference system); a better ground
+point under occlusion (for example a keypoint or pose model, or occlusion-aware rejection); lens-distortion calibration;
+a measured capture-time mapping for the camera and its alignment with the wearable's clock; identity handling across
+long losses and crossings beyond the operator's frame-by-frame assignment; **ball and event detection** for any
+performance assessment; and the approvals that govern filming people. The pipeline cannot know whether a pass was the
+right decision. A proposed, unimplemented design for individual performance review is in
+`docs/individual-performance-design-note.md`.
 
 ## One-command isolated demo (`scripts/demo_launcher.py`)
 

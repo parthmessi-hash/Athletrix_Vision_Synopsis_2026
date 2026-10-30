@@ -1,14 +1,38 @@
 # Athletrix: project status and handoff
 
 Concise handoff for anyone (or any fresh conversation) picking the project up.
-Everything below was checked against the code on 2026-10-25. Where something
-is a plan rather than working code it is marked **planned**.
+Sections 1-9 were checked against the code on 2026-10-25 and updated since; the
+status at a glance below was checked on 2026-10-29. Where something is a plan
+rather than working code it is marked **planned**.
+
+## 0. Product and status at a glance (2026-10-29)
+
+**Intended product.** Athletrix is a soccer-first substitution-support tool,
+designed to extend to other sports. It is meant to combine (1) an experimental,
+player-specific physiological fatigue score from a chest-strap wearable (the
+team has bought a Zephyr), (2) an independent camera-based individual
+performance score (execution, decisions, movement and positioning, following
+the coach's strategy), and (3) a substitution model that weighs both histories
+together with tactics, leadership, pressure-situation contributions, lineup
+chemistry and the available replacements. The coach always makes the final
+decision; missing evidence stays "not available"; performance is never
+calculated from fatigue; nothing claims validated fatigue detection or optimal
+substitutions.
+
+| Status | What |
+|--------|------|
+| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`), SQLite persistence with per-stream retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence- and continuity-aware distance and high-speed time), effort reviews, explicit recordings with saved periods, configuration snapshots, receipt timing, portable packages with import, local removal tools, coach-context records (milestone 6 below), and an engine-mode dashboard with a camera review card. Camera adapter: observation contract, planar calibration with check points, causal quadratic estimator, explicit time mapping, continuity segments, export and send. Optional real-video input: YOLOX person detector (local pinned model) + ByteTrack, temporary track ids, logs, track gallery and annotated review video, assignment template. |
+| **Checked on synthetic data only** | Marker video (regression fixture, `camera_synthetic_check.py`), drawn-figure scene through the real detector and tracker (`camera_synthetic_check.py people`), estimator configuration comparison on analytic scenarios with a held-out split (`camera_synthetic_check.py estimator`), engine round trip (`verify_camera_pipeline.py`). These say nothing about real players, real footage, lens distortion or a real camera's timing. |
+| **Not yet evaluated** | Real sideline footage (no clip with verified permission is in the project), the Zephyr feed (no adapter yet), clock alignment between camera and wearable, re-identification after long occlusions. |
+| **Planned, not implemented** | The fatigue score, the performance score (rubric, ball and event detection, decision quality), the substitution model, jersey or role recognition, multi-camera input, any validation study. Coach-context records are inputs prepared for that model; they are not scores. |
 
 ## 1. Purpose and terminology
 
-Athletrix is a local-first, multi-sport athlete-monitoring platform. It combines
-wearable physiology and camera-derived movement data for the athletes a coach
-is watching, and shows them side by side with descriptive performance language.
+The engine in this repository is the local-first, provider-agnostic data layer of
+that product: it combines wearable physiology and camera-derived movement data
+for the athletes a coach is watching and shows them side by side with
+descriptive language. The scores and the substitution model are planned layers
+on top of it (section 0).
 
 Ground rules that apply to all code and copy in the engine and its connected cards:
 
@@ -188,13 +212,23 @@ CODE_REVISION=$(git rev-parse --short HEAD) uvicorn app.main:app --host 127.0.0.
 
 # 3r. developer timing panel (opt-in): open http://localhost:3000/?timing=1#demo with Dashboard in the visible foreground tab
 
-# 3s. camera adapter prototype (synthetic markers; optional vision packages, offline once installed)
+# 3s. camera adapter (synthetic markers as the regression fixture; optional vision packages, offline once installed)
 pip install -r requirements-vision.txt
-python scripts/camera_synthetic_check.py          # video -> calibration -> estimates -> errors vs analytic truth
-python scripts/verify_camera_pipeline.py          # the same stream through an isolated engine, recording and package
+python scripts/camera_synthetic_check.py          # marker video -> calibration -> estimates -> errors vs analytic truth
+python scripts/camera_synthetic_check.py estimator   # estimator configurations on analytic scenarios (plain Python, about 5 s)
+python scripts/verify_camera_pipeline.py          # the marker stream through an isolated engine, recording and package
 python scripts/camera_calibrate.py fit POINTS.json --out CAL.json
 python scripts/camera_to_samples.py export OBS.jsonl --calibration CAL.json --config scripts/examples/camera/adapter_config_example.json \
     --assignments A.json --anchor-utc 2026-10-20T10:00:00Z --out samples.jsonl --log adapter-log.json
+
+# 3t. real-video person tracking (optional; local pinned model; nothing is downloaded while processing)
+pip install -r requirements-vision.txt -r requirements-video.txt && pip install --no-deps trackers==2.6.1
+python scripts/fetch_person_model.py --model yolox_s          # explicit one-time download into models/ (ignored by git), SHA-256 checked
+python scripts/camera_synthetic_check.py people               # the real detector + ByteTrack on drawn fictional figures
+python scripts/camera_track_video.py VIDEO.mp4 --model models/yolox_s.onnx --out camera-work/obs.jsonl --log camera-work/track-log.json \
+    --gallery camera-work/tracks.png --annotate camera-work/review.mp4 --assignments-template camera-work/assignments.json
+#    review tracks.png / review.mp4, add only confirmed assignments, then calibrate and run camera_to_samples.py as in 3s
+#    (config "source": "camera" for real footage). Use only footage you have permission to process.
 
 # 4. frontend, from the Athletrix_Web folder (loopback only)
 python3 -m http.server 3000 --bind 127.0.0.1
@@ -442,9 +476,11 @@ All of these are descriptive and cover only the samples available in the window
 
 Implemented today is listed above; the following are **not** implemented:
 
-- No live device or camera connections. A camera adapter prototype exists
-  (`camera_adapter/`, synthetic markers only: no person detection, no player
-  identification, no real camera tested). Data otherwise comes from the simulator, manual
+- No live device or camera connections. The camera adapter
+  (`camera_adapter/`) processes recorded video files: synthetic markers (the
+  regression fixture) or a person detector + ByteTrack on a local file. No
+  real sideline footage has been evaluated, nothing identifies players
+  (assignment is an explicit operator step), and no live camera is connected. Data otherwise comes from the simulator, manual
   POSTs, recorded files in Athletrix's own JSON Lines interchange format
   (`scripts/replay_samples.py`), or CSV files converted by
   `scripts/convert_heart_rate_csv.py` (heart rate) and
