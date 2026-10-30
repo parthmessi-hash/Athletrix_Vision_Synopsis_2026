@@ -7,6 +7,7 @@
   "min_observation_confidence": 0.25,
   "max_extrapolation_m": 2.0,
   "confidence_rule": "min_observation_confidence_in_window",
+  "emit_segment_id": true,
   "estimator": {
     "window_s": 0.5,
     "min_points": 5,

@@ -32,12 +32,16 @@ class PhysiologicalSummary(AthletrixModel):
     sources: SourceBreakdown = Field(default_factory=SourceBreakdown, description="Reported sources of the samples in the window (adds up to sample_count).")
 
 
+CONTINUITY_RULE = "never join consecutive samples whose segment_id differs"
+
+
 class DistanceRules(AthletrixModel):
     """Settings applied to the distance estimate (adjustable engineering defaults, not sport standards)."""
 
     max_gap_seconds: float = Field(..., gt=0, description="Longest consecutive-sample interval included, seconds.")
     min_confidence: float = Field(..., ge=0, le=1, description="Minimum tracking_confidence required at both ends of an interval.")
     high_speed_threshold_mps: float = Field(..., gt=0, description="Speed at or above which time and distance count as high-speed, m/s.")
+    continuity_rule: str = Field(CONTINUITY_RULE, description="Always applied; streams without segment_id are unaffected.")
 
 
 class HighSpeedEstimate(AthletrixModel):
@@ -64,7 +68,8 @@ class DistanceEstimate(AthletrixModel):
     """Gap-aware distance estimate over eligible consecutive tracking intervals.
 
     An interval between two consecutive samples is eligible when its elapsed time is positive and at
-    most `max_gap_seconds` and both endpoint confidences are at least `min_confidence`. Each eligible
+    most `max_gap_seconds`, both endpoint confidences are at least `min_confidence` and both samples carry the same
+    `segment_id` (or neither carries one: a provider-declared discontinuity is never joined). Each eligible
     interval contributes (v_prev + v_cur) / 2 * elapsed, which assumes speed changes linearly between
     samples. Excluded intervals contribute nothing and are never bridged; nothing is extrapolated
     outside the samples. This is an estimate over the eligible part of the window, not a guaranteed
@@ -76,7 +81,8 @@ class DistanceEstimate(AthletrixModel):
     estimated_distance_m: float | None = Field(None, ge=0, description="Sum over eligible intervals, metres; null if no interval was eligible; 0.0 when eligible intervals were stationary.")
     included_duration_seconds: float = Field(..., ge=0, description="Total elapsed time of eligible intervals, seconds (0 if none).")
     included_window_fraction: float = Field(..., ge=0, le=1, description="included_duration_seconds divided by the requested window length (0 if none).")
-    excluded_interval_count: int = Field(..., ge=0, description="Consecutive-sample intervals rejected by the gap or confidence rule, each counted once.")
+    excluded_interval_count: int = Field(..., ge=0, description="Consecutive-sample intervals rejected by the gap, confidence or continuity rule, each counted once.")
+    continuity_break_count: int = Field(0, ge=0, description="Of the excluded intervals, those whose endpoints carry different segment_id values (a provider-declared discontinuity).")
     max_gap_seconds: float = Field(..., gt=0, description="Applied rule: longest interval included, seconds.")
     min_confidence: float = Field(..., ge=0, le=1, description="Applied rule: minimum tracking_confidence at both ends of an interval.")
 
@@ -105,6 +111,7 @@ class TrackingSummary(AthletrixModel):
     included_duration_seconds: float = Field(0.0, ge=0, description="See DistanceEstimate.included_duration_seconds.")
     included_window_fraction: float = Field(0.0, ge=0, le=1, description="See DistanceEstimate.included_window_fraction.")
     excluded_interval_count: int = Field(0, ge=0, description="See DistanceEstimate.excluded_interval_count.")
+    continuity_break_count: int = Field(0, ge=0, description="See DistanceEstimate.continuity_break_count.")
     high_speed_duration_seconds: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_duration_seconds.")
     high_speed_distance_m: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_distance_m.")
     distance_rules: DistanceRules | None = Field(None, description="The gap, confidence and high-speed threshold rules applied to the estimates.")

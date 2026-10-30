@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from app.models.summary import CONTINUITY_RULE
 
 ROOT = Path(__file__).resolve().parents[1]
 CSV_FIXTURE = ROOT / "scripts" / "examples" / "fictional_tracking.csv"
@@ -307,7 +308,7 @@ def test_round_trip_of_both_fixtures_through_replay_window_and_summary(client, t
     p, t = summary["physiological"], summary["tracking"]
     assert p["sample_count"] == 5 and p["heart_rate_count"] == 4 and p["heart_rate_mean_bpm"] == pytest.approx(116.375) and p["heart_rate_peak_bpm"] == 120.5
     assert t["sample_count"] == 5 and t["speed_peak_mps"] == 6.0 and t["latest_sample_age_seconds"] == 0.0 and t["max_inter_sample_gap_seconds"] == 1.0
-    assert t["distance_rules"] == {"max_gap_seconds": 3.0, "min_confidence": 0.5, "high_speed_threshold_mps": 5.0}
+    assert t["distance_rules"] == {"max_gap_seconds": 3.0, "min_confidence": 0.5, "high_speed_threshold_mps": 5.0, "continuity_rule": CONTINUITY_RULE}
     # Hand calculation with the default rules. Intervals: 0->1 s and 1->2 s are excluded (the 10:00:01Z sample has confidence 0.3);
     # 2->3 s: (4 + 6) / 2 * 1 = 5.0 m; 3->4 s: (6 + 5) / 2 * 1 = 5.5 m. Total 10.5 m over 2.0 s of a 60 s window.
     assert t["estimated_distance_m"] == pytest.approx(10.5)

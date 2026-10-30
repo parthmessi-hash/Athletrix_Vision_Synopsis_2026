@@ -16,6 +16,14 @@ CONFIDENCE: tracking_confidence = the lowest observation confidence among the ob
 position is right. The engine excludes a distance interval when either end is below its own
 DISTANCE_MIN_CONFIDENCE (0.5 by default); this adapter neither knows nor adjusts that threshold.
 
+CONTINUITY: every sample carries a segment_id (unless the configuration turns labels off). A new segment starts for an
+athlete at its first sample and after every estimator reset (gap longer than max_gap_s, track change, assignment
+conflict) or suppressed estimate (fit residual too large) since its previous sample; rate-limit skips do not break a
+segment. The engine never integrates distance between samples of different segments, so a known camera interruption
+cannot be bridged by the engine's own, longer DISTANCE_MAX_GAP_SECONDS. Labels are "cam-<run tag>-<n>": the run tag
+is derived from the inputs and the time mapping, so the same file sent twice at different anchors gets different
+labels. A label joins samples; it is not an identity or a quality score.
+
 TIME: sample timestamp = anchor_utc + (video_time_s - video_origin_s). The anchor is stated explicitly by whoever runs
 the adapter and recorded in the log with its meaning; for files without a known capture-time mapping it is a playback
 or analysis anchor, NOT the time the camera captured the frames.
@@ -46,6 +54,7 @@ class AdapterConfig:
     min_observation_confidence: float = 0.25
     max_extrapolation_m: float = 2.0
     confidence_rule: str = "min_observation_confidence_in_window"
+    emit_segment_id: bool = True
     estimator: EstimatorConfig = field(default_factory=EstimatorConfig)
 
     def validate(self) -> list[str]:
@@ -60,6 +69,8 @@ class AdapterConfig:
             e.append("min_observation_confidence must be in [0, 1]")
         if not (self.max_extrapolation_m >= 0):
             e.append("max_extrapolation_m must be >= 0")
+        if not isinstance(self.emit_segment_id, bool):
+            e.append("emit_segment_id must be true or false")
         if self.confidence_rule != "min_observation_confidence_in_window":
             e.append("confidence_rule must be min_observation_confidence_in_window (the only rule in version 1)")
         return e
@@ -83,7 +94,7 @@ class AdapterConfig:
         """Flat key/values for POST /recordings adapter_configuration.metadata (at most 32 keys; supplied, not verified)."""
         md = {"adapter": "camera_adapter v1 (synthetic marker tracking input)", "source": self.source, "device_id": self.device_id,
               "output_max_rate_hz": self.output_max_rate_hz, "min_observation_confidence": self.min_observation_confidence,
-              "max_extrapolation_m": self.max_extrapolation_m, "confidence_rule": self.confidence_rule,
+              "max_extrapolation_m": self.max_extrapolation_m, "confidence_rule": self.confidence_rule, "emit_segment_id": self.emit_segment_id,
               "calibration_sha256": calibration_sha256[:64]}
         md.update({f"estimator.{k}": v for k, v in asdict(self.estimator).items()})
         if mapping is not None:
@@ -117,13 +128,15 @@ class Output:
     confidence: float
     points: int
     rms_m: float
+    segment: int = 0
 
-    def sample(self, mapping: TimeMapping, config: AdapterConfig) -> dict:
+    def sample(self, mapping: TimeMapping, config: AdapterConfig, run_tag: str = "") -> dict:
         """A TrackingSample payload (validated by the engine's model before it is written or sent)."""
+        extra = {"segment_id": f"cam-{run_tag}-{self.segment}"} if config.emit_segment_id else {}
         return {"athlete_id": self.athlete_id, "timestamp": mapping.to_utc(self.video_time_s).isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 "x_position": round(self.x, 4), "y_position": round(self.y, 4), "speed_mps": round(self.speed_mps, 4),
                 "acceleration_mps2": round(self.acceleration_mps2, 4), "tracking_confidence": round(min(1.0, max(0.0, self.confidence)), 4),
-                "source": config.source, "device_id": config.device_id}
+                "source": config.source, "device_id": config.device_id, **extra}
 
 
 @dataclass
@@ -133,6 +146,7 @@ class Result:
     resets: list[dict] = field(default_factory=list)     # {"athlete_id", "video_time_s", "reason"}
     unassigned: dict = field(default_factory=dict)       # track_id -> [first_frame, last_frame, count]
     per_athlete: dict = field(default_factory=dict)      # athlete_id -> {"observations", "outputs", "warm_up"}
+    segments: list[dict] = field(default_factory=list)   # {"segment", "athlete_id", "started_by", "first_video_time_s", "last_video_time_s", "samples"}
 
     def skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -157,6 +171,8 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
     for o in obs.observations:
         by_frame.setdefault(o.frame, []).append(o)
     period = 1.0 / config.output_max_rate_hz
+    broken: dict[str, str] = {}        # athlete_id -> why the next sample starts a new segment
+    open_segment: dict[str, dict] = {}
     for frame in sorted(by_frame):
         group = sorted(by_frame[frame], key=lambda o: o.track_id)
         counts: dict[str, int] = {}
@@ -176,6 +192,7 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
                 res.skip("assignment_conflict")
                 if est.history:
                     est.history.clear()
+                    broken.setdefault(o.athlete_id, "assignment_conflict")
                     res.resets.append({"athlete_id": o.athlete_id, "video_time_s": o.video_time_s, "reason": "assignment_conflict"})
                 continue
             if o.confidence < config.min_observation_confidence:
@@ -187,6 +204,7 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
                 continue
             reason = est.add(Point(o.video_time_s, pos[0], pos[1], o.confidence, o.track_id))
             if reason:
+                broken.setdefault(o.athlete_id, reason)
                 res.resets.append({"athlete_id": o.athlete_id, "video_time_s": o.video_time_s, "reason": reason})
             if o.athlete_id in last_out and o.video_time_s - last_out[o.athlete_id] < period - 1e-6:
                 res.skip("rate_limit")
@@ -195,11 +213,27 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
             if e is None:
                 res.skip(why)
                 stats[why] = stats.get(why, 0) + 1
+                if why != "warm_up":   # a suppressed estimate inside a history: the samples either side are not one segment
+                    broken.setdefault(o.athlete_id, why)
                 continue
             last_out[o.athlete_id] = o.video_time_s
             stats["outputs"] += 1
-            res.outputs.append(Output(o.athlete_id, o.video_time_s, o.frame, o.track_id, e.x, e.y, e.speed_mps, e.acceleration_mps2, e.confidence, e.points, e.rms_m))
+            seg = open_segment.get(o.athlete_id)
+            if seg is None or o.athlete_id in broken:
+                seg = {"segment": len(res.segments) + 1, "athlete_id": o.athlete_id, "started_by": broken.pop(o.athlete_id, "first_sample") if seg else "first_sample",
+                       "first_video_time_s": o.video_time_s, "last_video_time_s": o.video_time_s, "samples": 0}
+                broken.pop(o.athlete_id, None)
+                res.segments.append(seg)
+                open_segment[o.athlete_id] = seg
+            seg["last_video_time_s"] = o.video_time_s
+            seg["samples"] += 1
+            res.outputs.append(Output(o.athlete_id, o.video_time_s, o.frame, o.track_id, e.x, e.y, e.speed_mps, e.acceleration_mps2, e.confidence, e.points, e.rms_m, seg["segment"]))
     return res
+
+
+def run_tag(observations_sha256: str, mapping: TimeMapping) -> str:
+    """Short label part derived from the input file and the time mapping: a rerun of the same file at another anchor differs."""
+    return hashlib.sha256(f"{observations_sha256}|{mapping.describe()}".encode()).hexdigest()[:10]
 
 
 def adapter_log(res: Result, *, obs: ObservationFile, calibration_path: Path, calibration: Calibration, config: AdapterConfig, mapping: TimeMapping | None, observations_path: Path) -> dict:
@@ -212,20 +246,25 @@ def adapter_log(res: Result, *, obs: ObservationFile, calibration_path: Path, ca
         "config": config.to_doc(),
         "time_mapping": None if mapping is None else {"anchor_utc": mapping.anchor_utc.isoformat().replace("+00:00", "Z"), "video_origin_s": mapping.video_origin_s, "meaning": mapping.meaning, "rule": mapping.describe()},
         "outputs": len(res.outputs), "per_athlete": res.per_athlete, "skipped": res.skipped, "resets": res.resets,
+        "segments": [{**sg, "segment_id": f"cam-{run_tag(file_sha256(observations_path), mapping)}-{sg['segment']}" if mapping and config.emit_segment_id else None} for sg in res.segments],
         "unassigned_tracks": {k: {"first_frame": v[0], "last_frame": v[1], "observations": v[2]} for k, v in res.unassigned.items()},
         "notes": ["Skipped samples were never produced: no value is filled in for a skipped instant.",
                   "Each output keeps its video_time_s and frame in the per-sample log so the original relative time is preserved.",
-                  "tracking_confidence is the extractor's score carried through (lowest in the window), not a probability of correctness."],
+                  "tracking_confidence is the extractor's score carried through (lowest in the window), not a probability of correctness.",
+                  "A new segment_id starts after every estimator reset or suppressed estimate; the engine never integrates distance between different segments."],
         "samples": [{"athlete_id": o.athlete_id, "frame": o.frame, "video_time_s": o.video_time_s, "track_id": o.track_id, "points": o.points, "fit_rms_m": round(o.rms_m, 5)} for o in res.outputs],
     }
 
 
-def records(res: Result, mapping: TimeMapping, config: AdapterConfig) -> list[dict]:
-    """Interchange records ({"type": "tracking", "sample": ...}), validated against the engine's TrackingSample model."""
+def records(res: Result, mapping: TimeMapping, config: AdapterConfig, tag: str = "") -> list[dict]:
+    """Interchange records ({"type": "tracking", "sample": ...}), validated against the engine's TrackingSample model.
+
+    `tag` is the run tag for segment labels (run_tag(); callers with an input file pass it so reruns stay distinct)."""
     from app.models import TrackingSample
+    tag = tag or hashlib.sha256(mapping.describe().encode()).hexdigest()[:10]
     out = []
     for o in res.outputs:
-        s = o.sample(mapping, config)
+        s = o.sample(mapping, config, tag)
         TrackingSample.model_validate(s)
         if not all(math.isfinite(s[k]) for k in ("x_position", "y_position", "speed_mps", "acceleration_mps2")):
             raise ValueError("non-finite estimate")

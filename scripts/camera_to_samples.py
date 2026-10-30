@@ -43,7 +43,7 @@ for p in (str(ROOT), str(ROOT / "scripts")):
 import replay_samples  # noqa: E402
 from camera_adapter import calibration as cal  # noqa: E402
 from camera_adapter import observations as obsmod  # noqa: E402
-from camera_adapter.pipeline import AdapterConfig, TimeMapping, adapter_log, process, records, write_jsonl  # noqa: E402
+from camera_adapter.pipeline import AdapterConfig, TimeMapping, adapter_log, file_sha256, process, records, run_tag, write_jsonl  # noqa: E402
 
 
 def parse_anchor(text: str, now: Callable[[], datetime], first_output_s: float) -> TimeMapping:
@@ -91,7 +91,8 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
         config = AdapterConfig.from_doc(json.loads(args.config.read_text(encoding="utf-8")))
         res = process(obs, calib, config)
         mapping = parse_anchor(args.anchor_utc, now, min((o.video_time_s for o in res.outputs), default=0.0)) if args.anchor_utc else None
-        recs = records(res, mapping or TimeMapping(datetime(2000, 1, 1, tzinfo=UTC), 0.0, "validation only"), config)
+        mapping_used = mapping or TimeMapping(datetime(2000, 1, 1, tzinfo=UTC), 0.0, "validation only")
+        recs = records(res, mapping_used, config, run_tag(file_sha256(args.observations), mapping_used))
     except (obsmod.ObservationError, cal.CalibrationError, ValueError, OSError, json.JSONDecodeError, TypeError) as exc:
         out("INVALID INPUT: nothing was produced or sent.")
         for e in getattr(exc, "errors", [str(exc)]):
@@ -99,7 +100,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
         return 1
     log = adapter_log(res, obs=obs, calibration_path=args.calibration, calibration=calib, config=config, mapping=mapping, observations_path=args.observations)
     out(f"{len(obs.observations)} observations -> {len(recs)} tracking samples for {len(res.per_athlete)} athletes; skipped: " +
-        (", ".join(f"{k} {v}" for k, v in sorted(res.skipped.items())) or "none") + f"; estimator resets: {len(res.resets)}; unassigned tracks: {', '.join(sorted(res.unassigned)) or 'none'}")
+        (", ".join(f"{k} {v}" for k, v in sorted(res.skipped.items())) or "none") + f"; estimator resets: {len(res.resets)}; continuity segments: {len(res.segments)}; unassigned tracks: {', '.join(sorted(res.unassigned)) or 'none'}")
     for a, s in sorted(res.per_athlete.items()):
         out(f"  {a}: {s['observations']} observations, {s['outputs']} samples, {s.get('warm_up', 0)} warm-up skips")
     if mapping:

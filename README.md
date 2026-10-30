@@ -64,7 +64,7 @@ ISO 8601 with a timezone (UTC recommended). Unknown fields are rejected.
 |-----------------------|-------------------------------------------|
 | `Athlete`             | Identity: id, name, jersey, sport, team   |
 | `PhysiologicalSample` | HR, breathing, HRV, SpO2, temp, posture   |
-| `TrackingSample`      | Position (m), speed (m/s), accel (m/s²); optional `source`, `device_id` |
+| `TrackingSample`      | Position (m), speed (m/s), accel (m/s²); optional `source`, `device_id`, `segment_id` (continuity) |
 | `DeviceStatus`        | Connection, battery %, signal quality     |
 | `AthleteWindow`       | Both streams for one athlete, last N secs, plus `tracking_rules` |
 | `TrackingRules`       | Applied `min_confidence` (= `DISTANCE_MIN_CONFIDENCE`) |
@@ -158,6 +158,25 @@ the requested window length. Both rules are adjustable engineering defaults
 set in `.env`, not validated sport-specific standards, and the estimate
 covers only the eligible part of the window, bounded by the tracking
 retention cap.
+
+**Continuity segments (`segment_id`, optional).** A provider that knows where
+its own measurement was interrupted labels each continuous segment; the engine
+never integrates across two consecutive samples whose labels differ (one with
+and one without a label also counts as different), however short the interval,
+and reports those intervals as `continuity_break_count`, a subset of
+`excluded_interval_count`. The applied rule is echoed as
+`distance_rules.continuity_rule`. Samples without the field are stored,
+returned and exported without the key, and only the gap and confidence rules
+apply to them, exactly as before. The label is preserved by ingestion,
+equal-instant replacement (it is replaced with the values), windows, live
+reads, recordings, retained-sample export, packages and import. Older engines
+reject samples that carry the key (unknown fields are refused), so a package
+with labelled samples needs an engine with this field. The camera adapter
+starts a new segment after every estimator reset (a gap over its `max_gap_s`,
+a track change or an assignment conflict) and after a suppressed estimate; so
+a camera interruption is excluded even though it is shorter than
+`DISTANCE_MAX_GAP_SECONDS` (`tests/test_continuity.py`). Fake zero readings
+are never inserted and the global gap rule is unchanged for other providers.
 
 Over exactly the same eligible intervals, the summary also reports
 `high_speed_duration_seconds` and `high_speed_distance_m`: the time and
@@ -1774,7 +1793,7 @@ operator metadata, the 559 samples sent as live-paced playback with a fictional 
 per athlete, rolling history, live snapshots naming the right athlete with `source: simulated` and the adapter's device
 id, the start snapshot carrying the calibration hash and estimator settings, and a package import keeping every
 sample and the snapshot. Engine distances over known phases versus the analytic path: 28.39 vs 28.0 m, 10.18 vs 10.0 m,
-21.19 vs 21.0 m, 16.28 vs 16.0 m (noise adds length). The engine's own distance rule spans red's 1.0 s gap behind the occluder by integrating the average of the two endpoint speeds (a trapezoid, not x/y positions; intervals up to `DISTANCE_MAX_GAP_SECONDS`, 3 s); the adapter itself never invents samples. The
+21.19 vs 21.0 m, 16.28 vs 16.0 m (noise adds length). That run predates continuity segments: the engine's own distance rule then spanned red's 1.0 s gap behind the occluder by integrating the average of the two endpoint speeds (a trapezoid, not x/y positions; intervals up to `DISTANCE_MAX_GAP_SECONDS`, 3 s). With `segment_id` (below) that interval is now excluded; the adapter itself never invents samples. The
 dashboard showed the stream through the existing cards and timelines ("Live · reported source: simulated · device:
 synthetic-marker-cam-1"; the speed timeline follows the designed profile). With 10 Hz tracking and the cards' 1 s poll,
 the cards show about one sample in ten (all are stored and charted); the developer timing panel measured receipt to DOM

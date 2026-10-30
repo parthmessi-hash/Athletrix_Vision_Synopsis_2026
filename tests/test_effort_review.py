@@ -24,6 +24,7 @@ from app.core.effort import (
     validate_effort,
 )
 from app.models import EffortReview, PhysiologicalSample
+from app.models.summary import CONTINUITY_RULE
 
 NOW = datetime(2026, 10, 25, 12, 0, 0, tzinfo=UTC)       # frozen backend time
 S = datetime(2026, 10, 20, 10, 0, 0, tzinfo=UTC)         # a fictional effort five days earlier
@@ -229,7 +230,7 @@ def test_movement_hand_calculated_with_confidence_and_gap_exclusions(client):
     assert m["included_duration_seconds"] == pytest.approx(3.0) and m["included_window_fraction"] == pytest.approx(3.0 / 20)
     assert m["excluded_interval_count"] == 4
     assert m["high_speed_duration_seconds"] == pytest.approx(1.0) and m["high_speed_distance_m"] == pytest.approx(5.5)  # only 4->5 is at or above 5 m/s
-    assert m["distance_rules"] == {"max_gap_seconds": 3.0, "min_confidence": 0.5, "high_speed_threshold_mps": 5.0}
+    assert m["distance_rules"] == {"max_gap_seconds": 3.0, "min_confidence": 0.5, "high_speed_threshold_mps": 5.0, "continuity_rule": CONTINUITY_RULE}
     assert m["sources"] == {"reported": {}, "not_reported": 8}
 
 

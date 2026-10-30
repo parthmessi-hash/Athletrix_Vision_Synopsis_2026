@@ -33,3 +33,7 @@ class TrackingSample(AthletrixModel):
     tracking_confidence: float = Field(..., ge=0.0, le=1.0, description="Normalised confidence, 0.0 to 1.0.")
     source: SampleSource | None = Field(None, description="Generic source category of the reading, if reported.")
     device_id: str | None = Field(None, min_length=1, description="Identifier of the reporting device, if reported.")
+    segment_id: str | None = Field(
+        None, min_length=1, max_length=128, exclude_if=lambda v: v is None,
+        description="Provider's continuous-segment label; the engine never joins consecutive samples whose labels differ. Omitted when not reported.",
+    )
