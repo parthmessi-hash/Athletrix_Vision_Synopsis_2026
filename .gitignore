@@ -20,3 +20,8 @@ reports/
 *.avi
 *.mp4
 camera-work/
+
+# person-detector model weights fetched by scripts/fetch_person_model.py (never commit them)
+models/
+*.onnx
+*.part

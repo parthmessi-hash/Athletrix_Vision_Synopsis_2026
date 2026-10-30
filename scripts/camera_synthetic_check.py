@@ -1,6 +1,14 @@
-"""Synthetic camera check: generated video -> synthetic marker tracking -> calibration -> movement estimates -> errors.
+"""Synthetic camera checks (fictional data only; offline). Three modes share one report format and helpers:
 
-Needs OpenCV and NumPy (pip install -r requirements-vision.txt); runs offline. Fictional data only.
+  markers    (default) generated video -> synthetic marker tracking -> calibration -> movement estimates -> errors.
+             Needs OpenCV and NumPy (requirements-vision.txt). Kept unchanged as the reproducible regression fixture.
+  people     drawn fictional figures -> the REAL person detector (YOLOX, pinned local model) + ByteTrack -> operator
+             assignment (simulated) -> adapter -> errors, detection coverage, identity mismatches, track fragmentation.
+             Needs requirements-video.txt and the model file (scripts/fetch_person_model.py); --model PATH.
+  estimator  the causal estimator alone over analytic scenarios and a few configurations (camera_adapter/evaluation.py):
+             position, speed and acceleration errors, warm-up and unavailable time, response lag, distance coverage and
+             error through the engine's distance rule, throughput; a selection rule fixed in advance is applied to the
+             development split and every configuration is then reported on a held-out split. Plain Python.
 
 STEPS
   1. Render a 30 s, 20 fps, 960x540 MJPG video of a fictional 40 x 20 m field seen by a virtual pinhole camera, with
@@ -29,7 +37,9 @@ Synthetic success says nothing about athletes, real footage, lighting, occlusion
 field. Writes the report to reports/ (ignored by git); generated files go to a temporary folder unless --workdir.
 
 USAGE
-    python scripts/camera_synthetic_check.py [--workdir DIR] [--report PATH]
+    python scripts/camera_synthetic_check.py [markers] [--workdir DIR] [--report PATH]
+    python scripts/camera_synthetic_check.py people --model models/yolox_s.onnx [--workdir DIR] [--report PATH]
+    python scripts/camera_synthetic_check.py estimator [--report PATH]
 """
 
 import argparse
@@ -49,6 +59,7 @@ for p in (str(ROOT), str(ROOT / "scripts")):
 
 import camera_to_samples as adapter_cli  # noqa: E402
 import camera_calibrate  # noqa: E402
+from camera_adapter import evaluation  # noqa: E402
 from camera_adapter import synthetic_truth as st  # noqa: E402
 from camera_adapter.observations import dump  # noqa: E402
 
@@ -191,6 +202,9 @@ def run(workdir: Path, out: Callable[[str], None]) -> dict:
                               "settle_after_acceleration_changes": {a: [{"change_s": c, "speed_within_0.2_mps_after_s": settle(a, c, "speed", 0.2, per_sample_1s), "accel_within_0.5_mps2_after_s": settle(a, c, "accel", 0.5, per_sample_1s)}
                                                                         for c in st.ACCEL_CHANGES[colour_by_athlete[a]]] for a in ATHLETE.values()}},
         "below_engine_distance_confidence_0.5": sum(1 for s in samples if s["tracking_confidence"] < 0.5),
+        "continuity_segments": log.get("segments", []),
+        "engine_distance_red_3_to_12_s": {**evaluation.engine_distance([s for s in samples if s["athlete_id"] == ATHLETE["red"]], datetime.fromisoformat(ANCHOR.replace("Z", "+00:00")), 3.0, 12.0),
+                                          "truth_path_m": 28.0, "note": "red passes behind the occluder (about 1 s); its segments are not joined, so the hidden part is not counted"},
         "identity_swaps": swaps, "bridged_windows": bridged, "checks": checks, "passed": all(checks.values()),
         "limitations": ["Synthetic markers drawn by this code and found by colour thresholds: not people, not real footage, no lens distortion, no real occlusion by bodies.",
                         "Errors are measurements of this setup with no acceptance threshold; they do not transfer to athletes or real cameras.",
@@ -200,28 +214,45 @@ def run(workdir: Path, out: Callable[[str], None]) -> dict:
 
 
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    mode = argv.pop(0) if argv and argv[0] in ("markers", "people", "estimator") else "markers"
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--workdir", type=Path, help="keep the generated video, observations, calibration and samples here (default: a temporary folder)")
+    p.add_argument("--workdir", type=Path, help="keep the generated files here (default: a temporary folder)")
     p.add_argument("--report", type=Path)
+    p.add_argument("--model", type=Path, default=ROOT / "models" / "yolox_s.onnx", help="people mode: the local person-detector model file")
     args = p.parse_args(argv)
+    if mode == "estimator":
+        return estimator_main(args, out)
     try:
         import cv2  # noqa: F401, PLC0415
         import numpy  # noqa: F401, PLC0415
-    except ImportError:
-        out("This check needs OpenCV and NumPy: pip install -r requirements-vision.txt (the engine itself does not).")
+        if mode == "people":
+            import supervision  # noqa: F401, PLC0415
+            import trackers  # noqa: F401, PLC0415
+    except ImportError as exc:
+        out(f"This mode needs optional packages ({exc.name}): " + ("requirements-video.txt" if mode == "people" else "pip install -r requirements-vision.txt") + " (the engine itself does not).")
         return 2
+    if mode == "people" and not args.model.is_file():
+        out(f"The people mode needs the local model file {args.model}: python scripts/fetch_person_model.py --model yolox_s (an explicit one-time download).")
+        return 2
+    runner = (lambda wd: evaluation.people_check(wd, args.model, out)) if mode == "people" else (lambda wd: run(wd, out))
     if args.workdir:
         args.workdir.mkdir(parents=True, exist_ok=True)
-        report = run(args.workdir, out)
+        report = runner(args.workdir)
     else:
         with tempfile.TemporaryDirectory(prefix="athletrix-camera-") as tmp:
-            report = run(Path(tmp), out)
-    path = args.report or ROOT / "reports" / f"camera-synthetic-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+            report = runner(Path(tmp))
+    report = {"tool": "camera_synthetic_check", "mode": mode, "generated_at": datetime.now(UTC).isoformat(), "fictional_data": True, **report}
+    path = args.report or ROOT / "reports" / f"camera-synthetic-{mode}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if mode == "people":
+        people_summary(report, out)
+        out(f"JSON report: {path}")
+        return 0
     out("SYNTHETIC CAMERA CHECK (synthetic marker tracking; fictional data)")
     out(f"  calibration: fit residual {report['calibration']['fit_residual_rms_m']:.4f} m rms (not independent); check points {report['calibration']['check_points_m']['rms']:.4f} m rms, {report['calibration']['check_points_m']['max']:.4f} m max")
-    out(f"  {report['observations']} observations -> {report['samples']} samples; skipped {report['skipped']}; resets {len(report['resets'])}")
+    out(f"  {report['observations']} observations -> {report['samples']} samples; skipped {report['skipped']}; resets {len(report['resets'])}; continuity segments {len(report['continuity_segments'])}")
     for a, e in report["errors"].items():
         def f(k):
             s = e[k]
@@ -231,11 +262,50 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
         out(f"    acceleration m/s2 steady {f('accel_steady')}; near changes {f('accel_boundary')}; first window after a reset {f('accel_after_restart')}")
     for a, e in report["variant_window_1s"]["errors"].items():
         out(f"  variant window 1.0 s, {a}: acceleration steady median {e['accel_steady']['median_abs']} p95 {e['accel_steady']['p95_abs']} max {e['accel_steady']['max_abs']}; near changes p95 {e['accel_boundary']['p95_abs'] if e['accel_boundary'] else 'n/a'}")
+    d = report["engine_distance_red_3_to_12_s"]
+    out(f"  engine distance, red 3-12 s: {d['estimated_distance_m']} m over {d['included_duration_s']} s included (path 28.0 m; {d['continuity_breaks']} continuity breaks not joined)")
     out(f"  below the engine's 0.5 distance-confidence limit: {report['below_engine_distance_confidence_0.5']} samples; identity swaps {report['identity_swaps']}")
     for k, v in report["checks"].items():
         out(f"  {'PASS' if v else 'FAIL'}  {k}")
     out(f"JSON report: {path}")
     return 0 if report["passed"] else 1
+
+
+def people_summary(r: dict, out: Callable[[str], None]) -> None:
+    tl = r["tracking_log"]
+    out("SYNTHETIC PEOPLE CHECK (real person detector on drawn fictional figures)")
+    out(f"  model {r['model']['name']} (sha256 {r['model']['sha256'][:12]}..., {r['model']['licence']})")
+    out(f"  {tl['detections']} detections -> {len(tl['tracks'])} temporary tracks, {tl['observations']} observations; skipped {tl['skipped']}; track losses {tl['track_losses']}")
+    out(f"  speed {tl['speed']['frames_per_second']} frames/s (detector {tl['speed']['detector_ms_per_frame']} ms/frame; {tl['speed']['realtime_factor']}x real time)")
+    out(f"  calibration check points {r['calibration']['check_points_m']['rms']:.3f} m rms, {r['calibration']['check_points_m']['max']:.3f} m max")
+    out(f"  tracks per figure {r['tracks_per_figure']}; unassigned {r['unassigned_tracks']}")
+    out(f"  detection coverage (feet in view): " + ", ".join(f"{k} {v['fraction']}" for k, v in r["detection_coverage"].items()))
+    out(f"  identity mismatch observations (assigned box nearer another figure): {r['identity_mismatch_observations'] or 'none'}")
+    g = r["ground_point_error_while_legs_hidden_m"]
+    hidden = "n/a" if not g else f"median {g['median_abs']} m, max {g['max_abs']} m"
+    out(f"  ground-point error while yellow's legs are hidden by the board: {hidden}")
+    for a, e in r["errors"].items():
+        pos, spd = e["position"], e["speed"]
+        out(f"  {a}: position median {pos and pos['median_abs']} m p95 {pos and pos['p95_abs']} m; steady speed median {spd and spd['median_abs']} p95 {spd and spd['p95_abs']} m/s; "
+            f"legs-hidden position {e['position_legs_hidden'] and e['position_legs_hidden']['median_abs']}")
+    d = r["engine_distance_red_2_to_8_s"]
+    out(f"  engine distance, red 2-8 s: {d['estimated_distance_m']} m vs 16.0 m path ({d['included_duration_s']} s included, {d['continuity_breaks']} continuity breaks)")
+
+
+def estimator_main(args, out: Callable[[str], None]) -> int:
+    out("ESTIMATOR COMPARISON (analytic scenarios; fictional data; plain Python)")
+    report = {"tool": "camera_synthetic_check", "mode": "estimator", "generated_at": datetime.now(UTC).isoformat(), "fictional_data": True, **evaluation.estimator_sweep(out)}
+    path = args.report or ROOT / "reports" / f"camera-synthetic-estimator-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    keys = ["position_p95_m", "speed_steady_p95_mps", "accel_steady_p95_mps2", "lag_median_s", "lag_p95_s", "unavailable_median_s", "distance_error_vs_truth_over_included_median_m", "throughput_observations_per_s"]
+    for split in ("development", "held_out"):
+        out(f"  {split}: " + " | ".join(keys))
+        for name, m in report[split].items():
+            out(f"    {name:32s} " + " | ".join(str(m[k]) for k in keys) + f" | stationary phantom distance {m['stationary_phantom_distance_m']}")
+    out(f"  selection (development split only): {report['selection']['decision']} ({report['selection']['reason']})")
+    out(f"JSON report: {path}")
+    return 0
 
 
 if __name__ == "__main__":

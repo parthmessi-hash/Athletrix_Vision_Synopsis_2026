@@ -1,0 +1,18 @@
+# Optional: real-video person tracking (scripts/camera_track_video.py, scripts/camera_synthetic_check.py people).
+# The engine, the adapter core and the estimator evaluation do not need any of this.
+#
+# Install in two steps (needs network access once; processing then runs offline):
+#   pip install -r requirements-vision.txt -r requirements-video.txt
+#   pip install --no-deps trackers==2.6.1
+# `trackers` declares opencv-python, which would install a second copy of cv2 beside opencv-python-headless; --no-deps
+# avoids that, and its real runtime dependencies are listed here.
+#
+# Licences: trackers (Roboflow, ByteTrack implementation) Apache-2.0 · supervision (Roboflow) MIT · scipy BSD-3-Clause
+# · rich MIT · requests Apache-2.0 · pydeprecate Apache-2.0 · OpenCV Apache-2.0 · NumPy BSD-3-Clause.
+# The detector model is a separate file fetched explicitly: python scripts/fetch_person_model.py --model yolox_s
+# (YOLOX by Megvii, Apache-2.0; trained on COCO 2017). Never commit model weights.
+supervision==0.31.3
+scipy>=1.13.1
+rich>=13.0.0
+requests>=2.28.0
+pydeprecate>=0.8.0,<0.14

@@ -226,3 +226,19 @@ def test_an_equal_instant_replacement_replaces_the_segment_label_with_the_values
     assert client.post("/api/v1/samples/tracking", json=body(0, 3.0, None)).status_code == 200
     latest = client.get("/api/v1/athletes/a1/tracking/latest").json()
     assert latest["speed_mps"] == 3.0 and "segment_id" not in latest
+
+
+def test_estimator_evaluation_uses_analytic_truth_and_reports_unavailable_time_and_phantom_distance():
+    from camera_adapter import evaluation as ev  # plain Python; the full comparison is scripts/camera_synthetic_check.py estimator
+    result = ev.evaluate_config(ev.CONFIGS[ev.DEFAULT_NAME], "development")
+    rows = {(r["scenario"], r["variant"]): r for r in result["rows"]}
+    clean = rows[("stationary", "clean")]
+    assert clean["distance"]["estimated_distance_m"] == 0.0 and clean["speed_mps"]["max_abs"] < 1e-6 and clean["first_sample_s"] == pytest.approx(0.32)
+    assert rows[("stationary", "noise 1.5 px")]["distance"]["estimated_distance_m"] > 1.0      # pixel noise inflates speed: a documented limitation
+    gap = rows[("constant speed, near", "1.0 s gap")]
+    assert gap["distance"]["continuity_breaks"] == 1 and gap["unavailable_s"] > 1.0
+    assert rows[("constant speed, near", "track change")]["segments"] == 2
+    summary = ev.summarize(result)
+    assert summary["lag_never_settled_clean"] == 0 and summary["throughput_observations_per_s"] > 0
+    sel = ev.select({name: summary if name == ev.DEFAULT_NAME else {**summary, "speed_steady_p95_mps": summary["speed_steady_p95_mps"] / 2} for name in ev.CONFIGS})
+    assert sel["decision"] == ev.DEFAULT_NAME     # better on noise alone is not enough under the fixed rule

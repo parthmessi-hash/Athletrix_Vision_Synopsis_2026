@@ -164,8 +164,12 @@ def run(workdir: Path, out: Callable[[str], None], frontend: Path | None, wait_b
                 phases.append({"athlete_id": a, "video_s": [t0, t1], "phase": what, "truth_path_m": truth_m, "engine_distance_m": mv["estimated_distance_m"],
                                "difference_m": None if mv["estimated_distance_m"] is None else round(mv["estimated_distance_m"] - truth_m, 3),
                                "samples": mv["sample_count"], "peak_speed_mps": mv["speed_peak_mps"], "excluded_intervals": mv["excluded_interval_count"],
+                               "continuity_breaks": mv["continuity_break_count"], "included_duration_s": mv["included_duration_seconds"],
                                "max_gap_s": mv["max_inter_sample_gap_seconds"]})
             check("engine movement summaries computed for every known phase", True, all(p["engine_distance_m"] is not None for p in phases))
+            check("red's pass behind the occluder is a continuity break the engine does not integrate across", True,
+                  phases[0]["continuity_breaks"] >= 1 and phases[0]["included_duration_s"] < 9.0)
+            check("recorded samples carry the adapter's segment labels", True, all(s.get("segment_id", "").startswith("cam-") for a in recorded for s in recorded[a]))
             package = c.get(f"{b}/api/v1/recordings/{rec_id}/package.zip").content
         engine.stop()
         (workdir / "camera.zip").write_bytes(package)
@@ -193,7 +197,7 @@ def run(workdir: Path, out: Callable[[str], None], frontend: Path | None, wait_b
             "movement_phases": phases, "checks": checks, "passed": synthetic["passed"] and all(v["passed"] for v in checks.values()),
             "limitations": ["Synthetic markers and a virtual camera: nothing here measures people, real footage or a real camera's timing.",
                             "Live-paced playback of a generated file; timestamps follow the stated anchor, not capture time.",
-                            "The engine's distance integrates the average of the two endpoint speeds over each interval up to DISTANCE_MAX_GAP_SECONDS (3 s), so it spans such gaps by assuming speed changed linearly; it never uses x/y positions, and the adapter itself never invents samples."]}
+                            "The engine's distance integrates the average of the two endpoint speeds over each eligible interval (it never uses x/y positions); intervals between different continuity segments (adapter resets, track changes) are excluded, so hidden periods are not counted and the reported distance covers only the included time."]}
 
 
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -> int:
@@ -220,7 +224,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
         out(f"  {'PASS' if v['passed'] else 'FAIL'}  {k}" + ("" if v["passed"] else f"  (expected {v['expected']!r}, got {v['actual']!r})"))
     for ph in report["movement_phases"]:
         out(f"  {ph['athlete_id']} {ph['video_s'][0]:g}-{ph['video_s'][1]:g} s ({ph['phase']}): engine {ph['engine_distance_m']} m vs path {ph['truth_path_m']} m "
-            f"(diff {ph['difference_m']} m; {ph['samples']} samples, {ph['excluded_intervals']} excluded intervals, largest gap {ph['max_gap_s']} s)")
+            f"(diff {ph['difference_m']} m; {ph['samples']} samples, {ph['excluded_intervals']} excluded intervals of which {ph['continuity_breaks']} continuity breaks, {ph['included_duration_s']:.2f} s included, largest gap {ph['max_gap_s']} s)")
     out(f"JSON report: {path}")
     return 0 if report["passed"] else 1
 
