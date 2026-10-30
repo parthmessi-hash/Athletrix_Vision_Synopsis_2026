@@ -617,7 +617,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (700 tests as of 2026-10-29; the synthetic camera test is skipped without OpenCV)
+# engine: full suite, isolated temporary databases (729 tests as of 2026-10-29; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -710,6 +710,26 @@ database file (exports, packages, backups, footage), authentication, and anythin
 
 Not established: person detection, player identification, real footage, lens distortion, capture-time mapping, real
 occlusion, any performance assessment.
+
+## Checkpoint: soccer-first alignment, video input, continuity, evaluation, camera review, coach context (2026-10-29)
+
+| Milestone | State and how it was checked |
+|-----------|------------------------------|
+| 1. Status and configuration | Section 0 separates implemented, synthetic-only, not yet evaluated and planned work; explicit, versioned configuration files: video tracking (detector + tracker), calibration, adapter (estimator, confidence, continuity), time mapping recorded in every log |
+| 2. Real-video person tracking | `camera_track_video.py`: YOLOX-S (Apache-2.0, pinned SHA-256, fetched once by `fetch_person_model.py`) + ByteTrack (`trackers`, Apache-2.0); tests with a fixture detector and with the real model; drawn-figure scene: 11 frames/s on CPU, coverage 0.87-1.0, no identity mismatches. **Real-footage evaluation pending** (no clip with verified permission) |
+| 3. Movement continuity | `segment_id` on tracking samples; the engine never integrates across a change; preserved through ingestion, storage, recording, export and import (`tests/test_continuity.py`); the marker run's hidden second is no longer counted |
+| 4. Estimator evaluation | `camera_synthetic_check.py estimator`: 4 configurations, 7 scenarios x 6 variants, development and held-out splits, selection rule fixed in advance: the 0.5 s default stays; documented limitations (phantom distance under pixel noise, turn bias of long windows, far-side suppression) |
+| 5. Camera review on the dashboard | Camera review card (segments, gaps, breaks, confidence, settings, local track-file viewer), timeline breaks at segment changes, tour and soccer wording; browser harness 71 of 71; checked on a served copy with a live synthetic stream and in recorded review |
+| 6. Coach context | `recordings/{id}/context` model and API, package format 3, removal; dashboard form and display; `tests/test_coach_context.py`; an entry saved and shown through the real page |
+
+Checks run: full backend suite 729 passed (fresh clone of origin/main: 727 passed, 2 skipped without the model file);
+`verify_camera_pipeline.py` 16 of 16; `verify_evaluation_workflow.py` 46 of 46; `verify_portable_workflow.py` passed.
+
+Remaining blockers for a real sideline camera together with the Zephyr: a permitted real clip and ground truth to
+measure errors; a ground point that survives lower-body occlusion; lens-distortion calibration; a measured
+capture-time mapping for the camera and a common clock with the wearable; a Zephyr adapter (the engine accepts its
+data shape, but nothing reads the device yet); identity across long losses; and, for any performance score, ball and
+event detection and a validated rubric.
 
 ## 10. Recommended next milestone
 
