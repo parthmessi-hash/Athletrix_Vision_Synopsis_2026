@@ -1139,30 +1139,32 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 2)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 3)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
 with a safe filename `athletrix-recording-package-<id>-<UTC time>.zip`. It
-contains exactly five members (version 1 packages, written before 2026-10-28,
-have the first four and are still read):
+contains exactly six members (version 1 packages, written before 2026-10-28,
+have the first four, version 2 packages the first five; both are still read):
 
 | Member | Content |
 |--------|---------|
-| `manifest.json` | `format`, `format_version` (2), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts) and `settings_at_export` |
+| `manifest.json` | `format`, `format_version` (3), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries) and `settings_at_export` |
 | `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording), `athletes` (the roster snapshot, in roster order) and `configuration_at_start` (the start-time snapshot, or null when the recording has none; see "Recording configuration snapshot") |
 | `samples.jsonl` | every recorded sample of every roster athlete in the existing `{type, sample}` interchange format, by athlete in roster order, then instant, physiological first at equal instants; payloads exactly as stored |
 | `periods.json` | saved periods: original `id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as saved), `created_at` |
 | `receipts.jsonl` | receipt metadata for the samples that have it: one `{type, athlete_id, timestamp, received_at}` per line, `received_at` being when the engine where the recording was made received the sample live (see "Timing instrumentation"); kept apart so `samples.jsonl` stays in the interchange format |
+| `context.json` | the recording's coach-context entries exactly as stored, corrections included (see "Coach context"); may be an empty list |
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
 `settings_at_export` records the engine settings when the file was written; it
 does not claim they were in force while the data was recorded or reviewed, and
 an importing engine applies its own settings; the start-time snapshot in
-`recording.json` is a separate, earlier record. An engine from before version 2
-refuses a version 2 package with "unsupported format_version 2" rather than
-silently dropping the new fields. The checksums detect
+`recording.json` is a separate, earlier record. An engine from before version 3
+refuses a version 3 package with "unsupported format_version 3" rather than
+silently dropping the new member, and tracking samples carrying `segment_id`
+need an engine that knows that field. The checksums detect
 accidental corruption only. The package is not a database backup and not
 evidence that the measurements are accurate: it holds no registry, rolling
 history, device status, other recordings, configuration, credentials, paths or
@@ -1476,6 +1478,49 @@ recorded sample and replays identically into a second isolated backend. Exit 0
 when every check passed. The transaction-rollback case (a failed recording
 write leaves the rolling store unchanged) is covered by the backend test
 `tests/test_recording_ingest.py`, since it cannot be induced from outside.
+
+## Coach context (`recordings/{id}/context` endpoints)
+
+Time-bounded match context entered by people and kept with a recording, as **inputs prepared for a later substitution
+model**; it is not a score and the engine never interprets it (`app/models/context.py`).
+
+```bash
+R=http://127.0.0.1:8000/api/v1/recordings/<rec id>
+# team-level: formation and tactical objective from kick-off
+curl -s -X POST "$R/context" -H 'Content-Type: application/json' -d '{"effective_from": "2026-10-29T15:00:00Z",
+  "match_label": "U17 v Fictional FC", "formation": {"status": "recorded", "value": "4-3-3"},
+  "tactical_instruction": {"status": "recorded", "value": "press high for the first 15 minutes"},
+  "source": "head_coach", "certainty": "confirmed"}'
+# athlete-level: role, instruction, partnerships, task-specific evidence (each item recorded | unknown | not_assessed)
+curl -s -X POST "$R/context" -H 'Content-Type: application/json' -d '{"athlete_id": "athlete-1", "effective_from": "2026-10-29T15:20:00Z",
+  "role": {"status": "recorded", "value": "inverted left back"},
+  "partnerships": {"status": "recorded", "items": [{"partner_athlete_id": "athlete-2", "note": "rotates with the left winger on build-up"}]},
+  "evidence": {"status": "recorded", "items": [{"kind": "pressure_situation", "task": "defending a late corner", "description": "won the first header", "observed_at": "2026-10-29T15:41:10Z"}]},
+  "source": "assistant_coach", "certainty": "probable"}'
+curl -s "$R/context"                                                                   # every entry, by effective time
+curl -s "$R/context/effective?at=2026-10-29T15:30:00Z&athlete_id=athlete-1"            # team and athlete entries in force then
+```
+
+- **Scope**: an entry without `athlete_id` is team-level (formation, tactical objective); an entry with one is
+  athlete-level (role, individual instruction, partnerships with other roster athletes, leadership or
+  pressure-situation evidence tied to a task). Items outside an entry's scope must stay unrecorded.
+- **Explicit unknowns**: every item has `status` `recorded` (value required), `unknown` (asked, nobody knows) or
+  `not_assessed` (the default: nobody looked). Nothing missing is turned into a zero.
+- **Time**: `effective_from` must lie within the recording (active recordings: up to backend time + 5 s);
+  optional `effective_to` is exclusive. The entry in force for a scope is the one with the latest `effective_from` at
+  or before the instant (and not expired); at equal `effective_from` the later-created entry wins, so a **correction is
+  a new entry** and the history stays reviewable. Team and athlete entries are selected separately.
+- **Provenance**: `source` (head_coach, assistant_coach, analyst, player_self_report, other), optional `recorded_by`,
+  the source's own `certainty` (confirmed, probable, uncertain), `created_at`, and `origin` (`this_engine`, or
+  `source_engine` with `source_entry_id` for entries imported from a package).
+- **No numbers**: there are no numeric fields at all: no ratings, clutch bonuses, leadership scores or personality or
+  mental-health descriptions. Evidence describes a task and what was observed ("organised the back line at set
+  pieces"), never a trait.
+- **Preserved**: stored in SQLite (`recording_context`), carried in packages (format 3, `context.json`; packages of
+  format 1 and 2 are still read and carry none), imported with new ids, and removed with the recording or athlete by
+  `scripts/local_data.py` (removing an athlete also deletes their entries and drops partnerships naming them from
+  other entries; a partnership list left empty becomes `unknown`).
+- The engine dashboard has a Coach context card (engine mode) with a form and a list of entries in force.
 
 ## Recording configuration snapshot (`configuration_at_start`)
 

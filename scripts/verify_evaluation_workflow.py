@@ -58,6 +58,7 @@ for p in (str(ROOT), str(SCRIPTS)):
 
 import local_data  # noqa: E402
 import recording_package  # noqa: E402
+from app.core.recording_package import FORMAT_VERSION as PACKAGE_VERSION  # noqa: E402
 from validate_team_scale import IsolatedBackend  # noqa: E402
 
 A1, A2, A3 = "eval-01", "eval-02", "eval-03"
@@ -132,15 +133,17 @@ def cli(main: Callable, *argv, **kw) -> tuple[int, str]:
 
 
 def to_v1(package: bytes) -> bytes:
-    """The same recording as a format version 1 package: no configuration snapshot, no receipts member."""
+    """The same recording as a format version 1 package: no configuration snapshot, no receipts or context member."""
     with zipfile.ZipFile(io.BytesIO(package)) as zf:
         files = {n: zf.read(n) for n in zf.namelist()}
     rec = {k: v for k, v in json.loads(files["recording.json"]).items() if k != "configuration_at_start"}
     files["recording.json"] = json.dumps(rec, indent=2).encode()
     manifest = json.loads(files.pop("manifest.json"))
     files.pop("receipts.jsonl")
+    files.pop("context.json", None)
     manifest["format_version"] = 1
     manifest["counts"].pop("receipts")
+    manifest["counts"].pop("context_entries", None)
     manifest["members"] = {n: {"sha256": hashlib.sha256(b).hexdigest(), "bytes": len(b)} for n, b in files.items()}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -248,7 +251,7 @@ def run(out: Callable[[str], None], workdir: Path, backend_factory: Callable = B
             manifest = json.loads(zf.read("manifest.json"))
             rec_doc = json.loads(zf.read("recording.json"))
             receipts = {(r["athlete_id"], r["type"], r["timestamp"]): r["received_at"] for r in map(json.loads, zf.read("receipts.jsonl").decode().splitlines())}
-        check("package keeps the start snapshot apart from export-time settings", [4.0, 6.0, 2],
+        check("package keeps the start snapshot apart from export-time settings", [4.0, 6.0, PACKAGE_VERSION],
               [rec_doc["configuration_at_start"]["movement"]["high_speed_threshold_mps"], manifest["settings_at_export"]["high_speed_threshold_mps"], manifest["format_version"]])
         bounded = all(posts[k]["before"] <= parse(receipts[(k[0], k[1], z(at(k[2])))]) <= posts[k]["after"] for k in posts if k[0] in (A1, A2) and k[2] != "replacement" and k != (A1, "physiological", REPLACED_S))
         check("every receipt lies between the script's clock readings around its POST (same machine)", True, bounded)

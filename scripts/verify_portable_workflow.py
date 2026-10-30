@@ -53,7 +53,8 @@ for p in (str(ROOT), str(SCRIPTS)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-import recording_package  # noqa: E402
+import recording_package
+from app.core.recording_package import FORMAT_VERSION as PACKAGE_VERSION  # noqa: E402
 from compare_retention import close, independent_movement  # noqa: E402
 from validate_team_scale import IsolatedBackend, RequestRecord  # noqa: E402
 from verify_period_workflow import start_backend  # noqa: E402
@@ -180,7 +181,7 @@ def run(seconds: int, out: Callable[[str], None], workdir: Path, backend_factory
             pkg_resp = c.get(f"{sb}/api/v1/recordings/{rec_id}/package.zip")
             pkg_path = workdir / "package.zip"
             pkg_path.write_bytes(pkg_resp.content)
-            checks["package_downloaded"] = pkg_resp.status_code == 200 and pkg_resp.headers.get("X-Athletrix-Format") == "athletrix-recording-package/1"
+            checks["package_downloaded"] = pkg_resp.status_code == 200 and pkg_resp.headers.get("X-Athletrix-Format") == f"athletrix-recording-package/{PACKAGE_VERSION}"
             src = {"jsonl": {a: jsonl_of(c, sb, rec_id, a) for a in ATHLETES + [HAND]},
                    "periods": {a: c.get(f"{sb}/api/v1/recordings/{rec_id}/athletes/{a}/periods").json() for a in ATHLETES + [HAND]},
                    "batch": {a: c.get(f"{sb}/api/v1/recordings/{rec_id}/athletes/{a}/period-reviews").json() for a in ATHLETES + [HAND]},

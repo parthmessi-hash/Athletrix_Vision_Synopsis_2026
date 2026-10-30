@@ -4,7 +4,8 @@ Everything is written in one BEGIN IMMEDIATE transaction: the recording (stopped
 id), its roster snapshot, the start-time configuration snapshot when the package carries one (origin "source_engine"), every sample exactly as normalised in the package, receipt metadata carried in the package
 (stored with origin "source_engine": received by the engine where the recording was made, never by this one; samples
 imported from a package without it have none), every saved period (new ids, exact bounds,
-original labels and creation times) and a `recording_imports` row mapping the new ids to the original ones. Any failure
+original labels and creation times), every coach-context entry (new id, origin "source_engine", original id kept as
+source_entry_id, content unchanged) and a `recording_imports` row mapping the new ids to the original ones. Any failure
 rolls the whole import back. The athlete registry, rolling history, device status and any active recording are never
 touched, and nothing existing is overwritten or merged.
 
@@ -22,6 +23,7 @@ from datetime import datetime
 
 from app.core.recording_package import Package, iso
 from app.db import Database, to_utc_iso
+from app.store import context as context_store
 from app.store.periods import new_period_id
 from app.store.recordings import TABLES, RecordingStore, new_recording_id
 
@@ -87,6 +89,13 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
             id_map[p["original_id"]] = pid
         if checkpoint:
             checkpoint("periods")
+        for e in pkg.context:
+            cid = context_store.new_context_id(now)
+            while c.execute("SELECT 1 FROM recording_context WHERE id = ?", (cid,)).fetchone():
+                cid = context_store.new_context_id(now)
+            context_store.insert(c, e.model_copy(update={"id": cid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": e.source_entry_id or e.id}))
+        if checkpoint:
+            checkpoint("context")
         c.execute("INSERT INTO recording_imports (recording_id, source_recording_id, package_sha256, package_format, package_generated_at, imported_at, period_id_map) VALUES (?, ?, ?, ?, ?, ?, ?)",
                   (new_id, rec["id"], pkg.package_sha256, f"{pkg.manifest['format']}/{pkg.manifest['format_version']}", pkg.manifest["generated_at"], to_utc_iso(now), json.dumps(id_map, sort_keys=True)))
         if checkpoint:

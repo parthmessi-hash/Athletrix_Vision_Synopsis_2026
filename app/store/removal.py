@@ -41,7 +41,7 @@ from app.core.db_lease import Lease, LeaseUnavailable
 from app.store.recordings import TABLES as RECORDING_SAMPLE_TABLES
 
 ROLLING_SAMPLE_TABLES = ("physiological_samples", "tracking_samples")
-RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_configurations", "recording_imports")
+RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_configurations", "recording_imports")
 
 CANNOT_REMOVE = [
     "files exported earlier (JSON Lines, CSV, review JSON) and portable packages already copied anywhere, including other engines' databases that imported them",
@@ -73,7 +73,7 @@ class Plan:
     def report(self) -> dict:
         return {"scope": self.scope, "target": self.target, "found": self.found, "executable": self.found and not self.refusals,
                 "deletes": [{k: d[k] for k in ("table", "count", "detail")} for d in self.deletes],
-                "updates": [{k: u[k] for k in ("table", "recording_id", "detail")} for u in self.updates],
+                "updates": [{k: u[k] for k in ("table", "recording_id", "id", "detail") if k in u} for u in self.updates],
                 "rows_to_delete": self.total_rows, "kept": self.kept, "refusals": self.refusals, "limitations": self.limitations,
                 "cannot_remove": CANNOT_REMOVE}
 
@@ -126,13 +126,14 @@ def inventory(c: sqlite3.Connection) -> dict:
             recordings.append({"id": r["id"], "name": r["name"], "status": "stopped" if r["stopped_at"] else "active", "started_at": r["started_at"], "stopped_at": r["stopped_at"], "roster": roster,
                                **{t: count(c, t, "recording_id = ?", (r["id"],)) for t in RECORDING_SCOPED if t in have and t != "recording_athletes"}})
     ids: set[str] = {r[0] for r in c.execute("SELECT id FROM athletes")} if "athletes" in have else set()
-    for t in (*ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods"):
+    per_athlete_tables = (*ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context")
+    for t in per_athlete_tables:
         if t in have:
-            ids |= {r[0] for r in c.execute(f"SELECT DISTINCT athlete_id FROM {t}")}
+            ids |= {r[0] for r in c.execute(f"SELECT DISTINCT athlete_id FROM {t}") if r[0] is not None}   # team-level context has none
     athletes = []
     for a in sorted(ids):
         athletes.append({"id": a, "registered": "athletes" in have and count(c, "athletes", "id = ?", (a,)) > 0,
-                         **{t: count(c, t, "athlete_id = ?", (a,)) for t in (*ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods") if t in have}})
+                         **{t: count(c, t, "athlete_id = ?", (a,)) for t in per_athlete_tables if t in have}})
     return {"tables": counts, "recordings": recordings, "athletes": athletes,
             "note": "Counts of rows in this database file only. Device status is keyed by device id, not athlete."}
 
@@ -184,7 +185,7 @@ def _device_ids(c, have: set[str], where: str, params: tuple) -> set[str]:
 def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tuple[str, ...] = ()) -> Plan:
     plan = Plan("athlete", athlete_id)
     have = tables(c)
-    tables_with_athlete = [t for t in ("athletes", *ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods") if t in have]
+    tables_with_athlete = [t for t in ("athletes", *ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context") if t in have]
     present = any(count(c, t, "id = ?" if t == "athletes" else "athlete_id = ?", (athlete_id,)) for t in tables_with_athlete)
     if not present:
         if device_status_ids:
@@ -196,7 +197,7 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
         _delete(plan, c, have, t, "athlete_id = ?", (athlete_id,), "rolling samples")
 
     rec_ids: set[str] = set()
-    for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods"):
+    for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context"):
         if t in have:
             rec_ids |= {r[0] for r in c.execute(f"SELECT DISTINCT recording_id FROM {t} WHERE athlete_id = ?", (athlete_id,))}
     for rec_id in sorted(rec_ids):
@@ -208,9 +209,19 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
         if not others:
             _whole_recording(plan, c, have, rec_id, f"its only roster member was {athlete_id}")
             continue
-        for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods"):
+        for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context"):
             _delete(plan, c, have, t, "recording_id = ? AND athlete_id = ?", (rec_id, athlete_id), f"in shared recording {rec_id}")
-        plan.kept.append(f"recording {rec_id} stays valid for {', '.join(others)}: its row, configuration snapshot and their samples and periods are kept")
+        if "recording_context" in have:   # other entries naming the athlete as a partner: drop that partnership, keep the rest
+            for row in c.execute("SELECT id, payload FROM recording_context WHERE recording_id = ? AND (athlete_id IS NULL OR athlete_id != ?)", (rec_id, athlete_id)).fetchall():
+                entry = json.loads(row["payload"])
+                items = entry.get("partnerships", {}).get("items", [])
+                kept_items = [i for i in items if i.get("partner_athlete_id") != athlete_id]
+                if len(kept_items) != len(items):
+                    entry["partnerships"] = {"status": "recorded" if kept_items else "unknown", "items": kept_items}
+                    plan.updates.append({"table": "recording_context", "recording_id": rec_id, "id": row["id"], "payload": json.dumps(entry, separators=(",", ":")),
+                                         "detail": f"drop the partnership with {athlete_id} from context entry {row['id']} of recording {rec_id}"
+                                                   + ("" if kept_items else " (its partnership status becomes 'unknown')")})
+        plan.kept.append(f"recording {rec_id} stays valid for {', '.join(others)}: its row, configuration snapshot, team-level context and their samples, periods and context entries are kept")
         if "recording_imports" in have:
             imp = c.execute("SELECT period_id_map FROM recording_imports WHERE recording_id = ?", (rec_id,)).fetchone()
             if imp is not None:
@@ -282,7 +293,10 @@ def _execute_locked(path: Path, make_plan, checkpoint) -> Plan:
                 if checkpoint:
                     checkpoint(d["table"])
             for u in plan.updates:
-                c.execute("UPDATE recording_imports SET period_id_map = ? WHERE recording_id = ?", (json.dumps(u["period_id_map"], sort_keys=True), u["recording_id"]))
+                if u["table"] == "recording_context":
+                    c.execute("UPDATE recording_context SET payload = ? WHERE id = ?", (u["payload"], u["id"]))
+                else:
+                    c.execute("UPDATE recording_imports SET period_id_map = ? WHERE recording_id = ?", (json.dumps(u["period_id_map"], sort_keys=True), u["recording_id"]))
             for d in plan.deletes:      # verify inside the transaction: everything planned is gone
                 if count(c, d["table"], d["where"], d["params"]):
                     raise RuntimeError(f"rows remain in {d['table']} after deletion")

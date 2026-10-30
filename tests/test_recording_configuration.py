@@ -61,7 +61,7 @@ def test_snapshot_is_captured_at_start_and_kept_when_settings_change(client, fro
     assert snap["retention"] == {"physiological_retention_samples": 300, "tracking_retention_samples": 3000}
     assert snap["timing"] == {"max_future_timestamp_skew_seconds": 5.0}
     assert snap["effort_review"] == {"min_effort_seconds": 1.0, "max_effort_seconds": 120.0, "before_seconds": 10.0, "after_seconds": 30.0}
-    assert snap["engine"] == {"application": "Athletrix Engine", "version": "0.1.0", "code_revision": "1bfd555", "package_format_version": 2}
+    assert snap["engine"] == {"application": "Athletrix Engine", "version": "0.1.0", "code_revision": "1bfd555", "package_format_version": 3}
     assert snap["operator_supplied"] == {**ADAPTER, "verified_by_engine": False}
     text = json.dumps(snap)
     for forbidden in ("database_path", "athletrix.db", "cors", "localhost", "/Users/", "/private/", "host", "port"):

@@ -17,6 +17,8 @@ Design
     open like the others and never pruned. `recording_configurations` holds the configuration snapshot captured when a
     recording started (origin "this_engine") or carried in an imported package ("source_engine"); recordings made before
     snapshots existed have no row, which means "unavailable", never a reconstruction.
+  - `recording_context` holds coach-context entries of a recording (app/models/context.py): time-bounded, entered by
+    people, never edited in place (a correction is a newer entry); `athlete_id` NULL means a team-level entry.
   - Optional receipt metadata (`receipt`, JSON text or NULL) on every sample row: when this engine received the sample
     live (`{"received_at", "origin": "this_engine"}`) or, for imported recordings, when the original engine did
     (`"origin": "source_engine"`). NULL means not recorded (rows written before the column existed, or stored by a tool
@@ -114,6 +116,15 @@ CREATE TABLE IF NOT EXISTS recording_configurations (
     origin       TEXT NOT NULL,
     snapshot     TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS recording_context (
+    id                 TEXT PRIMARY KEY,
+    recording_id       TEXT NOT NULL,
+    athlete_id         TEXT,
+    effective_from_utc TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    payload            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recording_context_by_scope ON recording_context (recording_id, athlete_id, effective_from_utc);
 CREATE TABLE IF NOT EXISTS recording_imports (
     recording_id         TEXT PRIMARY KEY,
     source_recording_id  TEXT NOT NULL,

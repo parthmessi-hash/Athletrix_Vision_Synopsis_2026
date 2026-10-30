@@ -66,7 +66,7 @@ def describe(summary: dict, out: Callable[[str], None]) -> None:
     out(f"Package: {summary['format']} version {summary['format_version']}, generated {summary['generated_at']}, SHA-256 {summary['package_sha256'][:16]}…")
     out(f"Recording: \"{r['name']}\" (original id {r['id']}) · recorded {r['started_at']} to {r['stopped_at']} (backend clock while recording)")
     c = summary["counts"]
-    out(f"Contents: {len(summary['athletes'])} athletes · {c['physiological_samples']} physiological and {c['tracking_samples']} tracking samples · {c['periods']} saved periods")
+    out(f"Contents: {len(summary['athletes'])} athletes · {c['physiological_samples']} physiological and {c['tracking_samples']} tracking samples · {c['periods']} saved periods · {c.get('context_entries', 0)} coach-context entries")
     for a in summary["athletes"]:
         def b(s):
             return f"{s['count']} ({s['bounds']['earliest']} to {s['bounds']['latest']})" if s["bounds"] else "0"
