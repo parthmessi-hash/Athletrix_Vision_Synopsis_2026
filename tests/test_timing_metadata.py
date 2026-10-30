@@ -7,6 +7,7 @@ import zipfile
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from app.core.recording_package import FORMAT_VERSION as PV
 
 from app.core import clock
 from app.core.recording_package import PackageError, read_package
@@ -112,7 +113,7 @@ def test_recording_rows_carry_receipts_and_packages_carry_them_as_the_source_eng
 
     # receipts that do not match a sample, or a version 1 package with receipts, are refused
     manifest = json.loads(files["manifest.json"])
-    def repack(changes, version=3):
+    def repack(changes, version=PV):
         fs = {**files, **changes}
         m = {**manifest, "format_version": version, "members": {n: {"sha256": __import__("hashlib").sha256(fs[n]).hexdigest(), "bytes": len(fs[n])} for n in fs if n != "manifest.json"}}
         buf = io.BytesIO()

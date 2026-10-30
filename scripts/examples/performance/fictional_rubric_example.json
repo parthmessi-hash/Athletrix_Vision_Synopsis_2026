@@ -1,0 +1,17 @@
+{
+  "format": "athletrix-performance-rubric",
+  "version": "fictional-example-1",
+  "fictional": true,
+  "note": "FICTIONAL test values only. These weights, floors, ceilings and minimum opportunities were made up to exercise the calculation. They are not the team's rubric, not validated and must not be used to judge any athlete.",
+  "areas": {
+    "execution": {"weight": 1.0, "measures": [
+      {"measure": "pass_completion", "weight": 2.0, "floor": 0.5, "ceiling": 0.9, "min_opportunities": 5},
+      {"measure": "possession_retention", "weight": 1.0, "floor": 0.6, "ceiling": 1.0, "min_opportunities": 5}]},
+    "decision_making": {"weight": 1.0, "measures": [
+      {"measure": "instruction_followed", "weight": 1.0, "floor": 0.0, "ceiling": 1.0, "partial_credit": 0.5, "min_opportunities": 2}]},
+    "movement_positioning": {"weight": 1.0, "measures": [
+      {"measure": "instruction_followed", "weight": 1.0, "floor": 0.0, "ceiling": 1.0, "partial_credit": 0.5, "min_opportunities": 2}]},
+    "coach_strategy": {"weight": 1.0, "measures": [
+      {"measure": "instruction_followed", "weight": 1.0, "floor": 0.0, "ceiling": 1.0, "partial_credit": 0.5, "min_opportunities": 2}]}
+  }
+}

@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from app.core.recording_package import FORMAT_VERSION as PV
 from fastapi.testclient import TestClient
 
 from app.core import clock
@@ -94,7 +95,7 @@ def dest_client(path):
 
 def test_inspect_and_dry_run_write_nothing(package, tmp_path):
     code, text = run(["inspect", str(package["path"])])
-    assert code == 0 and "VALID PACKAGE" in text and "2 athletes · 24 physiological and 24 tracking samples · 2 saved periods" in text and "athletrix-recording-package version 3" in text and "Configuration at recording start (captured by the source engine)" in text
+    assert code == 0 and "VALID PACKAGE" in text and "2 athletes · 24 physiological and 24 tracking samples · 2 saved periods" in text and f"athletrix-recording-package version {PV}" in text and "Configuration at recording start (captured by the source engine)" in text
     code, js = run(["inspect", str(package["path"]), "--json"])
     s = json.loads(js)
     assert s["athletes"][0]["physiological"] == {"count": 12, "bounds": {"earliest": z(0), "latest": z(11)}} and s["recording"]["started_at"] == "2026-10-26T20:00:00Z"
@@ -127,7 +128,7 @@ def test_import_creates_a_new_stopped_recording_with_provenance_and_touches_noth
         detail = c.get(f"{REC}/{new_id}").json()
         assert detail["status"] == "stopped" and detail["started_at"] == "2026-10-26T20:00:00Z" and detail["stopped_at"] == "2026-10-26T20:00:20Z" and detail["name"] == "Tuesday practice"
         assert [a["id"] for a in detail["athletes"]] == ["a1", "a2"] and detail["athletes"][0]["name"] == "Fictional a1"
-        assert detail["imported"]["source_recording_id"] == package["rec"] and detail["imported"]["period_id_map"] == res["period_id_map"] and detail["imported"]["package_format"] == "athletrix-recording-package/3"
+        assert detail["imported"]["source_recording_id"] == package["rec"] and detail["imported"]["period_id_map"] == res["period_id_map"] and detail["imported"]["package_format"] == f"athletrix-recording-package/{PV}"
         assert detail["configuration_at_start"]["status"] == "captured" and detail["configuration_at_start"]["origin"] == "source_engine" and detail["configuration_at_start"]["snapshot"]["captured_at"] == "2026-10-26T20:00:00Z"
         # every sample exactly as in the package (offsets, nulls, zeros, confidence)
         exported = files_of(package["bytes"])["samples.jsonl"].decode().splitlines()
@@ -187,7 +188,7 @@ def corrupt_cases(files):
         "unknown athlete": (repack({**files, "samples.jsonl": files["samples.jsonl"] + (json.dumps({"type": "physiological", "sample": {**first["sample"], "athlete_id": "intruder"}}) + "\n").encode()}), "not in the recording's roster"),
         "after stop": (repack({**files, "samples.jsonl": files["samples.jsonl"] + (json.dumps(late) + "\n").encode()}), "after the recording stopped"),
         "count mismatch": (repack({**files, "manifest.json": json.dumps({**manifest, "counts": {**manifest["counts"], "tracking_samples": 23}}).encode()}), "counts do not match"),
-        "version": (repack({**files, "manifest.json": json.dumps({**manifest, "format_version": 4}).encode()}), "unsupported format_version 4"),
+        "version": (repack({**files, "manifest.json": json.dumps({**manifest, "format_version": PV + 1}).encode()}), f"unsupported format_version {PV + 1}"),
         "missing member": (repack({k: v for k, v in files.items() if k != "periods.json"}), "missing required members: periods.json"),
         "path member": (repack(files, extra={"../evil.sh": b"echo"}), "unexpected members"),
         "period athlete": (repack({**files, "periods.json": json.dumps([{**periods[0], "athlete_id": "intruder"}, periods[1]]).encode()}), "is not in the recording's roster"),

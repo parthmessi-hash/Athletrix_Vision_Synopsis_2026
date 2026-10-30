@@ -41,7 +41,7 @@ from app.core.db_lease import Lease, LeaseUnavailable
 from app.store.recordings import TABLES as RECORDING_SAMPLE_TABLES
 
 ROLLING_SAMPLE_TABLES = ("physiological_samples", "tracking_samples")
-RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_configurations", "recording_imports")
+RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_configurations", "recording_imports")
 
 CANNOT_REMOVE = [
     "files exported earlier (JSON Lines, CSV, review JSON) and portable packages already copied anywhere, including other engines' databases that imported them",
@@ -126,7 +126,7 @@ def inventory(c: sqlite3.Connection) -> dict:
             recordings.append({"id": r["id"], "name": r["name"], "status": "stopped" if r["stopped_at"] else "active", "started_at": r["started_at"], "stopped_at": r["stopped_at"], "roster": roster,
                                **{t: count(c, t, "recording_id = ?", (r["id"],)) for t in RECORDING_SCOPED if t in have and t != "recording_athletes"}})
     ids: set[str] = {r[0] for r in c.execute("SELECT id FROM athletes")} if "athletes" in have else set()
-    per_athlete_tables = (*ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context")
+    per_athlete_tables = (*ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance")
     for t in per_athlete_tables:
         if t in have:
             ids |= {r[0] for r in c.execute(f"SELECT DISTINCT athlete_id FROM {t}") if r[0] is not None}   # team-level context has none
@@ -185,7 +185,7 @@ def _device_ids(c, have: set[str], where: str, params: tuple) -> set[str]:
 def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tuple[str, ...] = ()) -> Plan:
     plan = Plan("athlete", athlete_id)
     have = tables(c)
-    tables_with_athlete = [t for t in ("athletes", *ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context") if t in have]
+    tables_with_athlete = [t for t in ("athletes", *ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance") if t in have]
     present = any(count(c, t, "id = ?" if t == "athletes" else "athlete_id = ?", (athlete_id,)) for t in tables_with_athlete)
     if not present:
         if device_status_ids:
@@ -197,7 +197,7 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
         _delete(plan, c, have, t, "athlete_id = ?", (athlete_id,), "rolling samples")
 
     rec_ids: set[str] = set()
-    for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context"):
+    for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance"):
         if t in have:
             rec_ids |= {r[0] for r in c.execute(f"SELECT DISTINCT recording_id FROM {t} WHERE athlete_id = ?", (athlete_id,))}
     for rec_id in sorted(rec_ids):
@@ -209,7 +209,7 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
         if not others:
             _whole_recording(plan, c, have, rec_id, f"its only roster member was {athlete_id}")
             continue
-        for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context"):
+        for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance"):
             _delete(plan, c, have, t, "recording_id = ? AND athlete_id = ?", (rec_id, athlete_id), f"in shared recording {rec_id}")
         if "recording_context" in have:   # other entries naming the athlete as a partner: drop that partnership, keep the rest
             for row in c.execute("SELECT id, payload FROM recording_context WHERE recording_id = ? AND (athlete_id IS NULL OR athlete_id != ?)", (rec_id, athlete_id)).fetchall():

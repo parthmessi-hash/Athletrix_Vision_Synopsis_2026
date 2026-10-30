@@ -133,7 +133,7 @@ def cli(main: Callable, *argv, **kw) -> tuple[int, str]:
 
 
 def to_v1(package: bytes) -> bytes:
-    """The same recording as a format version 1 package: no configuration snapshot, no receipts or context member."""
+    """The same recording as a format version 1 package: no configuration snapshot, no receipts, context or performance member."""
     with zipfile.ZipFile(io.BytesIO(package)) as zf:
         files = {n: zf.read(n) for n in zf.namelist()}
     rec = {k: v for k, v in json.loads(files["recording.json"]).items() if k != "configuration_at_start"}
@@ -141,9 +141,11 @@ def to_v1(package: bytes) -> bytes:
     manifest = json.loads(files.pop("manifest.json"))
     files.pop("receipts.jsonl")
     files.pop("context.json", None)
+    files.pop("performance.json", None)
     manifest["format_version"] = 1
     manifest["counts"].pop("receipts")
     manifest["counts"].pop("context_entries", None)
+    manifest["counts"].pop("performance_observations", None)
     manifest["members"] = {n: {"sha256": hashlib.sha256(b).hexdigest(), "bytes": len(b)} for n, b in files.items()}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:

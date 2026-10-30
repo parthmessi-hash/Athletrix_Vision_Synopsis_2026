@@ -1,6 +1,7 @@
 """GET /recordings/{id}/package.zip: a portable package of one stopped recording, read in one snapshot. All data is fictional."""
 
 import hashlib
+from app.core.recording_package import FORMAT_VERSION as PV
 import io
 import json
 import zipfile
@@ -66,15 +67,15 @@ def unzip(body: bytes) -> dict[str, bytes]:
 
 def test_package_holds_the_whole_recording_as_stored_with_checksums(client, stopped):
     r = client.get(f"{REC}/{stopped['rec']}/package.zip")
-    assert r.status_code == 200 and r.headers["content-type"] == "application/zip" and r.headers["X-Athletrix-Format"] == "athletrix-recording-package/3"
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip" and r.headers["X-Athletrix-Format"] == f"athletrix-recording-package/{PV}"
     assert r.headers["Content-Disposition"] == f'attachment; filename="athletrix-recording-package-{stopped["rec"]}-20261026T200820Z.zip"'
     files = unzip(r.content)
-    assert sorted(files) == ["context.json", "manifest.json", "periods.json", "receipts.jsonl", "recording.json", "samples.jsonl"]
+    assert sorted(files) == ["context.json", "manifest.json", "performance.json", "periods.json", "receipts.jsonl", "recording.json", "samples.jsonl"]
     manifest = json.loads(files["manifest.json"])
-    assert manifest["format"] == "athletrix-recording-package" and manifest["format_version"] == 3 and manifest["generated_at"] == "2026-10-26T20:08:20Z"
+    assert manifest["format"] == "athletrix-recording-package" and manifest["format_version"] == PV and manifest["generated_at"] == "2026-10-26T20:08:20Z"
     for name in ("recording.json", "samples.jsonl", "periods.json", "receipts.jsonl", "context.json"):
         assert manifest["members"][name] == {"sha256": hashlib.sha256(files[name]).hexdigest(), "bytes": len(files[name])}
-    assert manifest["counts"] == {"athletes": 2, "physiological_samples": 320, "tracking_samples": 320, "samples_by_athlete": {"a2": {"physiological": 0, "tracking": 0}, "a1": {"physiological": 320, "tracking": 320}}, "periods": 2, "receipts": 640, "context_entries": 0}
+    assert manifest["counts"] == {"athletes": 2, "physiological_samples": 320, "tracking_samples": 320, "samples_by_athlete": {"a2": {"physiological": 0, "tracking": 0}, "a1": {"physiological": 320, "tracking": 320}}, "periods": 2, "receipts": 640, "context_entries": 0, "performance_observations": 0}
     assert manifest["settings_at_export"]["high_speed_threshold_mps"] == 5.0 and "not necessarily" in manifest["settings_at_export"]["note"]
     rec = json.loads(files["recording.json"])
     assert rec["id"] == stopped["rec"] and rec["status"] == "stopped" and rec["started_at"] == "2026-10-26T20:00:01Z" and rec["stopped_at"] == "2026-10-26T20:06:40Z"

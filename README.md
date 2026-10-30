@@ -1139,30 +1139,31 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 3)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 4)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
 with a safe filename `athletrix-recording-package-<id>-<UTC time>.zip`. It
-contains exactly six members (version 1 packages, written before 2026-10-28,
-have the first four, version 2 packages the first five; both are still read):
+contains exactly seven members (version 1 packages, written before 2026-10-28,
+have the first four, version 2 packages the first five, version 3 the first six; all are still read):
 
 | Member | Content |
 |--------|---------|
-| `manifest.json` | `format`, `format_version` (3), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries) and `settings_at_export` |
+| `manifest.json` | `format`, `format_version` (4), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries, performance observations) and `settings_at_export` |
 | `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording), `athletes` (the roster snapshot, in roster order) and `configuration_at_start` (the start-time snapshot, or null when the recording has none; see "Recording configuration snapshot") |
 | `samples.jsonl` | every recorded sample of every roster athlete in the existing `{type, sample}` interchange format, by athlete in roster order, then instant, physiological first at equal instants; payloads exactly as stored |
 | `periods.json` | saved periods: original `id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as saved), `created_at` |
 | `receipts.jsonl` | receipt metadata for the samples that have it: one `{type, athlete_id, timestamp, received_at}` per line, `received_at` being when the engine where the recording was made received the sample live (see "Timing instrumentation"); kept apart so `samples.jsonl` stays in the interchange format |
 | `context.json` | the recording's coach-context entries exactly as stored, corrections included (see "Coach context"); may be an empty list |
+| `performance.json` | the recording's individual-performance evidence observations (see "Individual-performance evidence"); may be an empty list |
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
 `settings_at_export` records the engine settings when the file was written; it
 does not claim they were in force while the data was recorded or reviewed, and
 an importing engine applies its own settings; the start-time snapshot in
-`recording.json` is a separate, earlier record. An engine from before version 3
-refuses a version 3 package with "unsupported format_version 3" rather than
+`recording.json` is a separate, earlier record. An engine from before version 4
+refuses a version 4 package with "unsupported format_version 4" rather than
 silently dropping the new member, and tracking samples carrying `segment_id`
 need an engine that knows that field. The checksums detect
 accidental corruption only. The package is not a database backup and not
@@ -1521,6 +1522,38 @@ curl -s "$R/context/effective?at=2026-10-29T15:30:00Z&athlete_id=athlete-1"     
   `scripts/local_data.py` (removing an athlete also deletes their entries and drops partnerships naming them from
   other entries; a partnership list left empty becomes `unknown`).
 - The engine dashboard has a Coach context card (engine mode) with a form and a list of entries in force.
+
+## Individual-performance evidence (`recordings/{id}/performance` endpoints)
+
+Structured evidence for the future four-area performance score (`app/models/performance.py`, `app/core/performance.py`).
+**Manual entry only: nothing here is automatic soccer assessment.**
+
+- **Areas**: `execution`, `decision_making`, `movement_positioning`, `coach_strategy` (following the coach's active
+  strategy). Leadership, lineup chemistry and pressure-situation contributions stay in the coach-context records,
+  and physiology never enters this layer, so nothing is counted twice and performance is never derived from
+  fatigue, distance alone, preset ability or a clutch bonus.
+- **Event kinds (version 1)**: `pass` (execution; `attempts` and `completions` over the observation period),
+  `turnover` (execution; `possessions` and `turnovers`) and `tactical_observation` (one of the three other areas; an
+  `outcome` of followed, partially followed or not followed against an `instruction`, optionally linked to a
+  coach-context entry of the same recording through `coach_context_id`). Counts are kept, never only a percentage.
+- **States**: `assessed`, `unable_to_assess` (reason: `not_visible`, `off_camera`, `occluded`, `video_quality`,
+  `ambiguous` or `other`) and `no_opportunity`. None of these is ever a zero.
+- **Sources**: `human_annotation`, optionally with `reference_label: true` for annotations meant to evaluate a future
+  automatic method, and `human_review_of_camera`. `camera_automatic` is refused (422): this version has no automatic
+  event recognition. Each observation also stores the athlete, role, observation period, annotator, frame references
+  (`video`, `frame`, `video_time_s`) and event instants.
+- **Rubric**: a versioned JSON file named by `PERFORMANCE_RUBRIC_PATH` (`PerformanceRubric`). It sets area weights and,
+  per measure (`pass_completion`, `possession_retention`, `instruction_followed`), the weight, the floor and ceiling
+  rates mapped to 0 and 100, the credit for partially followed instructions, and the minimum opportunities. **No
+  rubric ships and none is configured by default**, so `GET .../athletes/{athlete}/performance-review` returns the
+  evidence per area and `composite.available: false` with the reason. With a rubric, a measure below its minimum
+  opportunities is unavailable, so is any area with an unavailable measure, and so is the composite unless all four
+  areas are available. `scripts/examples/performance/fictional_rubric_example.json` is a **fictional** rubric used by
+  the tests (`fictional: true` is echoed in every result); it is not the team's rubric.
+- **Preserved**: SQLite table `recording_performance`; package format 4 (`performance.json`; formats 1 to 3 are still
+  read) with new ids on import and `coach_context_id` re-pointed to the imported context entry; removed with its
+  recording or athlete by `scripts/local_data.py`; one observation can be deleted with
+  `DELETE .../athletes/{athlete}/performance/{id}`.
 
 ## Recording configuration snapshot (`configuration_at_start`)
 

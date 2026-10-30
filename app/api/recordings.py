@@ -33,6 +33,7 @@ from app.models.recording import (
 from app.models.period import PeriodCreate, SavedPeriod
 from app.store.athletes import athlete_registry
 from app.store.context import context_store
+from app.store.performance import performance_store
 from app.store.periods import period_store
 from app.store.recording_import import provenance
 from app.store.recordings import RecordingConflict, recording_store
@@ -486,8 +487,8 @@ def package_filename(rec: Recording, captured_at: datetime) -> str:
     responses={200: {"content": {"application/zip": {}}, "description": "Portable recording package (see app/core/recording_package.py)"}, 404: {"description": "Unknown recording"}, 409: {"description": "The recording is still active"}},
 )
 def export_recording_package(recording_id: str) -> Response:
-    """Download one stopped recording as a portable package: manifest, recording and roster snapshot, every recorded sample, saved periods
-    and coach-context entries.
+    """Download one stopped recording as a portable package: manifest, recording and roster snapshot, every recorded sample, saved periods,
+    coach-context entries and performance evidence observations.
 
     Read in one database snapshot; every recorded sample is included (no rolling cap or history page applies). The
     settings in the manifest are labelled as settings at export time; the start-time configuration snapshot, when the
@@ -505,11 +506,12 @@ def export_recording_package(recording_id: str) -> Response:
         receipts = {a: {s: [r for _, r in v] for s, v in streams.items()} for a, streams in rows.items()}
         periods = [p for a in rec.athletes for p in period_store.list(rec.id, a.id)]
         context = context_store.list(rec.id)
+        performance = performance_store.list(rec.id)
         with get_database().read() as c:
             configuration = recording_store.configuration_in(c, rec.id).snapshot
     recording_doc = {"id": rec.id, "name": rec.name, "status": rec.status, "started_at": rec.started_at.isoformat().replace("+00:00", "Z"), "stopped_at": rec.stopped_at.isoformat().replace("+00:00", "Z")}
     settings_doc = {"distance_max_gap_seconds": settings.distance_max_gap_seconds, "distance_min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps}
-    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts, context)
+    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts, context, performance)
     return Response(
         content=body, media_type="application/zip",
         headers={

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api import athletes, context, devices, health, recordings, samples, teams
+from app.api import athletes, context, devices, health, performance, recordings, samples, teams
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -12,3 +12,4 @@ api_router.include_router(devices.router)
 api_router.include_router(teams.router)
 api_router.include_router(recordings.router)
 api_router.include_router(context.router)
+api_router.include_router(performance.router)

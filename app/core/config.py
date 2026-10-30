@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # `git rev-parse --short HEAD` supplied by whoever starts the engine. Stored as given and never checked; the
     # engine does not run git. Unset means "unknown".
     code_revision: str | None = Field(None, pattern=r"^[A-Za-z0-9._+/-]{1,64}$")
+    # Optional path of a versioned individual-performance rubric (app/models/performance.py PerformanceRubric). Unset
+    # means no rubric is configured: the four-area composite is then unavailable. The engine ships no rubric of its own.
+    performance_rubric_path: str | None = None
 
     @field_validator("code_revision", mode="before")
     @classmethod
