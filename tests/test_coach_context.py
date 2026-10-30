@@ -168,3 +168,21 @@ def test_removal_takes_context_with_the_athlete_or_recording_and_drops_partner_m
         assert con.execute("SELECT COUNT(*) FROM recording_context").fetchone()[0] == 0
     finally:
         con.close()
+
+
+def test_a_start_with_microseconds_accepts_its_exact_value_and_refuses_the_old_millisecond_default(client, frozen):
+    """The dashboard once pre-filled effective_from with the start truncated to milliseconds, which lies before a start
+    with microseconds; rounding up to a whole second would instead fall after a sub-second recording's stop."""
+    assert client.post("/api/v1/athletes", json={"id": "a1", "name": "Fictional a1", "jersey_number": 1, "sport": "soccer", "team_id": "t"}).status_code == 201
+    frozen["now"] = T0 + timedelta(microseconds=493259)
+    rec = client.post(REC, json={"name": "short", "athlete_ids": ["a1"]}).json()
+    frozen["now"] = T0 + timedelta(microseconds=900000)
+    stopped = client.post(f"{REC}/{rec['id']}/stop").json()
+    assert rec["started_at"] == "2026-10-29T15:00:00.493259Z" and stopped["stopped_at"] == "2026-10-29T15:00:00.900000Z"
+    body = lambda at: {"athlete_id": "a1", "effective_from": at, "role": {"status": "unknown"}, "source": "head_coach", "certainty": "confirmed"}   # noqa: E731
+    assert client.post(f"{REC}/{rec['id']}/context", json=body("2026-10-29T15:00:00.493Z")).status_code == 422, "millisecond truncation lies before the start"
+    assert client.post(f"{REC}/{rec['id']}/context", json=body("2026-10-29T15:00:01Z")).status_code == 422, "rounding up passes the stop of a 0.4 s recording"
+    ok = client.post(f"{REC}/{rec['id']}/context", json=body(rec["started_at"]))
+    assert ok.status_code == 201 and ok.json()["effective_from"] == "2026-10-29T15:00:00.493259Z"
+    eff = client.get(f"{REC}/{rec['id']}/context/effective", params={"at": rec["started_at"], "athlete_id": "a1"}).json()
+    assert eff["athlete"]["id"] == ok.json()["id"]
