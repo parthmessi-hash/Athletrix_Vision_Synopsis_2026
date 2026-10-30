@@ -290,6 +290,12 @@ def people_summary(r: dict, out: Callable[[str], None]) -> None:
             f"legs-hidden position {e['position_legs_hidden'] and e['position_legs_hidden']['median_abs']}")
     d = r["engine_distance_red_2_to_8_s"]
     out(f"  engine distance, red 2-8 s: {d['estimated_distance_m']} m vs 16.0 m path ({d['included_duration_s']} s included, {d['continuity_breaks']} continuity breaks)")
+    out(f"  ground-contact evidence (yellow): {r['ground_contact_evidence']}")
+    for k, v in r["ground_contact_policy_comparison"].items():
+        pe = v["position_error_m"]
+        out(f"  policy {k}: {v['samples_near_hidden_legs']} yellow samples near hidden legs, position error median {pe and pe['median_abs']} max {pe and pe['max_abs']} m; yellow unavailable {v['yellow_unavailable_s']} s")
+    for k, v in r["phantom_distance_while_resting"].items():
+        out(f"  speed rule {k}: red resting 9-20 s -> {v['red_resting_9_to_20_s']['estimated_distance_m']} m (truth 0); red running 2-8 s -> {v['red_running_2_to_8_s']['estimated_distance_m']} m (truth 16.0)")
 
 
 def estimator_main(args, out: Callable[[str], None]) -> int:

@@ -227,7 +227,7 @@ def test_cli_calibrate_export_and_send_with_an_explicit_anchor(tmp_path):
     assert adapter.main(["export", *common, "--anchor-utc", "2026-10-20T10:00:00Z", "--out", str(tmp_path / "s.jsonl"), "--log", str(tmp_path / "log.json")], out=lines.append) == 0
     log = json.loads((tmp_path / "log.json").read_text())
     assert log["unassigned_tracks"]["trk-2"]["observations"] == 15 and log["skipped"]["warm_up"] == 4 and log["time_mapping"]["meaning"].startswith("anchor stated")
-    assert log["samples"][0] == {"athlete_id": "fictional-athlete-01", "frame": 4, "video_time_s": 0.4, "track_id": "trk-1", "points": 5, "fit_rms_m": log["samples"][0]["fit_rms_m"]}
+    assert log["samples"][0] == {"athlete_id": "fictional-athlete-01", "frame": 4, "video_time_s": 0.4, "track_id": "trk-1", "points": 5, "fit_rms_m": log["samples"][0]["fit_rms_m"], "speed_sigma_mps": log["samples"][0]["speed_sigma_mps"]}
     assert json.loads((tmp_path / "s.jsonl").read_text().splitlines()[0])["sample"]["timestamp"] == "2026-10-20T10:00:00.400000Z"
 
     sent = []

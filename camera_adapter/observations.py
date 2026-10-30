@@ -1,4 +1,5 @@
-"""Camera observation contract (internal adapter format, version 1): what a frame-level extractor hands to the adapter.
+"""Camera observation contract (internal adapter format, version 2; version 1 is still read): what a frame-level
+extractor hands to the adapter.
 
 FILE: JSON Lines, UTF-8. Line 1 is a header, every further line one observation.
 
@@ -22,6 +23,10 @@ Meaning of each field
                 It is NOT a calibrated probability that the position or identity is correct.
   athlete_id    the athlete this track is explicitly assigned to, or null when unknown. Null observations are never
                 sent under any athlete id; assignment comes from the extractor's operator or an assignment file.
+  ground_contact  (version 2, optional) the extractor's evidence that u_px, v_px really is where the target touches
+                the ground, separate from `confidence`: "consistent" (nothing indicates otherwise), "suspect" (for
+                example the box suddenly lost height, as when the legs are hidden) or "unknown" (not yet assessable).
+                Absent means not assessed. A confident detection can still have a suspect ground point.
 
 Validation is whole-file and strict (see `load`): unknown keys, non-finite numbers, positions outside the image,
 frames out of order within a track, two observations of one track in one frame, inconsistent times and track ids that
@@ -36,7 +41,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 FORMAT = "athletrix-camera-observations"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+READABLE_VERSIONS = (1, 2)
+GROUND_CONTACT = ("consistent", "suspect", "unknown")
 HEADER_KEYS = {"format", "format_version", "video", "time_base", "extractor"}
 VIDEO_KEYS = {"width", "height", "fps", "name"}
 OBS_KEYS = {"frame", "video_time_s", "track_id", "u_px", "v_px", "confidence", "athlete_id"}
@@ -60,6 +67,7 @@ class Observation:
     v_px: float
     confidence: float
     athlete_id: str | None = None
+    ground_contact: str | None = None
 
 
 @dataclass
@@ -87,8 +95,9 @@ def parse(lines: list[str]) -> ObservationFile:
         header = json.loads(lines[0])
     except json.JSONDecodeError as exc:
         raise ObservationError([f"line 1: header is not valid JSON ({exc.msg})"]) from exc
-    if not isinstance(header, dict) or set(header) != HEADER_KEYS or header.get("format") != FORMAT or header.get("format_version") != FORMAT_VERSION:
-        raise ObservationError([f"line 1: header must have exactly {sorted(HEADER_KEYS)} with format {FORMAT!r} version {FORMAT_VERSION}"])
+    if not isinstance(header, dict) or set(header) != HEADER_KEYS or header.get("format") != FORMAT or header.get("format_version") not in READABLE_VERSIONS:
+        raise ObservationError([f"line 1: header must have exactly {sorted(HEADER_KEYS)} with format {FORMAT!r} version 1 or 2"])
+    version = header["format_version"]
     if header["time_base"] != "video_relative":
         errors.append("line 1: time_base must be 'video_relative' (this version has no capture-time mapping)")
     v = header["video"]
@@ -107,8 +116,9 @@ def parse(lines: list[str]) -> ObservationFile:
         except json.JSONDecodeError as exc:
             errors.append(f"line {n}: not valid JSON ({exc.msg})")
             continue
-        if not isinstance(r, dict) or set(r) != OBS_KEYS:
-            errors.append(f"line {n}: an observation has exactly the keys {sorted(OBS_KEYS)}")
+        allowed = OBS_KEYS | ({"ground_contact"} if version >= 2 else set())
+        if not isinstance(r, dict) or not OBS_KEYS <= set(r) <= allowed:
+            errors.append(f"line {n}: an observation has exactly the keys {sorted(OBS_KEYS)}" + (" and optionally ground_contact" if version >= 2 else ""))
             continue
         problems = []
         if not isinstance(r["frame"], int) or isinstance(r["frame"], bool) or r["frame"] < 0:
@@ -127,6 +137,8 @@ def parse(lines: list[str]) -> ObservationFile:
             problems.append("confidence must be a number in [0, 1]")
         if r["athlete_id"] is not None and (not isinstance(r["athlete_id"], str) or not r["athlete_id"].strip()):
             problems.append("athlete_id must be null or a non-blank string")
+        if "ground_contact" in r and r["ground_contact"] not in GROUND_CONTACT:
+            problems.append(f"ground_contact must be one of {', '.join(GROUND_CONTACT)}")
         if problems:
             errors.append(f"line {n}: " + "; ".join(problems))
             continue
@@ -139,7 +151,7 @@ def parse(lines: list[str]) -> ObservationFile:
             continue
         seen.add(key)
         last_frame[r["track_id"]] = r["frame"]
-        obs.append(Observation(r["frame"], float(r["video_time_s"]), r["track_id"], float(r["u_px"]), float(r["v_px"]), float(r["confidence"]), r["athlete_id"]))
+        obs.append(Observation(r["frame"], float(r["video_time_s"]), r["track_id"], float(r["u_px"]), float(r["v_px"]), float(r["confidence"]), r["athlete_id"], r.get("ground_contact")))
     athletes = {o.athlete_id for o in obs if o.athlete_id}
     clash = sorted({o.track_id for o in obs} & athletes)
     if clash:
@@ -155,7 +167,7 @@ def load(path: Path) -> ObservationFile:
 
 def dump(f: ObservationFile, path: Path) -> None:
     header = {"format": FORMAT, "format_version": FORMAT_VERSION, "video": asdict(f.video), "time_base": "video_relative", "extractor": f.extractor}
-    lines = [json.dumps(header)] + [json.dumps(asdict(o)) for o in f.observations]
+    lines = [json.dumps(header)] + [json.dumps({k: v for k, v in asdict(o).items() if not (k == "ground_contact" and v is None)}) for o in f.observations]
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -210,7 +222,7 @@ def apply_assignments(f: ObservationFile, assignments: list[Assignment]) -> Obse
         if o.athlete_id is not None and athlete is not None and o.athlete_id != athlete:
             errors.append(f"frame {o.frame} track {o.track_id}: already assigned to {o.athlete_id}, assignment file says {athlete}")
             continue
-        result.append(Observation(o.frame, o.video_time_s, o.track_id, o.u_px, o.v_px, o.confidence, o.athlete_id or athlete))
+        result.append(Observation(o.frame, o.video_time_s, o.track_id, o.u_px, o.v_px, o.confidence, o.athlete_id or athlete, o.ground_contact))
     clash = sorted({o.track_id for o in result} & {o.athlete_id for o in result if o.athlete_id})
     if clash:
         errors.append(f"track ids must differ from athlete ids: {', '.join(clash)}")

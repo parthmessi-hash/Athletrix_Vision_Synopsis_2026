@@ -1965,6 +1965,53 @@ fit residual over its limit, suppressing most far-side estimates; (3) a 3 px occ
 camera's rate. A future improvement (not implemented) would be a stationary dead-band or a motion model chosen on new
 development data and re-checked on fresh held-out data.
 
+### 10. Movement quality policy (2026-10-30)
+
+**Ground contact is separate from detection confidence.** Observation format 2 (version 1 is still read) adds an
+optional `ground_contact`: `consistent`, `suspect` or `unknown`. The video tracker sets it with a box-height
+consistency rule (`ground_contact_rule`, `ground_min_height_ratio` 0.85 of the median of the track's last 15
+consistent heights, at least 5 needed): a box that suddenly loses height usually ends above the feet. The adapter's
+`ground_contact_policy` `exclude_suspect` (default) skips such observations with reason `ground_contact_suspect` and
+starts a new continuity segment, so a doubtful ground point never becomes a position and the engine never integrates
+across it; `use_all` keeps the earlier behaviour for comparison.
+
+**Value basis.** Tracking samples may carry `value_basis` (`observed`, `estimated`, `predicted`; absent = not reported,
+serialized without the key). The camera adapter sends `estimated` (a causal fit of real observations); it never
+predicts. The engine never integrates distance through a `predicted` sample (`predicted_interval_count`). Unavailable
+values are not sent at all; the adapter log keeps every skip with its reason.
+
+**Noise rules (optional, off by default).** `estimator.stationary_rule`: `significance` reports speed 0 when the fitted
+velocity is within `stationary_k` standard errors (from the fit's own residuals) of zero; `debias` corrects the speed
+magnitude's upward noise bias, sqrt(max(0, |v|^2 - 2 sigma^2)). Both mark such samples `stationary_within_noise` in the
+adapter log; positions are never changed and noise-free motion is never affected.
+
+Evaluation (`camera_synthetic_check.py estimator`, analytic scenarios now including slow walks at 0.4-1.35 m/s, a
+walk-stop-walk sequence and hidden legs flagged or missed; a decision rule fixed before the held-out split):
+
+| Held-out split | Phantom distance, still target 8 s, 0.5 / 1.5 px noise | Slow-movement distance error (median, relative) | Slow moving samples reported as 0 | Start delay median / p95 |
+|---|---|---|---|---|
+| current default (none) | 3.1 / 10.1 m | 0.56 | 0 % | 0.02 / 0.12 s |
+| significance k=2 | 0.7 / 3.9 m | 0.47 | 69 % | 0.48 / 0.96 s |
+| significance k=3 | 0.1 / 1.9 m | 0.40 | 90 % | 0.55 / 1.08 s |
+| noise-bias correction | 1.0 / 4.7 m | 0.36 | 37 % | 0.19 / 0.48 s |
+
+Decision (development split): **no noise rule is enabled by default**. Every candidate halves phantom distance, but
+each reports far more than the allowed 10 % of genuinely moving slow samples as stationary (development: 31-81 %).
+The underlying limitation stands: with the default, pixel jitter makes a still player accumulate distance and makes
+slow walking read about 50 % long under 0.5-1.5 px noise. A model with an explicit motion state, chosen on new
+development data, is the next candidate; it is not implemented.
+
+Hidden legs (analytic, 12 px for 1.5 s): flagged and excluded, position error stays at most 0.10-0.17 m at a cost of
+about 0.8 s more unavailable time; missed by the extractor, the error reaches 3.5-3.8 m. Through the real detector on
+the drawn-figure scene (`camera_synthetic_check.py people`): the box-height rule flagged 57 of 60 observations taken
+while yellow's legs were hidden, but also 6 of 438 of its visible-leg observations and 98 of 1,350 (7 %) of the other
+assigned figures' observations (fast leg swing and crossings change box height); with the default policy, yellow's
+samples near the hidden period were 0.02 m off instead of 2.46 m, and yellow was unavailable 3.4 s instead of 1.6 s.
+That run also counted 3 observations of white's second track nearer another figure (an identity concern near the
+image edge that earlier runs did not show). A pose model was not added: drawn figures cannot show whether one would
+locate real feet better, and foot visibility under real occlusion remains an open limitation until real footage
+with ground truth is available.
+
 ### Remaining requirements for real player tracking
 
 Real-footage evaluation with permission and ground truth (surveyed positions or a reference system); a better ground

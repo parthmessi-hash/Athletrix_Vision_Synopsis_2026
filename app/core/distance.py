@@ -7,7 +7,8 @@ window, the interval is eligible when
   - both samples belong to the same continuity segment: equal `segment_id`, or neither reports one. A provider that
     labels its segments (the camera adapter starts a new one at every estimator reset, track change or suppressed
     estimate) thereby declares a known discontinuity between differently labelled samples, which is excluded however
-    short; streams without labels keep the gap and confidence rules alone.
+    short; streams without labels keep the gap and confidence rules alone, and
+  - neither sample has `value_basis` "predicted" (a provider's extrapolation is not a measurement).
 Within an eligible interval speed is assumed to change linearly between the two samples, so distance
 is the trapezoid (v_prev + v_cur) / 2 * elapsed. Ineligible intervals are counted once and contribute
 nothing: bad samples are not removed and bridged over, and nothing is extrapolated before the first
@@ -53,6 +54,15 @@ def same_segment(prev: TrackingSample, cur: TrackingSample) -> bool:
     return prev.segment_id == cur.segment_id
 
 
+def predicted(s: TrackingSample) -> bool:
+    return s.value_basis == "predicted"
+
+
+def predicted_intervals(samples: Sequence[TrackingSample]) -> int:
+    """Consecutive-sample intervals excluded because an endpoint is a predicted value (a subset of the excluded intervals)."""
+    return sum(1 for prev, cur in zip(samples, samples[1:]) if predicted(prev) or predicted(cur))
+
+
 def continuity_breaks(samples: Sequence[TrackingSample]) -> int:
     """Consecutive-sample intervals excluded because the segment label changes (a subset of the excluded intervals)."""
     return sum(1 for prev, cur in zip(samples, samples[1:]) if not same_segment(prev, cur))
@@ -69,7 +79,7 @@ def eligible_intervals(
     excluded = 0
     for prev, cur in zip(samples, samples[1:]):
         elapsed = (cur.timestamp - prev.timestamp).total_seconds()
-        if 0 < elapsed <= max_gap_seconds and prev.tracking_confidence >= min_confidence and cur.tracking_confidence >= min_confidence and same_segment(prev, cur):
+        if 0 < elapsed <= max_gap_seconds and prev.tracking_confidence >= min_confidence and cur.tracking_confidence >= min_confidence and same_segment(prev, cur) and not (predicted(prev) or predicted(cur)):
             eligible.append(Interval(prev.speed_mps, cur.speed_mps, elapsed))
         else:
             excluded += 1
@@ -118,6 +128,7 @@ def estimate_distance(
         included_window_fraction=min(fraction, 1.0),
         excluded_interval_count=excluded,
         continuity_break_count=continuity_breaks(samples),
+        predicted_interval_count=predicted_intervals(samples),
         max_gap_seconds=max_gap_seconds,
         min_confidence=min_confidence,
     )

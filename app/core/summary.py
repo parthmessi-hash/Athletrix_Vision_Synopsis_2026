@@ -67,6 +67,7 @@ def summarize_window(
         included_window_fraction=dist.included_window_fraction,
         excluded_interval_count=dist.excluded_interval_count,
         continuity_break_count=dist.continuity_break_count,
+        predicted_interval_count=dist.predicted_interval_count,
         high_speed_duration_seconds=hs.high_speed_duration_seconds,
         high_speed_distance_m=hs.high_speed_distance_m,
         distance_rules=DistanceRules(

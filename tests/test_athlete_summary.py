@@ -67,7 +67,7 @@ def test_empty_window_gives_null_metrics_and_zero_counts():
         "sample_count": 0, "speed_peak_mps": None, "first_sample_at": None, "last_sample_at": None,
         "latest_sample_age_seconds": None, "max_inter_sample_gap_seconds": None,
         "estimated_distance_m": None, "included_duration_seconds": 0.0, "included_window_fraction": 0.0,
-        "excluded_interval_count": 0, "continuity_break_count": 0, "high_speed_duration_seconds": None, "high_speed_distance_m": None,
+        "excluded_interval_count": 0, "continuity_break_count": 0, "predicted_interval_count": 0, "high_speed_duration_seconds": None, "high_speed_distance_m": None,
         "distance_rules": {"max_gap_seconds": 3.0, "min_confidence": 0.5, "high_speed_threshold_mps": 5.0, "continuity_rule": CONTINUITY_RULE},
         "sources": {"reported": {}, "not_reported": 0},
     }

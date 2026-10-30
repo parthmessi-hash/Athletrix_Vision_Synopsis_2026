@@ -141,10 +141,35 @@ def people_check(workdir, model_path, out) -> dict:
                         hidden_err.append(math.dist(pos, sp.truth(name, t)[0]))
         coverage[name] = {"frames_in_view": total, "frames_detected_near_feet": seen, "fraction": round(seen / total, 4) if total else None}
 
+    # ground-contact evidence against the truth: yellow's legs are hidden behind the board for part of its run
+    gc = {"legs_hidden": {"suspect": 0, "consistent": 0, "unknown": 0}, "legs_visible": {"suspect": 0, "consistent": 0, "unknown": 0}}
+    for o in assigned.observations:
+        if o.athlete_id == PEOPLE_ATHLETES["yellow"] and o.ground_contact:
+            gc["legs_hidden" if sp.legs_hidden("yellow", o.video_time_s) else "legs_visible"][o.ground_contact] += 1
+    for o in assigned.observations:
+        if o.athlete_id and o.athlete_id != PEOPLE_ATHLETES["yellow"] and o.ground_contact:
+            gc.setdefault("other_assigned_figures", {"suspect": 0, "consistent": 0, "unknown": 0})[o.ground_contact] += 1
+    mapping = TimeMapping(T0, 0.0, "fixed anchor for the synthetic check; not capture time")
+
+    def yellow_hidden_errors(cfg):
+        r = process(assigned, calib, cfg)
+        smp = [x["sample"] for x in records(r, mapping, cfg, "people")]
+        errs = [math.dist((x["x_position"], x["y_position"]), sp.truth("yellow", o.video_time_s)[0]) for o, x in zip(r.outputs, smp)
+                if x["athlete_id"] == PEOPLE_ATHLETES["yellow"] and any(sp.legs_hidden("yellow", o.video_time_s - k / sp.FPS) for k in range(int(cfg.estimator.window_s * sp.FPS) + 1))]
+        yt = [o.video_time_s for o in r.outputs if o.athlete_id == PEOPLE_ATHLETES["yellow"]]
+        return {"samples_near_hidden_legs": len(errs), "position_error_m": stats(errs), "yellow_unavailable_s": round(_unavailable(yt, sp.DURATION_S), 3)}
+    policy = {"exclude_suspect (default)": yellow_hidden_errors(AdapterConfig(device_id="synthetic-people-cam-1")),
+              "use_all (detector confidence only)": yellow_hidden_errors(AdapterConfig(device_id="synthetic-people-cam-1", ground_contact_policy="use_all"))}
     acfg = AdapterConfig(device_id="synthetic-people-cam-1")
     res = process(assigned, calib, acfg)
-    mapping = TimeMapping(T0, 0.0, "fixed anchor for the synthetic check; not capture time")
     samples = [r["sample"] for r in records(res, mapping, acfg, "people")]
+    phantom = {}
+    for name, rule in (("none (default)", "none"), ("significance k=3", "significance"), ("noise-bias correction", "debias")):
+        from camera_adapter.estimator import EstimatorConfig as _EC  # noqa: PLC0415
+        cfg = AdapterConfig(device_id="synthetic-people-cam-1", estimator=_EC(stationary_rule=rule))
+        smp = [x["sample"] for x in records(process(assigned, calib, cfg), mapping, cfg, "people")]
+        red = [x for x in smp if x["athlete_id"] == PEOPLE_ATHLETES["red"]]
+        phantom[name] = {"red_resting_9_to_20_s": engine_distance(red, T0, 9.0, 20.0), "red_running_2_to_8_s": {**engine_distance(red, T0, 2.0, 8.0), "truth_m": 16.0}}
     errors = {a: {"position": [], "position_legs_hidden": [], "speed": [], "speed_near_changes": []} for a in PEOPLE_ATHLETES.values()}
     window = acfg.estimator.window_s
     for out_, s in zip(res.outputs, samples):
@@ -166,6 +191,7 @@ def people_check(workdir, model_path, out) -> dict:
         "assignments": [asdict(a) for a in assignments], "unassigned_tracks": sorted(t for t in first if t not in {a.track_id for a in assignments}),
         "tracks_per_figure": {n: sorted(t for t, f in track_figure.items() if f == n) for n in sp.FIGURES},
         "identity_mismatch_observations": mismatches,
+        "ground_contact_evidence": gc, "ground_contact_policy_comparison": policy, "phantom_distance_while_resting": phantom,
         "detection_coverage": coverage,
         "ground_point_error_while_legs_hidden_m": stats(hidden_err),
         "adapter": {"samples": len(samples), "skipped": res.skipped, "resets": len(res.resets), "segments": len(res.segments)},
@@ -243,6 +269,12 @@ def scenarios(split: str) -> list[dict]:
     s.append({"name": "turn (circular arc)", "path": Path2((near[0], near[1] + 3), 0, [("line", 1.5, 2.0), ("arc", 4.5, 0.0, 3.0 * (1 if dev else -1)), ("line", 2.0, 0.0)]), "v0": 3.0, "where": "near"})
     s.append({"name": "sharp cut (2 m radius)", "path": Path2((near[0] - 4, near[1] + 4), 0, [("line", 2.0, 0.0), ("arc", 1.6, 0.0, 2.0), ("line", 2.0, 0.0)]), "v0": 3.5 * k, "where": "near"})
     s.append({"name": "far-side sprint start", "path": Path2((far[0] - 10, far[1]), 0, [("rest", 1.5), ("line", 2.5, 3.0 * k), ("line", 1.5, 0.0)]), "where": "far"})
+    # slow movement, starts and stops: where a noise rule could hide real motion
+    s.append({"name": "slow walk 0.4 m/s, near", "path": Path2((near[0] - 2, near[1] + 1), 0, [("line", 8, 0.0)]), "v0": 0.4 * k, "where": "near", "slow": True})
+    s.append({"name": "slow walk 0.8 m/s, far", "path": Path2((far[0] - 3, far[1]), 0, [("line", 8, 0.0)]), "v0": 0.8 * k, "where": "far", "slow": True})
+    s.append({"name": "walk 1.2 m/s, near, turning", "path": Path2((near[0] - 3, near[1] + 5), 30 if dev else -30, [("line", 3, 0.0), ("arc", 4, 0.0, 4.0), ("line", 2, 0.0)]), "v0": 1.2 * k, "where": "near", "slow": True})
+    s.append({"name": "stop and start (1 m/s walk)", "path": Path2((near[0] - 3, near[1] + 2), 0, [("rest", 2), ("line", 1, 1.0 * k), ("line", 2, 0.0), ("line", 1, -1.0 * k), ("rest", 2), ("line", 1, 1.0 * k), ("line", 1, 0.0)]),
+              "where": "near", "slow": True})
     return s
 
 
@@ -251,9 +283,11 @@ def _camera(split: str):
     return Camera() if split == "development" else Camera(position=(22.0, -18.0, 11.0), target=(22.0, 10.0, 0.0), focal_px=430.0)
 
 
-def _observe(path: Path2, camera, *, noise_px, seed, occlusion=None, gaps=(), track_change_at=None, fps=FPS_EST):
+def _observe(path: Path2, camera, *, noise_px, seed, occlusion=None, gaps=(), track_change_at=None, hidden=None, fps=FPS_EST):
     """Observations of the path through the camera: Gaussian pixel noise, optional occlusion bias (a vertical shift of the
-    observed ground point by `occlusion[2]` px with a lowered score between occlusion[0] and occlusion[1] s), dropped intervals."""
+    observed ground point by `occlusion[2]` px with a lowered score between occlusion[0] and occlusion[1] s), dropped intervals,
+    and hidden legs (`hidden` = (t0, t1, px, flagged)): the ground point moves `px` up while the detector stays confident (0.9),
+    marked ground_contact "suspect" when `flagged` (the extractor noticed) and "consistent" when not (it missed it)."""
     rnd = random.Random(seed)
     obs = []
     n = int(path.duration * fps + 1e-9)
@@ -263,13 +297,16 @@ def _observe(path: Path2, camera, *, noise_px, seed, occlusion=None, gaps=(), tr
             continue
         (x, y), _, _ = path.truth(t)
         u, v = camera.project(x, y)
-        conf = 0.95
+        conf, ground = 0.95, "consistent"
         if occlusion and occlusion[0] <= t < occlusion[1]:
             v -= occlusion[2]
             conf = 0.55
+        if hidden and hidden[0] <= t < hidden[1]:
+            v -= hidden[2]
+            conf, ground = 0.9, ("suspect" if hidden[3] else "consistent")
         u, v = u + rnd.gauss(0, noise_px), v + rnd.gauss(0, noise_px)
         tid = "trk-1" if track_change_at is None or t < track_change_at else "trk-2"
-        obs.append(Observation(f, round(t, 6), tid, u, v, conf, "athlete-1"))
+        obs.append(Observation(f, round(t, 6), tid, u, v, conf, "athlete-1", ground))
     return obs
 
 
@@ -311,7 +348,9 @@ def _variants(sc, split):
             ("noise 1.5 px", dict(noise_px=1.5, seed=seed0 + 2)),
             ("partial occlusion (3 px bias, 1 s)", dict(noise_px=0.5, seed=seed0 + 3, occlusion=(d * 0.45, d * 0.45 + 1.0, 3.0))),
             ("1.0 s gap", dict(noise_px=0.5, seed=seed0 + 4, gaps=[(d * 0.5, d * 0.5 + 1.0)])),
-            ("track change", dict(noise_px=0.5, seed=seed0 + 5, track_change_at=d * 0.55))]
+            ("track change", dict(noise_px=0.5, seed=seed0 + 5, track_change_at=d * 0.55)),
+            ("hidden legs, flagged (12 px, 1.5 s)", dict(noise_px=0.5, seed=seed0 + 6, hidden=(d * 0.3, d * 0.3 + 1.5, 12.0, True))),
+            ("hidden legs, missed (12 px, 1.5 s)", dict(noise_px=0.5, seed=seed0 + 7, hidden=(d * 0.3, d * 0.3 + 1.5, 12.0, False)))]
 
 
 def evaluate_config(est: EstimatorConfig, split: str) -> dict:
@@ -341,6 +380,9 @@ def evaluate_config(est: EstimatorConfig, split: str) -> dict:
                 (acc_change if near or occluded else acc_e).append(s["acceleration_mps2"] - acc)
             out_times = [o.video_time_s for o in res.outputs]
             unavailable = _unavailable(out_times, path.duration)
+            moving = [(o, smp) for o, smp in zip(res.outputs, samples) if path.truth(o.video_time_s)[1] >= 0.3]
+            hidden_pos = [math.dist((smp["x_position"], smp["y_position"]), path.truth(o.video_time_s)[0]) for o, smp in zip(res.outputs, samples)
+                          if "hidden" in kw and kw["hidden"][0] <= o.video_time_s < kw["hidden"][1] + est.window_s]
             lag = _lags(path, res.outputs, samples, est)
             truth_len = path.path_length(0, path.duration)
             dist = engine_distance(samples, T0, 0.0, path.duration)
@@ -348,6 +390,10 @@ def evaluate_config(est: EstimatorConfig, split: str) -> dict:
                          "first_sample_s": round(out_times[0], 3) if out_times else None, "unavailable_s": round(unavailable, 3),
                          "position_m": stats(pos_e), "speed_mps": stats(spd_e), "accel_mps2": stats(acc_e),
                          "speed_near_changes_mps": stats(spd_change), "accel_near_changes_mps2": stats(acc_change), "lag_s": lag,
+                         "slow": bool(sc.get("slow")), "start_delays_s": _start_delays(path, res.outputs, samples),
+                         "moving_reported_stationary_fraction": round(sum(1 for o, smp in moving if smp["speed_mps"] == 0.0) / len(moving), 4) if moving else None,
+                         "stationary_within_noise_samples": sum(1 for o in res.outputs if o.stationary_within_noise),
+                         "position_during_hidden_legs_m": stats(hidden_pos),
                          "distance": {**dist, "truth_m": round(truth_len, 3),
                                       "error_m": None if dist["estimated_distance_m"] is None else round(dist["estimated_distance_m"] - truth_len, 3),
                                       "truth_over_included_time_m": round(_truth_over_included(path, samples), 3)}})
@@ -377,6 +423,17 @@ def _truth_over_included(path, samples):
     return total
 
 
+def _start_delays(path, outputs, samples):
+    """For every start from rest: seconds until the first sample reporting more than 0.1 m/s (None: none did)."""
+    rows = [(o.video_time_s, smp["speed_mps"]) for o, smp in zip(outputs, samples)]
+    out = []
+    for (t0, t1, kind, *_), nxt in zip(path.pieces, path.pieces[1:]):
+        if kind == "rest" and nxt[2] != "rest":
+            later = [t for t, v in rows if t >= t1 and v > 0.1]
+            out.append(round(later[0] - t1, 3) if later else None)
+    return out
+
+
 def _lags(path, outputs, samples, est):
     """Seconds after each speed change until the estimated speed stays within 0.2 m/s of the truth for 3 samples (None: never)."""
     rows = [(o.video_time_s, s["speed_mps"] - path.truth(o.video_time_s)[1]) for o, s in zip(outputs, samples)]
@@ -397,7 +454,11 @@ CONFIGS = {
     "window 0.5 s (current default)": EstimatorConfig(),
     "window 0.8 s": EstimatorConfig(window_s=0.8, min_points=5, min_span_s=0.48),
     "window 1.0 s": EstimatorConfig(window_s=1.0, min_points=5, min_span_s=0.6),
+    "window 0.5 s + stationary rule k=2": EstimatorConfig(stationary_rule="significance", stationary_k=2.0),
+    "window 0.5 s + stationary rule k=3": EstimatorConfig(stationary_rule="significance", stationary_k=3.0),
+    "window 0.5 s + speed noise-bias correction": EstimatorConfig(stationary_rule="debias"),
 }
+STATIONARY_CANDIDATES = ("window 0.5 s + stationary rule k=2", "window 0.5 s + stationary rule k=3", "window 0.5 s + speed noise-bias correction")
 
 
 def summarize(result: dict) -> dict:
@@ -410,7 +471,21 @@ def summarize(result: dict) -> dict:
     never = sum(1 for r in rows if r["variant"] == "clean" for l in r["lag_s"] if l is None)
     stationary = {r["variant"]: r["distance"]["estimated_distance_m"] for r in rows if r["scenario"] == "stationary"}
     dist_err = [abs(r["distance"]["estimated_distance_m"] - r["distance"]["truth_over_included_time_m"]) for r in rows if r["distance"]["estimated_distance_m"] is not None]
-    return {"position_median_m": agg("position_m", filt=clean), "position_p95_m": agg("position_m", "p95_abs", clean),
+    noisy_slow = [r for r in rows if r["slow"] and r["variant"] in ("noise 0.5 px", "noise 1.5 px")]
+    rel = [abs(r["distance"]["estimated_distance_m"] - r["distance"]["truth_over_included_time_m"]) / r["distance"]["truth_over_included_time_m"]
+           for r in noisy_slow if r["distance"]["estimated_distance_m"] is not None and r["distance"]["truth_over_included_time_m"] > 0]
+    starts = [d for r in rows if r["variant"] in ("noise 0.5 px", "noise 1.5 px") for d in r["start_delays_s"]]
+    hidden = {v: [r["position_during_hidden_legs_m"]["max_abs"] for r in rows if r["variant"] == v and r["position_during_hidden_legs_m"]]
+              for v in ("hidden legs, flagged (12 px, 1.5 s)", "hidden legs, missed (12 px, 1.5 s)")}
+    extra = {"slow_distance_relative_error_median": round(statistics.median(rel), 4) if rel else None,
+             "slow_moving_reported_stationary_fraction_median": round(statistics.median([r["moving_reported_stationary_fraction"] for r in noisy_slow if r["moving_reported_stationary_fraction"] is not None]), 4) if noisy_slow else None,
+             "start_delay_median_s": round(statistics.median([d for d in starts if d is not None]), 3) if any(d is not None for d in starts) else None,
+             "start_delay_p95_s": round(sorted(d for d in starts if d is not None)[min(len([d for d in starts if d is not None]) - 1, math.ceil(0.95 * len([d for d in starts if d is not None])) - 1)], 3) if any(d is not None for d in starts) else None,
+             "starts_never_detected": sum(1 for d in starts if d is None),
+             "hidden_legs_position_max_m": {"flagged_and_excluded": round(max(hidden["hidden legs, flagged (12 px, 1.5 s)"]), 3) if hidden["hidden legs, flagged (12 px, 1.5 s)"] else None,
+                                            "missed_by_the_extractor": round(max(hidden["hidden legs, missed (12 px, 1.5 s)"]), 3) if hidden["hidden legs, missed (12 px, 1.5 s)"] else None},
+             "hidden_legs_unavailable_median_s": {v.split(",")[1].strip().split(" ")[0]: round(statistics.median([r["unavailable_s"] for r in rows if r["variant"] == v]), 3) for v in hidden}}
+    return {**extra, "position_median_m": agg("position_m", filt=clean), "position_p95_m": agg("position_m", "p95_abs", clean),
             "speed_steady_clean_p95_mps": agg("speed_mps", "p95_abs", lambda r: r["variant"] == "clean"),
             "speed_steady_median_mps": agg("speed_mps", filt=clean), "speed_steady_p95_mps": agg("speed_mps", "p95_abs", clean),
             "accel_steady_median_mps2": agg("accel_mps2", filt=clean), "accel_steady_p95_mps2": agg("accel_mps2", "p95_abs", clean),
@@ -447,6 +522,31 @@ def select(dev: dict) -> dict:
             "reason": "no candidate met every condition; the current default stays" if not winners else ("one candidate met every condition" if len(winners) == 1 else "several candidates qualified; the default stays until a further rule decides")}
 
 
+STATIONARY_SELECTION_RULE = ("Fixed before the held-out split is computed and applied to the development split only: enable a noise "
+                             "rule by default only if, against the current default, it (a) at least halves the phantom distance of a "
+                             "stationary target at 1.5 px noise, (b) raises the median relative distance error on slow movement under noise "
+                             "by at most 0.05, (c) raises the start-delay p95 by at most 0.2 s and detects every start, (d) lowers the median "
+                             "included fraction by at most 0.05, and (e) reports at most 10 % of truly moving slow samples as stationary.")
+
+
+def select_stationary(dev: dict) -> dict:
+    base = dev[DEFAULT_NAME]
+    cands = []
+    for name in STATIONARY_CANDIDATES:
+        m = dev[name]
+        b0, m0 = base["stationary_phantom_distance_m"]["noise 1.5 px"], m["stationary_phantom_distance_m"]["noise 1.5 px"]
+        checks = {"a_halves_phantom_distance": b0 is not None and m0 is not None and m0 <= 0.5 * b0,
+                  "b_slow_error_within_0.05": m["slow_distance_relative_error_median"] is not None and m["slow_distance_relative_error_median"] <= base["slow_distance_relative_error_median"] + 0.05,
+                  "c_start_delay_within_0.2_s": m["start_delay_p95_s"] is not None and m["start_delay_p95_s"] <= base["start_delay_p95_s"] + 0.2 and m["starts_never_detected"] == 0,
+                  "d_coverage_within_0.05": m["included_fraction_median"] >= base["included_fraction_median"] - 0.05,
+                  "e_moving_reported_stationary_at_most_0.10": (m["slow_moving_reported_stationary_fraction_median"] or 0) <= 0.10}
+        cands.append({"config": name, "checks": checks, "qualifies": all(checks.values())})
+    winners = [c["config"] for c in cands if c["qualifies"]]
+    best = min(winners, key=lambda n: dev[n]["stationary_phantom_distance_m"]["noise 1.5 px"]) if winners else None
+    return {"rule": STATIONARY_SELECTION_RULE, "candidates": cands, "decision": best or "stationary_rule none (current default)",
+            "reason": "no candidate met every condition; the rules stay available but off" if not winners else "the qualifying candidate with the least phantom distance is chosen"}
+
+
 def estimator_sweep(out) -> dict:
     """Compare CONFIGS on the development split, then report every one on the held-out split (no re-selection there)."""
     report = {"configs": {k: asdict(v) for k, v in CONFIGS.items()}, "development": {}, "held_out": {}, "details": {}}
@@ -457,7 +557,8 @@ def estimator_sweep(out) -> dict:
         report["held_out"][name] = summarize(held)
         report["details"][name] = {"development": dev["rows"], "held_out": held["rows"]}
         out(f"  {name}: done")
-    report["selection"] = select(report["development"])
+    report["selection"] = select({k: v for k, v in report["development"].items() if k not in STATIONARY_CANDIDATES})
+    report["stationary_selection"] = select_stationary(report["development"])
     report["difficult_cases"] = _difficult(report)
     return report
 

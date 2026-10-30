@@ -4,6 +4,9 @@ Per observation, in video-time order:
   1. no explicit athlete assignment             -> skipped ("unassigned"); never sent under any athlete id
   2. two tracks assigned to one athlete in a frame -> both skipped ("assignment_conflict") and the athlete's history reset
   3. confidence below min_observation_confidence -> not used ("low_confidence")
+  3b. ground_contact "suspect" with ground_contact_policy "exclude_suspect" (default) -> not used ("ground_contact_suspect"),
+     and the athlete's next sample starts a new continuity segment: a confident detection whose ground point is in
+     doubt is not a usable position
   4. maps beyond the horizon, or more than max_extrapolation_m outside the calibrated points' field extent
                                                  -> not used ("outside_calibration")
   5. otherwise the field position enters the athlete's causal estimator (camera_adapter/estimator.py), which may
@@ -23,6 +26,11 @@ segment. The engine never integrates distance between samples of different segme
 cannot be bridged by the engine's own, longer DISTANCE_MAX_GAP_SECONDS. Labels are "cam-<run tag>-<n>": the run tag
 is derived from the inputs and the time mapping, so the same file sent twice at different anchors gets different
 labels. A label joins samples; it is not an identity or a quality score.
+
+VALUE BASIS: every sample is sent with value_basis "estimated" (a causal fit of real observations); nothing is
+predicted or extrapolated, and skipped instants are unavailable (no sample). With the estimator's optional stationary
+rule, a sample whose motion is not distinguishable from fit noise is reported at speed 0 and counted in the log
+(per sample `stationary_within_noise`), never silently.
 
 TIME: sample timestamp = anchor_utc + (video_time_s - video_origin_s). The anchor is stated explicitly by whoever runs
 the adapter and recorded in the log with its meaning; for files without a known capture-time mapping it is a playback
@@ -55,6 +63,7 @@ class AdapterConfig:
     max_extrapolation_m: float = 2.0
     confidence_rule: str = "min_observation_confidence_in_window"
     emit_segment_id: bool = True
+    ground_contact_policy: str = "exclude_suspect"     # or "use_all"
     estimator: EstimatorConfig = field(default_factory=EstimatorConfig)
 
     def validate(self) -> list[str]:
@@ -69,6 +78,8 @@ class AdapterConfig:
             e.append("min_observation_confidence must be in [0, 1]")
         if not (self.max_extrapolation_m >= 0):
             e.append("max_extrapolation_m must be >= 0")
+        if self.ground_contact_policy not in ("exclude_suspect", "use_all"):
+            e.append("ground_contact_policy must be exclude_suspect or use_all")
         if not isinstance(self.emit_segment_id, bool):
             e.append("emit_segment_id must be true or false")
         if self.confidence_rule != "min_observation_confidence_in_window":
@@ -94,7 +105,7 @@ class AdapterConfig:
         """Flat key/values for POST /recordings adapter_configuration.metadata (at most 32 keys; supplied, not verified)."""
         md = {"adapter": "camera_adapter v1 (synthetic marker tracking input)", "source": self.source, "device_id": self.device_id,
               "output_max_rate_hz": self.output_max_rate_hz, "min_observation_confidence": self.min_observation_confidence,
-              "max_extrapolation_m": self.max_extrapolation_m, "confidence_rule": self.confidence_rule, "emit_segment_id": self.emit_segment_id,
+              "max_extrapolation_m": self.max_extrapolation_m, "confidence_rule": self.confidence_rule, "emit_segment_id": self.emit_segment_id, "ground_contact_policy": self.ground_contact_policy,
               "calibration_sha256": calibration_sha256[:64]}
         md.update({f"estimator.{k}": v for k, v in asdict(self.estimator).items()})
         if mapping is not None:
@@ -129,6 +140,8 @@ class Output:
     points: int
     rms_m: float
     segment: int = 0
+    stationary_within_noise: bool = False
+    speed_sigma_mps: float = 0.0
 
     def sample(self, mapping: TimeMapping, config: AdapterConfig, run_tag: str = "") -> dict:
         """A TrackingSample payload (validated by the engine's model before it is written or sent)."""
@@ -136,7 +149,7 @@ class Output:
         return {"athlete_id": self.athlete_id, "timestamp": mapping.to_utc(self.video_time_s).isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 "x_position": round(self.x, 4), "y_position": round(self.y, 4), "speed_mps": round(self.speed_mps, 4),
                 "acceleration_mps2": round(self.acceleration_mps2, 4), "tracking_confidence": round(min(1.0, max(0.0, self.confidence)), 4),
-                "source": config.source, "device_id": config.device_id, **extra}
+                "source": config.source, "device_id": config.device_id, "value_basis": "estimated", **extra}
 
 
 @dataclass
@@ -198,6 +211,11 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
             if o.confidence < config.min_observation_confidence:
                 res.skip("low_confidence")
                 continue
+            if o.ground_contact == "suspect" and config.ground_contact_policy == "exclude_suspect":
+                res.skip("ground_contact_suspect")
+                stats["ground_contact_suspect"] = stats.get("ground_contact_suspect", 0) + 1
+                broken.setdefault(o.athlete_id, "ground_contact_suspect")
+                continue
             pos = calibration.to_field(o.u_px, o.v_px)
             if pos is None or not (x0 - m <= pos[0] <= x1 + m and y0 - m <= pos[1] <= y1 + m):
                 res.skip("outside_calibration")
@@ -227,7 +245,10 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
                 open_segment[o.athlete_id] = seg
             seg["last_video_time_s"] = o.video_time_s
             seg["samples"] += 1
-            res.outputs.append(Output(o.athlete_id, o.video_time_s, o.frame, o.track_id, e.x, e.y, e.speed_mps, e.acceleration_mps2, e.confidence, e.points, e.rms_m, seg["segment"]))
+            if e.stationary_within_noise:
+                stats["stationary_within_noise"] = stats.get("stationary_within_noise", 0) + 1
+            res.outputs.append(Output(o.athlete_id, o.video_time_s, o.frame, o.track_id, e.x, e.y, e.speed_mps, e.acceleration_mps2, e.confidence, e.points, e.rms_m, seg["segment"],
+                                      e.stationary_within_noise, e.speed_sigma_mps))
     return res
 
 
@@ -252,7 +273,8 @@ def adapter_log(res: Result, *, obs: ObservationFile, calibration_path: Path, ca
                   "Each output keeps its video_time_s and frame in the per-sample log so the original relative time is preserved.",
                   "tracking_confidence is the extractor's score carried through (lowest in the window), not a probability of correctness.",
                   "A new segment_id starts after every estimator reset or suppressed estimate; the engine never integrates distance between different segments."],
-        "samples": [{"athlete_id": o.athlete_id, "frame": o.frame, "video_time_s": o.video_time_s, "track_id": o.track_id, "points": o.points, "fit_rms_m": round(o.rms_m, 5)} for o in res.outputs],
+        "samples": [{"athlete_id": o.athlete_id, "frame": o.frame, "video_time_s": o.video_time_s, "track_id": o.track_id, "points": o.points, "fit_rms_m": round(o.rms_m, 5),
+                     "speed_sigma_mps": round(o.speed_sigma_mps, 5), **({"stationary_within_noise": True} if o.stationary_within_noise else {})} for o in res.outputs],
     }
 
 

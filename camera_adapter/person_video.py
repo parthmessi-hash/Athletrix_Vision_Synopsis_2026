@@ -18,6 +18,14 @@ OUTPUT    one observation per tracked box: frame, video_time_s = frame / fps (co
           (u_px, v_px), the detector's score as confidence, athlete_id null. Boxes whose bottom edge touches the image
           border (feet out of view) or that are smaller than the configured height are not turned into observations
           and are counted instead. Unconfirmed tracks (ByteTrack id -1) produce nothing.
+GROUND    `ground_contact` is evidence about the ground point, kept apart from the detector's confidence: rule
+          "box_height_consistency" compares each box's height with the median of the same track's last
+          `ground_reference_frames` consistent heights; a box shorter than `ground_min_height_ratio` times that
+          reference is "suspect" (typically legs hidden behind something: the box ends above the feet, so its
+          bottom-centre maps too far away, while the detector can stay confident). Until `ground_min_reference`
+          consistent heights exist the status is "unknown". Suspect boxes never enter the reference. This is a
+          heuristic: it misses occlusions present from a track's first frames and slow ones, and it flags a fast
+          crouch; it does not locate the feet.
 LOG       model name, file SHA-256 and licence, every configuration value, package versions, the video's properties and
           SHA-256, frames decoded, decoder time mismatches (dropped or duplicated frames), detections, per-track
           first/last frame and the frames where each track was lost and reappeared, skips by reason, and processing
@@ -82,6 +90,10 @@ class VideoTrackingConfig:
     drop_boxes_touching_bottom_edge: bool = True
     min_box_height_px: float = 12.0
     max_time_mismatch_frames: float = 0.5   # decoder timestamp vs frame / fps, in frame periods, before a frame counts as mismatched
+    ground_contact_rule: str = "box_height_consistency"   # or "none" (no ground_contact written)
+    ground_min_height_ratio: float = 0.85
+    ground_reference_frames: int = 15
+    ground_min_reference: int = 5
 
     def validate(self) -> list[str]:
         e = []
@@ -102,6 +114,11 @@ class VideoTrackingConfig:
             e.append("ground_point must be bbox_bottom_centre (the only rule in version 1)")
         if not (self.min_box_height_px >= 0 and self.max_time_mismatch_frames > 0):
             e.append("min_box_height_px must be >= 0 and max_time_mismatch_frames > 0")
+        if self.ground_contact_rule not in ("box_height_consistency", "none"):
+            e.append("ground_contact_rule must be box_height_consistency or none")
+        if not (0 < self.ground_min_height_ratio < 1 and isinstance(self.ground_reference_frames, int) and isinstance(self.ground_min_reference, int)
+                and 1 <= self.ground_min_reference <= self.ground_reference_frames):
+            e.append("ground_min_height_ratio must be in (0, 1) and 1 <= ground_min_reference <= ground_reference_frames")
         return e
 
     def to_doc(self) -> dict:
@@ -246,6 +263,8 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
                                high_conf_det_threshold=t.high_conf_det_threshold)
     obs: list[Observation] = []
     tracks: dict[str, TrackStats] = {}
+    heights: dict[str, list[float]] = {}     # track -> recent consistent box heights (the ground-contact reference)
+    ground_counts = {"consistent": 0, "suspect": 0, "unknown": 0}
     skipped = {"unconfirmed_track": 0, "box_touches_bottom_edge": 0, "box_too_small": 0}
     mismatched: list[dict] = []
     detections_total, frames = 0, 0
@@ -300,7 +319,10 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
                 st.observations += 1
                 u = min(max((x1 + x2) / 2, -0.5), width - 0.5)
                 v = min(max(y2, -0.5), height - 0.5)
-                obs.append(Observation(f, round(f / fps, 6), track_id, round(u, 3), round(v, 3), round(min(1.0, max(0.0, float(score))), 4), None))
+                ground = ground_status(heights.setdefault(track_id, []), y2 - y1, config)
+                if ground is not None:
+                    ground_counts[ground] += 1
+                obs.append(Observation(f, round(f / fps, 6), track_id, round(u, 3), round(v, 3), round(min(1.0, max(0.0, float(score))), 4), None, ground))
         if on_frame is not None:
             on_frame(f, frame, shown)
         frames += 1
@@ -322,6 +344,7 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
                   "note": "a mismatch is a decoded frame whose decoder timestamp differs from frame / fps by more than max_time_mismatch_frames periods: a dropped or duplicated frame or a variable frame rate. Observations still use frame / fps; re-encode to a constant frame rate if mismatches are reported."},
         "model": model_info, "config": config.to_doc(), "versions": package_versions(),
         "detections": detections_total, "observations": len(obs), "skipped": skipped,
+        "ground_contact": {"rule": config.ground_contact_rule, **(ground_counts if config.ground_contact_rule != "none" else {})},
         "tracks": {k: v.to_doc(fps) for k, v in sorted(tracks.items(), key=lambda kv: int(kv[0].split("-")[1]))},
         "track_losses": sum(len(v.losses) for v in tracks.values()),
         "speed": {"wall_seconds": round(elapsed, 3), "frames_per_second": round(frames / elapsed, 3) if elapsed > 0 else None,
@@ -332,6 +355,21 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
     }
     extractor = f"person detection {model_info['name'] if model_info else 'fixture'} + {config.tracker.implementation} (video tracking v1)"
     return ObservationFile(Video(width, height, round(fps, 6), Path(video_path).name), extractor, obs), log
+
+
+def ground_status(reference: list[float], box_height: float, config: VideoTrackingConfig) -> str | None:
+    """Ground-contact evidence for one box of a track (see GROUND above); updates the track's reference in place."""
+    if config.ground_contact_rule == "none":
+        return None
+    if len(reference) < config.ground_min_reference:
+        status = "unknown"
+    else:
+        ref = sorted(reference)[len(reference) // 2]
+        status = "suspect" if box_height < config.ground_min_height_ratio * ref else "consistent"
+    if status != "suspect":
+        reference.append(box_height)
+        del reference[:-config.ground_reference_frames]
+    return status
 
 
 def assignment_template(log: dict) -> dict:

@@ -32,7 +32,7 @@ class PhysiologicalSummary(AthletrixModel):
     sources: SourceBreakdown = Field(default_factory=SourceBreakdown, description="Reported sources of the samples in the window (adds up to sample_count).")
 
 
-CONTINUITY_RULE = "never join consecutive samples whose segment_id differs"
+CONTINUITY_RULE = "never join consecutive samples whose segment_id differs or either of which is predicted"
 
 
 class DistanceRules(AthletrixModel):
@@ -83,6 +83,7 @@ class DistanceEstimate(AthletrixModel):
     included_window_fraction: float = Field(..., ge=0, le=1, description="included_duration_seconds divided by the requested window length (0 if none).")
     excluded_interval_count: int = Field(..., ge=0, description="Consecutive-sample intervals rejected by the gap, confidence or continuity rule, each counted once.")
     continuity_break_count: int = Field(0, ge=0, description="Of the excluded intervals, those whose endpoints carry different segment_id values (a provider-declared discontinuity).")
+    predicted_interval_count: int = Field(0, ge=0, description="Of the excluded intervals, those with a predicted (extrapolated) endpoint.")
     max_gap_seconds: float = Field(..., gt=0, description="Applied rule: longest interval included, seconds.")
     min_confidence: float = Field(..., ge=0, le=1, description="Applied rule: minimum tracking_confidence at both ends of an interval.")
 
@@ -112,6 +113,7 @@ class TrackingSummary(AthletrixModel):
     included_window_fraction: float = Field(0.0, ge=0, le=1, description="See DistanceEstimate.included_window_fraction.")
     excluded_interval_count: int = Field(0, ge=0, description="See DistanceEstimate.excluded_interval_count.")
     continuity_break_count: int = Field(0, ge=0, description="See DistanceEstimate.continuity_break_count.")
+    predicted_interval_count: int = Field(0, ge=0, description="See DistanceEstimate.predicted_interval_count.")
     high_speed_duration_seconds: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_duration_seconds.")
     high_speed_distance_m: float | None = Field(None, ge=0, description="See HighSpeedEstimate.high_speed_distance_m.")
     distance_rules: DistanceRules | None = Field(None, description="The gap, confidence and high-speed threshold rules applied to the estimates.")

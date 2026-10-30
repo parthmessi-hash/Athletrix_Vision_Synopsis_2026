@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import AwareDatetime, Field
 
 from app.models.common import AthletrixModel, SampleSource
@@ -36,4 +38,8 @@ class TrackingSample(AthletrixModel):
     segment_id: str | None = Field(
         None, min_length=1, max_length=128, exclude_if=lambda v: v is None,
         description="Provider's continuous-segment label; the engine never joins consecutive samples whose labels differ. Omitted when not reported.",
+    )
+    value_basis: Literal["observed", "estimated", "predicted"] | None = Field(
+        None, exclude_if=lambda v: v is None,
+        description="observed | estimated | predicted; distance is never integrated through a predicted sample. Omitted when not reported.",
     )
