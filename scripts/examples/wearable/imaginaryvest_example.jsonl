@@ -1,0 +1,7 @@
+{"dev": "vest-3", "t_ms": 1793354402500, "rx": "2026-10-30T10:00:00.300Z", "type": "link", "state": "up"}
+{"dev": "vest-3", "t_ms": 1793354403500, "rx": "2026-10-30T10:00:01.250Z", "type": "data", "hr_bps": 2.5, "br_pm": 32, "skin_f": 93.2, "core_est_c": 38.1, "posture": "upright", "act_g": 0.6, "sig_pct": 92, "batt": 74}
+{"dev": "vest-3", "t_ms": 1793354404500, "rx": "2026-10-30T10:00:02.250Z", "type": "data", "hr_bps": 2.55, "br_pm": 0, "skin_f": 93.4, "core_est_c": 38.2, "posture": "kneeling", "act_g": 0.7, "sig_pct": 90, "batt": 74}
+{"dev": "vest-3", "t_ms": 1793354406500, "rx": "2026-10-30T10:00:04.200Z", "type": "data", "hr_bps": 2.6, "br_pm": 34, "skin_f": 150, "posture": "seated", "sig_pct": 85, "batt": 73}
+{"dev": "vest-3", "t_ms": 1793354405500, "rx": "2026-10-30T10:00:06.900Z", "type": "data", "hr_bps": 2.58, "br_pm": 33, "skin_f": 93.5, "posture": "upright", "sig_pct": 88, "batt": 73}
+{"dev": "vest-3", "t_ms": 1793354407500, "rx": "2026-10-30T10:00:05.200Z", "type": "link", "state": "down"}
+{"dev": "vest-3", "t_ms": 1793354417500, "rx": "2026-10-30T10:00:15.250Z", "type": "data", "hr_bps": "n/a", "br_pm": 30, "skin_f": 93.0, "posture": "supine", "sig_pct": 40, "batt": 72}

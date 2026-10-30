@@ -5,25 +5,36 @@ Sections 1-9 were checked against the code on 2026-10-25 and updated since; the
 status at a glance below was checked on 2026-10-29. Where something is a plan
 rather than working code it is marked **planned**.
 
-## 0. Product and status at a glance (2026-10-29)
+## 0. Product and status at a glance (2026-10-30)
 
-**Intended product.** Athletrix is a soccer-first substitution-support tool,
-designed to extend to other sports. It is meant to combine (1) an experimental,
-player-specific physiological fatigue score from a chest-strap wearable (the
-team has bought a Zephyr), (2) an independent camera-based individual
+**Intended product.** Athletrix is a soccer-first coaching tool,
+designed to extend to other sports. It is meant to combine (1) wearable physiology
+and a proposed, player-specific, experimental fatigue index, (2) an independent camera-based individual
 performance score (execution, decisions, movement and positioning, following
 the coach's strategy), and (3) a substitution model that weighs both histories
 together with tactics, leadership, pressure-situation contributions, lineup
-chemistry and the available replacements. The coach always makes the final
-decision; missing evidence stays "not available"; performance is never
-calculated from fatigue; nothing claims validated fatigue detection or optimal
-substitutions.
+chemistry and the available replacements, explaining whether to keep a player,
+replace them (with options and timing) or review again later. The coach always
+makes the final decision; observations, estimates, manual judgements and
+simulations stay distinguishable; missing evidence stays "not available";
+performance is never calculated from fatigue; nothing claims validated fatigue
+measurement or optimal substitutions.
+
+**Wearable (source of truth, 2026-10-30).** Zephyr is the team's **preferred**
+wearable. It has **not** been purchased and no API access, sample data or hardware
+is available yet; the team is waiting for the vendor's response before confirming
+hardware, cost and API/access arrangements. The vendor-described path is
+BioModule -> ECHO -> OmniSense -> local OmniSense Live API -> Athletrix adapter
+(Athletrix never talks to ECHO). Vendor statements are correspondence, not
+confirmed access: see `docs/zephyr-integration-checklist.md`. The engine stays
+vendor-independent; `wearable/` is the shared foundation, exercised with two
+fictional formats, and the Zephyr reader is deliberately unimplemented.
 
 | Status | What |
 |--------|------|
 | **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`), SQLite persistence with per-stream retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence- and continuity-aware distance and high-speed time), effort reviews, explicit recordings with saved periods, configuration snapshots, receipt timing, portable packages with import, local removal tools, coach-context records (milestone 6 below), and an engine-mode dashboard with a camera review card. Camera adapter: observation contract, planar calibration with check points, causal quadratic estimator, explicit time mapping, continuity segments, export and send. Optional real-video input: YOLOX person detector (local pinned model) + ByteTrack, temporary track ids, logs, track gallery and annotated review video, assignment template. |
 | **Checked on synthetic data only** | Marker video (regression fixture, `camera_synthetic_check.py`), drawn-figure scene through the real detector and tracker (`camera_synthetic_check.py people`), estimator configuration comparison on analytic scenarios with a held-out split (`camera_synthetic_check.py estimator`), engine round trip (`verify_camera_pipeline.py`). These say nothing about real players, real footage, lens distortion or a real camera's timing. |
-| **Not yet evaluated** | Real sideline footage (no clip with verified permission is in the project), the Zephyr feed (no adapter yet), clock alignment between camera and wearable, re-identification after long occlusions. |
+| **Not yet evaluated** | Real sideline footage (no clip with verified permission is in the project), any wearable feed (Zephyr access not yet available; only fictional provider formats are tested), clock alignment between camera and wearable, re-identification after long occlusions. |
 | **Planned, not implemented** | The fatigue score, the performance score (rubric, ball and event detection, decision quality), the substitution model, jersey or role recognition, multi-camera input, any validation study. Coach-context records are inputs prepared for that model; they are not scores. |
 
 ## 1. Purpose and terminology
@@ -725,11 +736,11 @@ occlusion, any performance assessment.
 Checks run: full backend suite 729 passed (fresh clone of origin/main: 727 passed, 2 skipped without the model file);
 `verify_camera_pipeline.py` 16 of 16; `verify_evaluation_workflow.py` 46 of 46; `verify_portable_workflow.py` passed.
 
-Remaining blockers for a real sideline camera together with the Zephyr: a permitted real clip and ground truth to
-measure errors; a ground point that survives lower-body occlusion; lens-distortion calibration; a measured
-capture-time mapping for the camera and a common clock with the wearable; a Zephyr adapter (the engine accepts its
-data shape, but nothing reads the device yet); identity across long losses; and, for any performance score, ball and
-event detection and a validated rubric.
+Remaining blockers for a real sideline camera together with a Zephyr wearable: a permitted real clip and ground truth
+to measure errors; a ground point that survives lower-body occlusion; lens-distortion calibration; a measured
+capture-time mapping for the camera and a common clock with the wearable; Zephyr access itself (correction
+2026-10-30: the team prefers Zephyr but has not purchased it or received API access; see section 0); identity across
+long losses; and, for any performance score, ball and event detection and a validated rubric.
 
 ## 10. Recommended next milestone
 

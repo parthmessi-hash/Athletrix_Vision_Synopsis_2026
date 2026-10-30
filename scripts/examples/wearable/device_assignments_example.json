@@ -1,0 +1,9 @@
+{
+  "format": "athletrix-device-assignments",
+  "format_version": 1,
+  "assignments": [
+    {"device": "strap-07", "athlete_id": "fictional-athlete-01", "from": "2026-10-30T10:00:00Z", "to": "2026-10-30T10:00:30Z", "assigned_by": "fictional assistant coach"},
+    {"device": "strap-07", "athlete_id": "fictional-athlete-02", "from": "2026-10-30T10:00:30Z", "assigned_by": "fictional assistant coach (strap moved at half time)"},
+    {"device": "vest-3", "athlete_id": "fictional-athlete-03", "from": "2026-10-30T09:00:00Z", "assigned_by": "fictional assistant coach"}
+  ]
+}

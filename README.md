@@ -1697,6 +1697,40 @@ browser; an agreed procedure for exports, packages, backups and footage outside 
 one database file only); authentication or a physically controlled computer; and the approvals and procedures that
 govern human participants, which no code here provides.
 
+## Wearable integration foundation (`wearable/`, `scripts/wearable_tool.py`)
+
+Vendor-independent and outside the engine. **Zephyr is the team's preferred wearable but has not been purchased, and no
+API access or sample data is available**; its reader (`wearable/providers/zephyr.py`) is deliberately unimplemented, and
+`docs/zephyr-integration-checklist.md` separates what the vendor told us, what documentation and sample data
+establish, and what is still missing. The supported path the vendor describes is BioModule -> ECHO -> OmniSense ->
+local OmniSense Live API -> Athletrix adapter; Athletrix never talks to ECHO.
+
+| Part | What it does |
+|---|---|
+| reader (`wearable/providers/`) | parses one provider's output into raw records (data, connected, disconnected) with the provider's own names, units and times; format problems per line |
+| mapping (`mapping.py`) | declarative provider field -> `PhysiologicalSample` field with an explicit unit conversion or category table; unlisted fields stay unmapped (kept in provenance); no clamping: an invalid or out-of-range value becomes null with a recorded issue; zeros kept where valid. A calculated HRV value is never treated as beat intervals, an estimated core temperature never as skin temperature, and g-unit activity is never rescaled into `activity_level` without a documented normalisation |
+| assignments (`assignments.py`) | explicit, time-bounded device-to-athlete rows (`athletrix-device-assignments`), changes as new rows; an unassigned device produces nothing |
+| clock (`clock.py`) | observation time to UTC by a stated basis (`device_utc`, `device_offset` with a measured offset, `receipt_minus` with a stated latency) and a stated uncertainty ("unknown" unless measured); receipt time kept separately |
+| normalize (`normalize.py`) | duplicates dropped, conflicting duplicates recorded (first kept), delayed and out-of-order records counted and emitted in observation order, disconnects and reconnects logged with no samples invented, worn/contact flags honoured, a provenance line per sample, and a device-status history (battery, signal, connection) that the engine does not keep |
+| tool | `mapping`, `inspect`, `validate`, `export` (samples, provenance, status history, report) and `replay` (paced replay of a file through `scripts/replay_samples.py`, not a live device) |
+
+```bash
+E=scripts/examples/wearable
+python scripts/wearable_tool.py mapping  --provider imaginaryvest-jsonl
+python scripts/wearable_tool.py validate $E/fictionstrap_example.csv --provider fictionstrap-csv --assignments $E/device_assignments_example.json
+python scripts/wearable_tool.py export   $E/imaginaryvest_example.jsonl --provider imaginaryvest-jsonl --assignments $E/device_assignments_example.json \
+    --clock-basis device_offset --offset-s -2.5 --uncertainty-s 0.2 --out out/vest.jsonl --provenance out/vest-prov.jsonl --status-log out/vest-status.jsonl
+python scripts/wearable_tool.py replay   $E/imaginaryvest_example.jsonl --provider imaginaryvest-jsonl --assignments $E/device_assignments_example.json \
+    --clock-basis device_offset --offset-s -2.5 --url http://127.0.0.1:8000
+```
+
+The two providers, `fictionstrap-csv` and `imaginaryvest-jsonl`, are **fictional formats** imitating no product. They
+differ on purpose: bpm against beats per second, Fahrenheit, category codes, a device-calculated RMSSD, an estimated
+core temperature and g activity left unmapped, a contact flag, receipt times and a device clock offset. Their example
+files hold nulls, invalid zeros, valid zeros, duplicates, a conflicting duplicate, out-of-order and delayed records, a
+disconnect, an unassigned device and a strap reassigned at half time (`tests/test_wearable.py`). This is fixture
+verification of the foundation only, not a working connection to any real device.
+
 ## Camera adapter (`camera_adapter/`): synthetic markers, real-video person tracking, continuity
 
 A local path from video to the engine: **video/frame observations -> field calibration -> movement estimates ->

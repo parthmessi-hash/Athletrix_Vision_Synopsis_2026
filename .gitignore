@@ -25,3 +25,6 @@ camera-work/
 /models/
 *.onnx
 *.part
+
+# private team notes (vendor documents under confidentiality notices, correspondence details); never committed
+/docs/private/
