@@ -32,10 +32,10 @@ fictional formats, and the Zephyr reader is deliberately unimplemented.
 
 | Status | What |
 |--------|------|
-| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`), SQLite persistence with per-stream retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence- and continuity-aware distance and high-speed time), effort reviews, explicit recordings with saved periods, configuration snapshots, receipt timing, portable packages with import, local removal tools, coach-context records (milestone 6 below), and an engine-mode dashboard with a camera review card. Camera adapter: observation contract, planar calibration with check points, causal quadratic estimator, explicit time mapping, continuity segments, export and send. Optional real-video input: YOLOX person detector (local pinned model) + ByteTrack, temporary track ids, logs, track gallery and annotated review video, assignment template. |
-| **Checked on synthetic data only** | Marker video (regression fixture, `camera_synthetic_check.py`), drawn-figure scene through the real detector and tracker (`camera_synthetic_check.py people`), estimator configuration comparison on analytic scenarios with a held-out split (`camera_synthetic_check.py estimator`), engine round trip (`verify_camera_pipeline.py`). These say nothing about real players, real footage, lens distortion or a real camera's timing. |
-| **Not yet evaluated** | Real sideline footage (no clip with verified permission is in the project), any wearable feed (Zephyr access not yet available; only fictional provider formats are tested), clock alignment between camera and wearable, re-identification after long occlusions. |
-| **Planned, not implemented** | The fatigue score, the performance score (rubric, ball and event detection, decision quality), the substitution model, jersey or role recognition, multi-camera input, any validation study. Coach-context records are inputs prepared for that model; they are not scores. |
+| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`, `value_basis`), SQLite persistence with retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence-, continuity- and prediction-aware distance), effort reviews, recordings with saved periods, configuration snapshots, receipt timing, portable packages (format 4) with import, local removal, coach-context records, individual-performance evidence (manual observations, versioned rubric, honest composite availability), and engine-mode dashboard cards for camera review, coach context and performance evidence. Camera adapter: observation contract v2 (ground-contact evidence), calibration, causal estimator with optional noise rules (off), ground-contact quality policy, time mapping, continuity, export and send; optional YOLOX + ByteTrack video input with offline and bounded (drop-oldest) processing and a benchmark. Wearable foundation (`wearable/`): readers, mapping, assignments, clock, normalization, export and paced replay. |
+| **Checked on synthetic or fictional data only** | Marker video, drawn-figure scene through the real detector and tracker, estimator and noise-rule comparison with development and held-out splits, bounded processing with synthetic frames and slow detectors, engine round trip, the wearable foundation with two FICTIONAL provider formats, the performance composite with a FICTIONAL rubric. None of this says anything about real players, real footage, a real camera's timing or a real wearable. |
+| **Not yet evaluated** | Real sideline footage (no clip with verified permission), any real wearable feed (Zephyr access not yet available), clock alignment between camera and wearable, re-identification after long losses, YOLOX-Tiny accuracy on far or small players. |
+| **Planned, not implemented** | The fatigue index, automatic soccer event recognition (passes, turnovers, ball, decisions), the team's real performance rubric, the substitution model and its keep/replace/review recommendations, jersey or role recognition, multi-camera input, the Zephyr reader, any validation study. Coach context and performance evidence are inputs prepared for those models; they are not scores of their own. |
 
 ## 1. Purpose and terminology
 
@@ -240,6 +240,20 @@ python scripts/camera_track_video.py VIDEO.mp4 --model models/yolox_s.onnx --out
     --gallery camera-work/tracks.png --annotate camera-work/review.mp4 --assignments-template camera-work/assignments.json
 #    review tracks.png / review.mp4, add only confirmed assignments, then calibrate and run camera_to_samples.py as in 3s
 #    (config "source": "camera" for real footage). Use only footage you have permission to process.
+
+# 3u. bounded processing and benchmark (optional video packages; pinned local models)
+python scripts/camera_track_video.py VIDEO.mp4 --model models/yolox_tiny.onnx --config scripts/examples/camera/video_tracking_config_tiny.json \
+    --paced-replay --queue-size 2 --every-nth 1 --out camera-work/obs.jsonl --log camera-work/track-log.json
+python scripts/camera_benchmark.py                       # drawn-figure scene; offline versus paced bounded, every pinned model present
+
+# 3v. wearable foundation (fictional provider formats; no real device supported yet)
+python scripts/wearable_tool.py validate scripts/examples/wearable/fictionstrap_example.csv --provider fictionstrap-csv \
+    --assignments scripts/examples/wearable/device_assignments_example.json
+python scripts/wearable_tool.py replay scripts/examples/wearable/imaginaryvest_example.jsonl --provider imaginaryvest-jsonl \
+    --assignments scripts/examples/wearable/device_assignments_example.json --clock-basis device_offset --offset-s -2.5 --url http://127.0.0.1:8000
+
+# 3w. performance evidence: entered on the dashboard (Performance evidence card) or POST /api/v1/recordings/<id>/performance;
+#     a rubric only through PERFORMANCE_RUBRIC_PATH (none by default; the example rubric is FICTIONAL, for tests only)
 
 # 4. frontend, from the Athletrix_Web folder (loopback only)
 python3 -m http.server 3000 --bind 127.0.0.1
@@ -628,7 +642,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (729 tests as of 2026-10-29; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
+# engine: full suite, isolated temporary databases (760 tests as of 2026-10-30; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -741,6 +755,20 @@ to measure errors; a ground point that survives lower-body occlusion; lens-disto
 capture-time mapping for the camera and a common clock with the wearable; Zephyr access itself (correction
 2026-10-30: the team prefers Zephyr but has not purchased it or received API access; see section 0); identity across
 long losses; and, for any performance score, ball and event detection and a validated rubric.
+
+## Checkpoint: coach-context fix, movement quality, bounded processing, wearable foundation, performance evidence (2026-10-30)
+
+| Milestone | Status | How it was checked |
+|-----------|--------|--------------------|
+| 1. Coach-context integration | Complete | The original failure reproduced (a millisecond copy of a microsecond start is refused; whole-second rounding passes a 0.4 s recording's stop); the form now defaults to the engine's exact start. Through the real dashboard on an isolated engine: valid default, save without editing, effective-time selection either side of a correction, restart, package export and import, stopped status. Backend regression test, browser harness |
+| 2. Movement reliability | Complete as a policy and evaluation; the underlying limitations remain | Ground-contact evidence separate from detector confidence (box-height rule, exclude-suspect policy, continuity break), `value_basis`, optional noise rules evaluated on development and held-out splits: none enabled (each reports 31-90 % of slow moving samples as stationary). Hidden legs: 0.02 m instead of 2.46 m on the drawn scene, with false flags on 7 % of other figures. No pose model added; foot visibility on real footage remains open |
+| 3. Processing speed and timing | Complete (no physical camera tested) | Offline versus bounded paths, drop-oldest queue with full accounting, processing lag apart from engine delay, continuity after dropped work: tests with synthetic frames and slow or stalling fixture detectors; benchmark: YOLOX-S cannot keep up with 720p at 25 fps on this Mac (0.46x), YOLOX-Tiny can (1.44x) |
+| 4. Wearable integration preparation | Foundation complete; Zephyr blocked | Two fictional formats (nulls, zeros, unit conversion, duplicates, conflicts, delayed and out-of-order records, disconnects, reassignment) through validation, export and a paced replay into an isolated engine. The Zephyr reader is deliberately unimplemented (no permitted documentation use, no sample payloads); `docs/zephyr-integration-checklist.md` |
+| 5. Performance evidence layer | Complete (manual entry) | Model, API, rubric loading, composite only with a rubric and enough evidence in all four areas (hand-checked with a FICTIONAL rubric), package format 4, import with re-pointed context references, removal |
+| 6. Dashboard performance review | Complete | Performance evidence card; browser harness 76 of 76; two observations entered and reviewed through the real page on an isolated engine |
+
+Checks run: full backend suite 760 passed; `verify_camera_pipeline.py` 16 of 16; `verify_evaluation_workflow.py` 46 of
+46; `verify_portable_workflow.py` passed; marker regression fixture unchanged; browser harness 76 of 76.
 
 ## 10. Recommended next milestone
 
