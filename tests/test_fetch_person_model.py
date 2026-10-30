@@ -22,6 +22,7 @@ def test_list_reports_pins_licences_and_state_without_downloading(tmp_path):
 
 
 def test_an_unpinned_model_is_refused_and_a_mismatching_file_is_never_replaced(tmp_path, monkeypatch):
+    monkeypatch.setitem(cli.MODELS, "yolox_tiny", {**cli.MODELS["yolox_tiny"], "sha256": None})
     code, lines = run(["--model", "yolox_tiny", "--dest", str(tmp_path)])
     assert code == 1 and "no pinned SHA-256" in lines[-1]
     (tmp_path / "yolox_s.onnx").write_bytes(b"something else")

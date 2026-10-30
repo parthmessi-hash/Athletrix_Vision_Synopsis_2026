@@ -18,6 +18,12 @@ WHAT IT DOES
   the video's SHA-256, decoder timestamp mismatches (dropped or duplicated frames), per-track first/last frames and
   losses, skips by reason, and processing speed.
 
+  --paced-replay releases the file's frames at its own rate (a camera-like PACED FILE REPLAY, not a camera) through the
+  bounded queue of camera_adapter/bounded.py: frames the processor cannot take in time are dropped (counted, with their
+  times), --every-nth N processes only every Nth frame, --queue-size sets the queue. The log then adds a "bounded"
+  section: frames released, sampled out, dropped, processed, processing lag (frame available -> result ready; not the
+  engine's receipt or display delay) and whether processing kept up. Observation times stay video-relative.
+
   --gallery writes one image with crops of every track and --annotate a video with boxes and track ids: an assignment
   aid for the operator, not a verified identity. --assignments-template writes an assignments file with every track
   listed for review and no assignment: unassigned tracks never produce athlete samples.
@@ -43,6 +49,40 @@ if str(ROOT) not in sys.path:
 from camera_adapter.observations import dump, load  # noqa: E402
 
 
+def paced_run(pv, args, config, detector, model_info, fps, size, preview):
+    """Bounded processing of a paced replay of the file; observation times are the frames' own video times."""
+    from camera_adapter import bounded  # noqa: PLC0415
+    from camera_adapter.observations import ObservationFile, Video  # noqa: PLC0415
+    bcfg = bounded.BoundedConfig(queue_size=args.queue_size, process_every_nth=args.every_nth)
+    errors = bcfg.validate()
+    if errors:
+        raise ValueError("; ".join(errors))
+    ft = pv.FrameTracker(config, detector, fps, size[0], size[1], frame_step=args.every_nth)
+    def work(i, t, frame):
+        shown = ft.process(i, t, frame)
+        if preview is not None:
+            preview(i, frame, shown)
+    res = bounded.run_bounded(bounded.paced_file_source(args.video, speed=args.speed, max_frames=args.max_frames), work, bcfg)
+    blog = bounded.bounded_log(res, bcfg, fps * args.speed, f"paced replay of {args.video.name} at {args.speed:g}x its frame rate (not a camera)")
+    track = ft.summary()
+    source_s = res.released / fps
+    log = {"format": "athletrix-video-tracking-log", "format_version": 2, "mode": "bounded_paced_file_replay",
+           "video": {"file": args.video.name, "sha256": pv.sha256_file(args.video), "width": size[0], "height": size[1], "fps": fps, "decoded_frames": res.released,
+                     "time_base": "video_relative (frame / fps); not camera capture time",
+                     "decoder_time_mismatches": None, "note": "not checked in paced replay"},
+           "model": model_info, "config": config.to_doc(), "versions": pv.package_versions(),
+           **{k: track[k] for k in ("detections", "observations", "skipped", "ground_contact", "tracks", "track_losses")},
+           "speed": {"mode": "paced file replay through the bounded queue", "source_duration_s": round(source_s, 3), "processing_duration_s": round(res.wall_s, 3),
+                     "wall_seconds": round(res.wall_s, 3), "frames_per_second": round(len(res.processed) / res.wall_s, 3) if res.wall_s > 0 else None,
+                     "video_seconds": round(source_s, 3), "detector_ms_per_frame": track["detector_ms_per_frame"], "tracker_ms_per_frame": track["tracker_ms_per_frame"],
+                     "realtime_factor": None, "kept_up_with_source_rate": blog["kept_up"]},
+           "bounded": blog,
+           "identity": "track ids are temporary and unassigned (athlete_id null); assign tracks explicitly after review."}
+    obs = sorted(ft.obs, key=lambda o: (o.frame, o.track_id))
+    extractor = f"person detection {model_info['name'] if model_info else 'fixture'} + {config.tracker.implementation} (video tracking v1, bounded paced replay)"
+    return ObservationFile(Video(size[0], size[1], round(fps, 6), args.video.name), extractor, obs), log
+
+
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, detector=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("video", type=Path)
@@ -56,6 +96,10 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, d
     p.add_argument("--annotate", type=Path)
     p.add_argument("--assignments-template", type=Path)
     p.add_argument("--max-frames", type=int)
+    p.add_argument("--paced-replay", action="store_true", help="bounded processing of a paced replay of the file (see above)")
+    p.add_argument("--queue-size", type=int, default=2)
+    p.add_argument("--every-nth", type=int, default=1)
+    p.add_argument("--speed", type=float, default=1.0, help="paced replay speed (1 = the file's own rate)")
     try:
         args = p.parse_args(argv)
     except SystemExit as exc:
@@ -94,8 +138,11 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, d
         cap.release()
         preview = pv.PreviewWriter(args.annotate, args.gallery, fps or 25.0, size) if (args.annotate or args.gallery) else None
         try:
-            obs, log = pv.track_video(args.video, config, detector=detector, model_info=model_info, max_frames=args.max_frames, on_frame=preview,
-                                      progress=lambda n, total: out(f"  {n} / {total if total > 0 else '?'} frames"))
+            if args.paced_replay:
+                obs, log = paced_run(pv, args, config, detector, model_info, fps, size, preview)
+            else:
+                obs, log = pv.track_video(args.video, config, detector=detector, model_info=model_info, max_frames=args.max_frames, on_frame=preview,
+                                          progress=lambda n, total: out(f"  {n} / {total if total > 0 else '?'} frames"))
         finally:
             if preview is not None:
                 preview.close()
@@ -108,6 +155,10 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, d
     args.log.write_text(json.dumps(log, indent=2) + "\n", encoding="utf-8")
     if args.assignments_template:
         args.assignments_template.write_text(json.dumps(pv.assignment_template(log), indent=2) + "\n", encoding="utf-8")
+    if "bounded" in log:
+        b = log["bounded"]
+        out(f"PACED FILE REPLAY (bounded; not a camera): {b['frames']['released_by_source']} frames released, {b['frames']['sampled_out']} sampled out, "
+            f"{b['frames']['dropped']} dropped, {b['frames']['processed']} processed; processing lag {b['processing_lag_s']}; kept up: {b['kept_up']}")
     sp, v = log["speed"], log["video"]
     out(f"{v['decoded_frames']} frames ({v['width']}x{v['height']} at {v['fps']:g} fps) -> {log['detections']} person detections, {len(log['tracks'])} temporary tracks, "
         f"{log['observations']} observations; skipped {log['skipped']}; track losses {log['track_losses']}; decoder time mismatches {v['decoder_time_mismatches']}")

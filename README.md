@@ -2012,6 +2012,44 @@ image edge that earlier runs did not show). A pose model was not added: drawn fi
 locate real feet better, and foot visibility under real occlusion remains an open limitation until real footage
 with ground truth is available.
 
+### 11. Processing speed and timing: offline analysis versus bounded processing (2026-10-30)
+
+**Offline file analysis** (`camera_track_video.py`, default): every frame, as fast as the machine allows. Observation
+times are the original video-relative times. The log (`mode: offline_file`) reports `source_duration_s`,
+`processing_duration_s`, throughput, `realtime_factor` and `kept_up_with_source_rate`. Faster or slower processing
+never changes the times, and accelerated replay is not live-camera validation.
+
+**Bounded processing** (`camera_adapter/bounded.py`; `camera_track_video.py --paced-replay [--queue-size N]
+[--every-nth N] [--speed X]`): a source thread releases frames with their index and capture time; with
+`--every-nth` only every Nth frame is forwarded (`sampled_out`); forwarded frames wait in a queue of at most
+`queue_size` (default 2) and when it is full the **oldest waiting frame is dropped** and counted with its time, so no
+backlog of old frames builds up. The processor (the same per-frame `FrameTracker` as offline analysis) gets each frame
+with its original index and capture time. The log's `bounded` section separates frames released, sampled out, dropped
+(with the longest run of consecutive drops in seconds) and processed, and gives queue wait, processing time and
+**processing lag** (frame available to result ready). That lag excludes the engine's receipt and display delay, which
+the engine's timing instrumentation reports separately. A dropped frame is a gap in time: the tracker is updated
+with capture times (time-based loss budget), the estimator resets after gaps over 0.3 s and starts a new continuity
+segment, and nothing is invented for it (`tests/test_bounded_processing.py`, with synthetic frames and deliberately
+slow or stalling fixture detectors). `--paced-replay` releases a file's frames at its own rate: a PACED FILE REPLAY,
+not a camera. No physical camera source is included because none was available to test one.
+
+**Benchmark** (`python scripts/camera_benchmark.py`; drawn-figure scene, 1280x720 at 25 fps, 500 frames, this Mac,
+OpenCV 5.0 with 8 threads, CPU only):
+
+| Model (pinned) | Mode | Processed / dropped / sampled out | Throughput | Processing lag median / p95 | Kept up |
+|---|---|---|---|---|---|
+| YOLOX-S 640 | offline | 500 / 0 / 0 | 11.5 frames/s (0.46x real time) | n/a | no |
+| YOLOX-S 640 | paced, every frame | 233 / 267 / 0 | 11.5 frames/s | 0.15 / 0.16 s | no |
+| YOLOX-S 640 | paced, every 2nd | 229 / 21 / 250 | 11.4 frames/s | 0.20 / 0.24 s | no |
+| YOLOX-S 640 | paced, every 3rd | 167 / 0 / 333 | 8.3 frames/s | 0.08 / 0.10 s | yes |
+| YOLOX-Tiny 416 | offline | 500 / 0 / 0 | 35.9 frames/s (1.44x) | n/a | yes |
+| YOLOX-Tiny 416 | paced, every frame | 500 / 0 / 0 | 25.0 frames/s | 0.024 / 0.027 s | yes |
+
+YOLOX-Tiny (`scripts/examples/camera/video_tracking_config_tiny.json`; fetched explicitly, SHA-256 pinned) keeps up
+here; its effect on far or small players was not evaluated beyond observation counts (2,296 versus 2,345 for
+YOLOX-S on this scene), and every-3rd-frame sampling produced one extra track fragment. Real 1080p footage, real
+cameras and other machines will differ; run the benchmark on the sideline computer before relying on any setting.
+
 ### Remaining requirements for real player tracking
 
 Real-footage evaluation with permission and ground truth (surveyed positions or a reference system); a better ground

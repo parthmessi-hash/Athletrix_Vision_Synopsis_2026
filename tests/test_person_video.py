@@ -8,6 +8,7 @@ One test runs the pinned YOLOX model on a drawn fictional frame when models/yolo
 
 import importlib.util
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -152,3 +153,20 @@ def test_pinned_detector_finds_drawn_fictional_figures_near_their_feet():
     assert len(strong) >= len(feet) - 1
     matched = sum(1 for fu, fv in feet if any(abs((b[0] + b[2]) / 2 - fu) < 15 and abs(b[3] - fv) < 15 for b, _ in strong))
     assert matched >= len(feet) - 1
+
+
+def test_cli_paced_replay_reports_bounded_processing_and_keeps_video_times(tmp_path):
+    video = write_video(tmp_path / "v.avi", frames=20)    # 2 s at 10 fps, released at 4x its rate
+    def slow(frame):
+        time.sleep(0.04)
+        return np.array([walker(0)[:4]], np.float32), np.array([0.9], np.float32)
+    lines = []
+    args = [str(video), "--out", str(tmp_path / "o.jsonl"), "--log", str(tmp_path / "l.json"), "--paced-replay", "--speed", "4", "--queue-size", "1"]
+    assert cli.main(args, out=lines.append, detector=slow) == 0, lines
+    log = json.loads((tmp_path / "l.json").read_text())
+    b = log["bounded"]
+    assert log["mode"] == "bounded_paced_file_replay" and b["frames"]["released_by_source"] == 20
+    assert b["frames"]["processed"] + b["frames"]["dropped"] == 20 and b["frames"]["dropped"] > 0 and b["kept_up"] is False
+    assert "not a camera" in b["source"] and any(line.startswith("PACED FILE REPLAY") for line in lines)
+    obs = load(tmp_path / "o.jsonl").observations
+    assert all(o.video_time_s == pytest.approx(o.frame / FPS) for o in obs), "video-relative times, whatever the processing speed"

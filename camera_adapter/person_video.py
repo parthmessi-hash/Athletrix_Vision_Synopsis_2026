@@ -48,7 +48,7 @@ from camera_adapter.observations import Observation, ObservationFile, Video
 CONFIG_FORMAT = "athletrix-video-tracking-config"
 
 # Pinned model files: fetched once by scripts/fetch_person_model.py, verified before every run. The SHA-256 values are
-# the ones observed when the official release assets were first fetched for this project (2026-10-29); the upstream
+# the ones observed when the official release assets were first fetched for this project (yolox_s 2026-10-29, yolox_tiny 2026-10-30); the upstream
 # release publishes no checksums of its own, so this pin detects a changed file, it does not prove the original.
 MODELS = {
     "yolox_s": {"url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx", "bytes": 35858002,
@@ -56,7 +56,7 @@ MODELS = {
                 "licence": "Apache-2.0 (Megvii YOLOX repository and release); trained on COCO 2017",
                 "source": "Megvii-BaseDetection/YOLOX release 0.1.1rc0, official ONNX export"},
     "yolox_tiny": {"url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx", "bytes": 20219662,
-                   "sha256": None, "input_size": 416,
+                   "sha256": "427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7", "input_size": 416,
                    "licence": "Apache-2.0 (Megvii YOLOX repository and release); trained on COCO 2017",
                    "source": "Megvii-BaseDetection/YOLOX release 0.1.1rc0, official ONNX export"},
 }
@@ -236,14 +236,100 @@ def package_versions() -> dict:
     return out
 
 
+class FrameTracker:
+    """Detection, tracking, ground-contact evidence and observations for one frame at a time, at the frame's own time.
+
+    Shared by the offline file path (`track_video`, every decoded frame) and the bounded path (`camera_adapter.bounded`,
+    which may skip or drop frames): the tracker is updated with each processed frame's time, so a skipped frame is a gap
+    in time, not a missing step. `frame_step` is the expected index step between processed frames (sampling every nth
+    frame); a larger step is logged as a track loss."""
+
+    def __init__(self, config: VideoTrackingConfig, detector, fps: float, width: int, height: int, *, frame_step: int = 1) -> None:
+        import numpy as np  # noqa: PLC0415
+        import supervision as sv  # noqa: PLC0415
+        from trackers import ByteTrackTracker  # noqa: PLC0415
+        errors = config.validate()
+        if errors:
+            raise ValueError("; ".join(errors))
+        self._np, self._sv = np, sv
+        self.config, self.detector, self.fps, self.width, self.height, self.frame_step = config, detector, fps, width, height, frame_step
+        t = config.tracker
+        self.tracker = ByteTrackTracker(lost_track_buffer=t.lost_track_buffer, frame_rate=fps, track_activation_threshold=t.track_activation_threshold,
+                                        minimum_consecutive_frames=t.minimum_consecutive_frames, minimum_iou_threshold=t.minimum_iou_threshold,
+                                        high_conf_det_threshold=t.high_conf_det_threshold)
+        self.obs: list[Observation] = []
+        self.tracks: dict[str, TrackStats] = {}
+        self.heights: dict[str, list[float]] = {}     # track -> recent consistent box heights (the ground-contact reference)
+        self.ground_counts = {"consistent": 0, "suspect": 0, "unknown": 0}
+        self.skipped = {"unconfirmed_track": 0, "box_touches_bottom_edge": 0, "box_too_small": 0}
+        self.detections_total = self.frames = 0
+        self.t_detect = self.t_track = 0.0
+
+    def process(self, f: int, t: float, frame) -> list:
+        """Process frame index `f` taken at `t` seconds (video or capture time); returns [(track_id, box, score, used)]."""
+        np, sv, config = self._np, self._sv, self.config
+        a = time.perf_counter()
+        boxes, scores = self.detector(frame)
+        b = time.perf_counter()
+        boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+        scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+        self.detections_total += len(scores)
+        det = sv.Detections(xyxy=boxes, confidence=scores, class_id=np.zeros(len(scores), dtype=int))
+        tracked = self.tracker.update(det, timestamp=t)
+        c = time.perf_counter()
+        self.t_detect += b - a
+        self.t_track += c - b
+        self.frames += 1
+        shown = []
+        for box, score, tid in zip(tracked.xyxy, tracked.confidence if tracked.confidence is not None else np.ones(len(tracked)), tracked.tracker_id):
+            x1, y1, x2, y2 = (float(v) for v in box)
+            if tid is None or int(tid) < 0:
+                self.skipped["unconfirmed_track"] += 1
+                shown.append((None, (x1, y1, x2, y2), float(score), False))
+                continue
+            track_id = f"trk-{int(tid)}"
+            used = True
+            if config.drop_boxes_touching_bottom_edge and y2 >= self.height - 1.5:
+                self.skipped["box_touches_bottom_edge"] += 1
+                used = False
+            elif y2 - y1 < config.min_box_height_px:
+                self.skipped["box_too_small"] += 1
+                used = False
+            st = self.tracks.get(track_id)
+            if st is None:
+                st = self.tracks[track_id] = TrackStats(f, f)
+            elif f > st.last_frame + self.frame_step:
+                st.losses.append([st.last_frame, f])
+            st.last_frame = f
+            shown.append((track_id, (x1, y1, x2, y2), float(score), used))
+            if used:
+                st.observations += 1
+                u = min(max((x1 + x2) / 2, -0.5), self.width - 0.5)
+                v = min(max(y2, -0.5), self.height - 0.5)
+                ground = ground_status(self.heights.setdefault(track_id, []), y2 - y1, config)
+                if ground is not None:
+                    self.ground_counts[ground] += 1
+                self.obs.append(Observation(f, round(t, 6), track_id, round(u, 3), round(v, 3), round(min(1.0, max(0.0, float(score))), 4), None, ground))
+        return shown
+
+    def summary(self) -> dict:
+        """The tracking part of a run log (detections, observations, skips, ground evidence, tracks, per-frame costs)."""
+        n = max(1, self.frames)
+        return {"detections": self.detections_total, "observations": len(self.obs), "skipped": self.skipped,
+                "ground_contact": {"rule": self.config.ground_contact_rule, **(self.ground_counts if self.config.ground_contact_rule != "none" else {})},
+                "tracks": {k: v.to_doc(self.fps) for k, v in sorted(self.tracks.items(), key=lambda kv: int(kv[0].split("-")[1]))},
+                "track_losses": sum(len(v.losses) for v in self.tracks.values()),
+                "detector_ms_per_frame": round(1000 * self.t_detect / n, 2), "tracker_ms_per_frame": round(1000 * self.t_track / n, 2)}
+
+
 def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None, model_info: dict | None = None, max_frames: int | None = None,
                 on_frame=None, progress=None) -> tuple[ObservationFile, dict]:
-    """Detect and track people in every decoded frame. `detector` is any callable frame -> (boxes, scores) (tests pass a
-    fixture detector). `on_frame(frame_index, frame, tracked)` receives [(track_id, box, score, used)] for previews."""
+    """OFFLINE FILE ANALYSIS: detect and track people in every decoded frame, as fast as the machine allows. Observation
+    times are the original video-relative times (frame / fps) whatever the processing speed; the log reports source
+    duration, processing duration, throughput and whether processing kept up with the video's own rate. This is not
+    live processing: see camera_adapter/bounded.py for the bounded path. `detector` is any callable frame -> (boxes,
+    scores); `on_frame(frame_index, frame, tracked)` receives [(track_id, box, score, used)] for previews."""
     import cv2  # noqa: PLC0415
-    import numpy as np  # noqa: PLC0415
-    import supervision as sv  # noqa: PLC0415
-    from trackers import ByteTrackTracker  # noqa: PLC0415
 
     errors = config.validate()
     if errors:
@@ -257,18 +343,9 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
     if not (math.isfinite(fps) and fps > 0) or width <= 0 or height <= 0:
         cap.release()
         raise ValueError(f"{video_path}: the decoder reports no usable frame rate or size (fps {fps}, {width}x{height})")
-    t = config.tracker
-    tracker = ByteTrackTracker(lost_track_buffer=t.lost_track_buffer, frame_rate=fps, track_activation_threshold=t.track_activation_threshold,
-                               minimum_consecutive_frames=t.minimum_consecutive_frames, minimum_iou_threshold=t.minimum_iou_threshold,
-                               high_conf_det_threshold=t.high_conf_det_threshold)
-    obs: list[Observation] = []
-    tracks: dict[str, TrackStats] = {}
-    heights: dict[str, list[float]] = {}     # track -> recent consistent box heights (the ground-contact reference)
-    ground_counts = {"consistent": 0, "suspect": 0, "unknown": 0}
-    skipped = {"unconfirmed_track": 0, "box_touches_bottom_edge": 0, "box_too_small": 0}
+    ft = FrameTracker(config, detector, fps, width, height)
     mismatched: list[dict] = []
-    detections_total, frames = 0, 0
-    t_detect = t_track = 0.0
+    frames = 0
     started = time.perf_counter()
     period_ms = 1000.0 / fps
     while max_frames is None or frames < max_frames:
@@ -282,47 +359,7 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
                 mismatched.append({"frame": f, "expected_ms": round(f * period_ms, 3), "decoder_ms": round(pos_ms, 3)})
             else:
                 mismatched.append(None)
-        a = time.perf_counter()
-        boxes, scores = detector(frame)
-        b = time.perf_counter()
-        boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-        scores = np.asarray(scores, dtype=np.float32).reshape(-1)
-        detections_total += len(scores)
-        det = sv.Detections(xyxy=boxes, confidence=scores, class_id=np.zeros(len(scores), dtype=int))
-        tracked = tracker.update(det, timestamp=f / fps)
-        c = time.perf_counter()
-        t_detect += b - a
-        t_track += c - b
-        shown = []
-        for box, score, tid in zip(tracked.xyxy, tracked.confidence if tracked.confidence is not None else np.ones(len(tracked)), tracked.tracker_id):
-            x1, y1, x2, y2 = (float(v) for v in box)
-            if tid is None or int(tid) < 0:
-                skipped["unconfirmed_track"] += 1
-                shown.append((None, (x1, y1, x2, y2), float(score), False))
-                continue
-            track_id = f"trk-{int(tid)}"
-            used = True
-            if config.drop_boxes_touching_bottom_edge and y2 >= height - 1.5:
-                skipped["box_touches_bottom_edge"] += 1
-                used = False
-            elif y2 - y1 < config.min_box_height_px:
-                skipped["box_too_small"] += 1
-                used = False
-            st = tracks.get(track_id)
-            if st is None:
-                st = tracks[track_id] = TrackStats(f, f)
-            elif f > st.last_frame + 1:
-                st.losses.append([st.last_frame, f])
-            st.last_frame = f
-            shown.append((track_id, (x1, y1, x2, y2), float(score), used))
-            if used:
-                st.observations += 1
-                u = min(max((x1 + x2) / 2, -0.5), width - 0.5)
-                v = min(max(y2, -0.5), height - 0.5)
-                ground = ground_status(heights.setdefault(track_id, []), y2 - y1, config)
-                if ground is not None:
-                    ground_counts[ground] += 1
-                obs.append(Observation(f, round(f / fps, 6), track_id, round(u, 3), round(v, 3), round(min(1.0, max(0.0, float(score))), 4), None, ground))
+        shown = ft.process(f, f / fps, frame)
         if on_frame is not None:
             on_frame(f, frame, shown)
         frames += 1
@@ -332,24 +369,25 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
     elapsed = time.perf_counter() - started
     if frames == 0:
         raise ValueError(f"{video_path}: no frame could be decoded")
-    obs.sort(key=lambda o: (o.frame, o.track_id))
-    n_mismatch = len(mismatched)
+    obs = sorted(ft.obs, key=lambda o: (o.frame, o.track_id))
+    track = ft.summary()
+    source_s = frames / fps
     log = {
-        "format": "athletrix-video-tracking-log", "format_version": 1,
+        "format": "athletrix-video-tracking-log", "format_version": 2, "mode": "offline_file",
         "video": {"file": Path(video_path).name, "sha256": sha256_file(video_path), "width": width, "height": height, "fps": fps,
                   "declared_frame_count": declared, "decoded_frames": frames, "time_base": "video_relative (frame / fps); not camera capture time",
                   "stopped_by_max_frames": max_frames is not None and frames >= max_frames,
                   "undecoded_frames_vs_declared": max(0, declared - frames) if declared > 0 and not (max_frames is not None and frames >= max_frames) else None,
-                  "decoder_time_mismatches": n_mismatch, "decoder_time_mismatch_examples": [m for m in mismatched if m][:20],
+                  "decoder_time_mismatches": len(mismatched), "decoder_time_mismatch_examples": [m for m in mismatched if m][:20],
                   "note": "a mismatch is a decoded frame whose decoder timestamp differs from frame / fps by more than max_time_mismatch_frames periods: a dropped or duplicated frame or a variable frame rate. Observations still use frame / fps; re-encode to a constant frame rate if mismatches are reported."},
         "model": model_info, "config": config.to_doc(), "versions": package_versions(),
-        "detections": detections_total, "observations": len(obs), "skipped": skipped,
-        "ground_contact": {"rule": config.ground_contact_rule, **(ground_counts if config.ground_contact_rule != "none" else {})},
-        "tracks": {k: v.to_doc(fps) for k, v in sorted(tracks.items(), key=lambda kv: int(kv[0].split("-")[1]))},
-        "track_losses": sum(len(v.losses) for v in tracks.values()),
-        "speed": {"wall_seconds": round(elapsed, 3), "frames_per_second": round(frames / elapsed, 3) if elapsed > 0 else None,
-                  "detector_ms_per_frame": round(1000 * t_detect / frames, 2), "tracker_ms_per_frame": round(1000 * t_track / frames, 2),
-                  "video_seconds": round(frames / fps, 3), "realtime_factor": round((frames / fps) / elapsed, 3) if elapsed > 0 else None},
+        **{k: track[k] for k in ("detections", "observations", "skipped", "ground_contact", "tracks", "track_losses")},
+        "speed": {"mode": "offline file analysis: every frame, as fast as possible; observation times stay video-relative",
+                  "source_duration_s": round(source_s, 3), "processing_duration_s": round(elapsed, 3), "wall_seconds": round(elapsed, 3),
+                  "frames_per_second": round(frames / elapsed, 3) if elapsed > 0 else None, "video_seconds": round(source_s, 3),
+                  "detector_ms_per_frame": track["detector_ms_per_frame"], "tracker_ms_per_frame": track["tracker_ms_per_frame"],
+                  "realtime_factor": round(source_s / elapsed, 3) if elapsed > 0 else None, "kept_up_with_source_rate": elapsed <= source_s,
+                  "note": "kept_up_with_source_rate compares this run's processing time with the video's duration; it says nothing about a live camera, whose frames cannot wait."},
         "identity": "track ids are temporary and unassigned (athlete_id null); assign tracks explicitly after review. No jersey recognition, re-identification or role classification is performed.",
         "python": sys.version.split()[0],
     }
