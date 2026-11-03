@@ -100,12 +100,17 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
             context_store.insert(c, e.model_copy(update={"id": cid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": e.source_entry_id or e.id}))
         if checkpoint:
             checkpoint("context")
+        obs_map: dict[str, str] = {}
         for o in pkg.performance:
             oid = performance_store.new_observation_id(now)
-            while c.execute("SELECT 1 FROM recording_performance WHERE id = ?", (oid,)).fetchone():
+            while oid in obs_map.values() or c.execute("SELECT 1 FROM recording_performance WHERE id = ?", (oid,)).fetchone():
                 oid = performance_store.new_observation_id(now)
-            performance_store.insert(c, o.model_copy(update={"id": oid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": o.source_entry_id or o.id,
-                                                             "coach_context_id": context_map.get(o.coach_context_id) if o.coach_context_id else None}))
+            obs_map[o.id] = oid
+        for o in pkg.performance:   # corrections and distinct_from statements point at the imported ids
+            performance_store.insert(c, o.model_copy(update={"id": obs_map[o.id], "recording_id": new_id, "origin": "source_engine", "source_entry_id": o.source_entry_id or o.id,
+                                                             "coach_context_id": context_map.get(o.coach_context_id) if o.coach_context_id else None,
+                                                             "supersedes": obs_map.get(o.supersedes) if o.supersedes else None,
+                                                             "distinct_from": [obs_map[i] for i in o.distinct_from if i in obs_map]}))
         if checkpoint:
             checkpoint("performance")
         c.execute("INSERT INTO recording_imports (recording_id, source_recording_id, package_sha256, package_format, package_generated_at, imported_at, period_id_map) VALUES (?, ?, ?, ?, ?, ?, ?)",

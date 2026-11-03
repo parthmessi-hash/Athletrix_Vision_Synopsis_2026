@@ -26,6 +26,7 @@ FORMAT (format "athletrix-recording-package", format_version 4; versions 1 to 3 
     performance.json (version 4 only, may be an empty list) the recording's individual-performance evidence observations
                     (app/models/performance.py) exactly as stored; imported with new ids, origin "source_engine", the
                     original id as source_entry_id and coach_context_id re-pointed to the imported context entry.
+                    Corrections (`supersedes`) and `distinct_from` statements are re-pointed to the imported ids.
   The manifest's checksums and counts let an importer detect accidental corruption; they are not a signature, and a
   package proves nothing about the accuracy of the measurements it carries. It is not a database backup: no registry,
   rolling history, device status, other recordings, configuration files, credentials, paths or logs are included.
@@ -496,6 +497,9 @@ def read_package(data: bytes) -> Package:
                 continue
             if obs.evidence_source == "camera_automatic":
                 errors.append(f"performance.json item {n}: automatic camera evidence is not supported by this engine")
+                continue
+            if obs.supersedes is not None and obs.supersedes not in {x.get("id") for x in raw if isinstance(x, dict)}:
+                errors.append(f"performance.json item {n}: corrects an observation that is not in the package")
                 continue
             if obs.coach_context_id is not None and obs.coach_context_id not in context_ids:
                 errors.append(f"performance.json item {n}: refers to a coach-context entry that is not in the package")
