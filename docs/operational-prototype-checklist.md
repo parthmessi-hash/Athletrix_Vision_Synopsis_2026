@@ -13,8 +13,12 @@ Starting point: backend `e5adf26`, frontend `05c001a` (792 backend tests, 82 bro
 | 6 | Local video review and annotation | done on synthetic drawn figures (tests/video_review.test.html 3/3; real page: video, overlay, encounter lapse, hash matches Python, export loads in the backend); real footage pending | frontend `tools/video-review.html` |
 | 7 | Optional lens-distortion calibration | done on synthetic geometry (tests/test_intrinsics.py; check-point max 1.04 m without vs 0.085 m with the lens model); no physical camera calibrated | `camera_adapter/intrinsics.py` |
 | 8 | Evaluation workbench | done (tests/test_evaluate.py; fictional dataset only: no real reference annotations exist) | `scripts/evaluate.py` |
-| 9 | End-to-end integration and failure checks | pending | `scripts/verify_operational_workflow.py` |
-| 10 | Delivery, docs, check entry point | pending | `scripts/check.py`, README, PROJECT_STATUS |
+| 9 | End-to-end integration and failure checks | done (verify_operational_workflow.py 16/16; team-scale 20 athletes 60 s) | `scripts/verify_operational_workflow.py` |
+| 10 | Delivery, docs, check entry point | done (check.py; README Operational prototype; PROJECT_STATUS checkpoint) | `scripts/check.py`, README, PROJECT_STATUS |
 
 Rules carried through: fictional profiles only (never enabled by default), manual performance evidence, camera identity
 checked only on drawn figures, phantom distance unresolved, noise suppression off, Zephyr not implemented.
+
+Commands (all verified in this batch): `python scripts/demo_launcher.py --session match`, `python scripts/check.py [--all]`,
+`python scripts/verify_operational_workflow.py`, `python scripts/evaluate.py make-fictional --out D && python scripts/evaluate.py run D/dataset.json --out R`,
+`python scripts/profile_tool.py inspect FILE`, `python scripts/video_review_sample.py --out D`, `python scripts/camera_intrinsics.py synthetic|calibrate ...`.

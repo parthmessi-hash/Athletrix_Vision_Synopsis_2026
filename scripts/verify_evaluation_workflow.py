@@ -141,7 +141,7 @@ def to_v1(package: bytes) -> bytes:
     manifest = json.loads(files.pop("manifest.json"))
     files.pop("receipts.jsonl")
     files.pop("context.json", None)
-    for name in ("performance.json", "baselines.json", "roster.json", "reviews.json"):
+    for name in ("performance.json", "baselines.json", "roster.json", "reviews.json", "responses.json"):
         files.pop(name, None)
     manifest["format_version"] = 1
     manifest["counts"].pop("receipts")

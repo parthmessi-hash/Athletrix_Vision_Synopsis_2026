@@ -1139,7 +1139,7 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 5)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 6)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
@@ -1151,7 +1151,7 @@ layer" below):
 
 | Member | Content |
 |--------|---------|
-| `manifest.json` | `format`, `format_version` (5), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries, performance observations, baselines, roster entries, saved reviews) and `settings_at_export` |
+| `manifest.json` | `format`, `format_version` (6), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries, performance observations, baselines, roster entries, saved reviews, responses) and `settings_at_export` |
 | `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording), `athletes` (the roster snapshot, in roster order) and `configuration_at_start` (the start-time snapshot, or null when the recording has none; see "Recording configuration snapshot") |
 | `samples.jsonl` | every recorded sample of every roster athlete in the existing `{type, sample}` interchange format, by athlete in roster order, then instant, physiological first at equal instants; payloads exactly as stored |
 | `periods.json` | saved periods: original `id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as saved), `created_at` |
@@ -1161,6 +1161,7 @@ layer" below):
 | `baselines.json` | physiological baselines calculated from this recording, with their statistics and review decisions; may be an empty list |
 | `roster.json` | roster-state and match-constraint entries; may be an empty list |
 | `reviews.json` | saved reviews with their stored configuration text and evidence copies, imported unchanged apart from new ids; may be an empty list |
+| `responses.json` | (version 6) coach / operator responses and lineup changes, with saved-review and roster-entry references re-pointed on import; may be an empty list |
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
@@ -1653,6 +1654,130 @@ single noisy reading (keep). The 40:00 reviews are retrospective (the last five-
 40:00) and `run` shows the as-entered version too. `run` also checks two hand-worked calculations written independently of the engine's
 code, saving and reproducing every review, a restart, a correction, a configuration change, export and import into a
 second database, a deliberately changed recorded sample that reproduction must report, and removal of an athlete.
+
+## Operational prototype (2026-11-03): live session, team review, responses, video review, evaluation
+
+**Software that runs locally, demonstrated with FICTIONAL data and profiles. Nothing here is validated on real players,
+footage, wearables or coaching decisions.** No profile is enabled when the engine starts normally.
+
+### Architecture and data flow
+
+```
+wearable / simulator ──> POST /samples ──┐                       ┌─> GET .../team-review (one request, one review time,
+camera adapter ──────────────────────────┤   recording (SQLite)  │     one profile set, knowledge=as_entered|retrospective)
+people: context, roster, performance ────┤──> samples, receipts, ├─> GET .../substitution-review, physiological-index,
+        evidence, baselines, responses ──┘   evidence, baselines,│     performance-review (per athlete)
+                                              roster, responses  ├─> POST .../reviews (saved, pinned), .../reproduce
+                                                                 └─> package.zip (format 6) ─> import on another engine
+```
+Each sample keeps three times apart: when it was measured (`timestamp`), when this engine received it (receipt
+metadata) and its age at the review time. Every entry by a person (observation, correction, context, roster entry,
+baseline and decision, response) has its own entry time. `knowledge=as_entered` uses only what had been entered and
+received by the review time (what a live system could have shown); `retrospective` uses everything stored now and
+says what was entered later. A sample without receipt metadata (imported, or stored before receipts existed) is shown
+with its availability as an assumption.
+
+### One-command fictional session (`scripts/demo_launcher.py --session match`)
+
+```bash
+python scripts/demo_launcher.py --session match                     # about 6 minutes at speed 1; the URL and a walkthrough are printed
+python scripts/demo_launcher.py --session match --speed 3 --exit-after-demo
+```
+An isolated engine (temporary database, free loopback port, FICTIONAL live profiles in its own environment only) and a
+loopback copy of the dashboard. A pre-match rest recording gives each strap wearer a fictional baseline, accepted by
+"fictional analyst (simulated)". The scripted session (`scripts/live_session.py`) sends physiology and performance
+from separate random streams, with phases: maintained performance, p08's index elevated then recovering, p02's
+performance declining, a formation change asking p05 for a role they cannot play, p06's strap stopping, b01 becoming
+unavailable, and two SIMULATED coach responses (a deferral and a lineup change). Every timestamp is the real send time:
+`--speed` compresses the script, not the clock. This is a paced script, not live capture. Measured on this Mac at
+speed 1: p08 shown "review later" during its elevation and "keep" after, p05 "consider replacement" after the
+tactical change, p02 "consider replacement" after the decline; the team review took 20-250 ms as the recording grew.
+At speeds above about 2 the phases are shorter than the live profile's persistence windows, so sustained states may
+not form. Ctrl-C stops only the processes it started and removes its temporary folder.
+
+### Team review, coach responses and lineup changes
+
+- `GET /api/v1/recordings/{id}/team-review?knowledge=as_entered|retrospective[&at=...]` (the knowledge mode is
+  required): every roster athlete in roster order, never ranked, with roster status and role, the newest recorded
+  reading (observation time, receipt time, age), the experimental index and performance score with coverage and age,
+  the experimental output, its main reason and the full review. An athlete whose stored records cannot be read, or who
+  is not reached within `budget_s`, is reported as not reviewed, never with a guessed or earlier result.
+- `POST /api/v1/recordings/{id}/responses`: acknowledged, keep, defer, dismiss (each names a saved review, so the
+  recommendation, its profiles and evidence stay pinned) or lineup_change (outgoing, incoming, effective time). One
+  response per `client_token`: a retry or double click returns the stored one. A lineup change is checked against the
+  roster state and stated constraints at its effective time (outgoing on the field, incoming on the bench, not ruled
+  out, substitutions left, not before a stated time, role fit unless explicitly accepted) and writes roster entries;
+  the substitution count drops only where it is recorded. A response is feedback; nothing is retrained, and an override
+  does not show the recommendation was right or wrong. `simulated: true` marks demo decisions.
+- Dashboard (engine mode only): the Team review card (rows, details on click, responses and lineup changes) and the
+  Baselines and profiles card. A failed refresh clears the rows: an earlier result is never shown as current.
+
+### Profiles and baselines
+
+- `python scripts/profile_tool.py inspect FILE [FILE ...]` and `compare OLD NEW`; `GET /api/v1/profiles`: kind,
+  version, SHA-256, fictional flag, settings, errors (for example persistence that can never form within the lookback),
+  warnings and compatibility between the profiles configured together. A changed profile should carry a new version;
+  `compare` warns when the settings changed but the version did not. Saved reviews reproduce from the exact text they
+  were calculated with.
+- `POST /api/v1/athletes/{id}/baselines/preview` (statistics, nothing stored) and
+  `GET /api/v1/athletes/{id}/baselines/compatibility?at=...` (can the configured index profile use each baseline, and if
+  not, why). Accepting a baseline records who decided and why; it is not a validation and no baseline protocol is implied.
+
+### Local video review (Athletrix_Web `tools/video-review.html`)
+
+```bash
+python scripts/video_review_sample.py --out review-set      # drawn figures only: MP4, observations (format 3), video.json with its SHA-256
+```
+Open `tools/video-review.html` from a loopback copy of the frontend, load the video and the observations from disk
+(nothing is uploaded), step by frame or second, select a track, and confirm who it is from a frame (time-bounded),
+mark an identity uncertain, or end an assignment. After a close encounter the track needs confirming again; being
+visible after the release period is not confirmation. The page counts confirmations, corrections, uncertain marks,
+the observation-seconds without a usable assignment and the time spent, and exports assignments format 2
+(`identity`, `confirmed_by: person | simulated_oracle`, `video {name, sha256}`, `operator_work`), which
+`camera_to_samples.py` reads: uncertain identities never feed an athlete's samples. A performance observation can be
+sent to a local engine linked to frames and the file's SHA-256 (a hash identifies a file; it is not permission and not
+capture time). Checked on the drawn-figure scene only; real-footage evaluation is pending (no clip with permission).
+
+### Optional lens-distortion calibration
+
+```bash
+python scripts/camera_intrinsics.py synthetic --out lens-views            # rendered views through a KNOWN made-up lens
+python scripts/camera_intrinsics.py calibrate lens-views/view-*.png --inner-corners 9x6 --square-mm 30 --camera-id cam-1 --out lens.json
+python scripts/camera_calibrate.py fit POINTS.json --out CAL.json --intrinsics lens.json
+```
+Chessboard intrinsics with held-out views (only each held-out view's pose is estimated), a versioned file with
+assumptions and when to recalibrate, and calibration format 2 that embeds the lens model with its hash: points stay raw,
+the homography is fitted to undistorted points, observations are undistorted the same way, and any other resolution is
+refused. Version-1 calibrations stay readable as "no lens model". On synthetic geometry with strong barrel distortion
+(k1 = -0.32), 19 independent check points were off by up to 1.04 m without the lens model and 0.085 m with it; from
+rendered images the focal length was recovered as 700.7 px (true 700) and k1 as -0.34 (true -0.32; k2 and k3 trade
+off with these views). This is synthetic recovery, not the accuracy of any physical camera, and no threshold is
+applied.
+
+### Evaluation workbench (`scripts/evaluate.py`)
+
+```bash
+python scripts/evaluate.py make-fictional --out eval-fictional                       # a FICTIONAL dataset (labelled as such)
+python scripts/evaluate.py run eval-fictional/dataset.json --out eval-report --split development \
+    --index-profile scripts/examples/review/fictional_index_profile.json --index-profile scripts/examples/review/fictional_live_index_profile.json
+```
+Separate questions with provenance, configuration hashes and per-split results: camera positions (matching window,
+coverage gaps next to errors, repeated observations not counted as participants), performance evidence against
+several reviewers (disagreements kept, nothing adjudicated), two index profiles at the same instants, and substitution
+outputs (context-aware and a score-only variant on identical cases) against independently supplied coach judgments.
+A tuning log entry that used the held-out split marks it COMPROMISED. Only the fictional dataset exists; its coach A
+judgments were written from the demo's expected outputs, so their agreement is circular by construction.
+
+### Checks
+
+```bash
+python scripts/check.py                        # required core checks; every skipped optional or browser check is named
+python scripts/check.py --all                  # plus vision tests, the camera pipeline and the operational workflow
+python scripts/verify_operational_workflow.py  # session -> live review -> engine killed and restarted -> late entries and corrections
+                                               # -> duplicate actions -> lineup -> export/import -> reproduce -> profile change -> removal
+```
+Cleanup: every tool here uses temporary folders it removes itself; outputs you asked for (`--out` folders, `--report`
+files) are yours to delete. Nothing writes to `data/` or the development database.
 
 ## Recording configuration snapshot (`configuration_at_start`)
 
