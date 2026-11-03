@@ -1608,10 +1608,21 @@ otherwise says it is unavailable. The coach decides.
   physiology is reported as unavailable, never as freshness; leadership, pressure-situation and partnership evidence
   is shown as a tradeoff or a reason to review later, never as a bonus. Camera-derived movement is not an input.
   The module docstring lists every rule in order.
+- **When evidence was known** (`app/core/knowledge.py`; `knowledge=retrospective|as_entered` on the performance
+  review, the index, the substitution review and saved reviews): by default a review at T uses everything stored now,
+  including annotations, corrections, context and roster entries entered after T and baselines created or accepted
+  after T, and says so (`knowledge.later_entered`, labelled "Retrospective ... NOT what the live system could have
+  shown"). `as_entered` uses only what had been entered by T: a correction entered later is ignored, so the observation
+  it replaced counts, and a baseline has the status its decisions gave it at T. Samples are judged by their receipt
+  time where recorded; a sample without receipt metadata is assumed available at its own timestamp.
 - **Saved reviews** (`POST /api/v1/recordings/{rec}/athletes/{id}/reviews` with `kind` performance,
-  physiological_index or substitution; `GET .../reviews`; `GET .../reviews/{id}/reproduce`): the result is stored
-  with the exact configuration text, copies of the evidence used and a SHA-256 of the samples read. Reproducing
-  re-runs from those copies, never from the current settings, and reports whether samples or configuration changed.
+  physiological_index or substitution and a `knowledge` mode; `GET .../reviews`; `GET .../reviews/{id}/reproduce`): the
+  result is stored with the exact configuration text, copies of the evidence used and a SHA-256 of the samples read.
+  Reproducing re-runs from those copies, never from the current settings, and answers `status` `reproduced`,
+  `evidence_changed` (recorded samples differ from or are missing against the saved digest; `matches` false) or
+  `differs` (same inputs, different result: the code changed), with an explanation.
+- **Corrections are never withdrawn silently**: no observation in a correction chain can be deleted (409); to undo a
+  correction, correct it again, which stays visible.
 - **Packages**: format 5 adds `baselines.json`, `roster.json` and `reviews.json` (formats 1 to 4 still read).
   Removal (`scripts/local_data.py`) covers baselines, roster entries and saved reviews; removing an athlete also
   removes other athletes' saved substitution reviews in shared recordings, because they embed copies of that athlete's
@@ -1623,7 +1634,7 @@ otherwise says it is unavailable. The coach decides.
 ### Fictional full-product demo (`scripts/product_demo.py`)
 
 ```bash
-python scripts/product_demo.py run                    # isolated temporary database; 10 scenario outputs and 24 checks; exit 0 when all pass
+python scripts/product_demo.py run                    # isolated temporary database; 10 scenario outputs and 27 checks; exit 0 when all pass
 python scripts/product_demo.py build --out demo-run   # the demo package (format 5) plus the commands below
 python scripts/recording_package.py import demo-run/fictional-demo-match.zip --database demo-run/demo.db
 DATABASE_PATH=demo-run/demo.db PHYSIOLOGICAL_INDEX_PROFILE_PATH=scripts/examples/review/fictional_index_profile.json \
@@ -1638,9 +1649,10 @@ performance (review later), sustained decline with adequate physiology (consider
 recorded leadership and a partnership (review later), a formation change asking for a role the player cannot play
 (consider replacement), missing and stale information (insufficient evidence), no goalkeeper on the bench (review
 later), recovery (review later at 23:00, keep at 40:00), uncertain player identity (insufficient evidence) and a
-single noisy reading (keep). `run` also checks two hand-worked calculations written independently of the engine's
+single noisy reading (keep). The 40:00 reviews are retrospective (the last five-minute annotations were entered after
+40:00) and `run` shows the as-entered version too. `run` also checks two hand-worked calculations written independently of the engine's
 code, saving and reproducing every review, a restart, a correction, a configuration change, export and import into a
-second database, and removal of an athlete.
+second database, a deliberately changed recorded sample that reproduction must report, and removal of an athlete.
 
 ## Recording configuration snapshot (`configuration_at_start`)
 
@@ -2210,21 +2222,34 @@ The three "identity mismatch" observations reported on 2026-10-30 for white's tr
 scene renders bit-identically, and neither that commit nor the current code shows them. They came from uncommitted
 work in progress, and their individual observations were not kept, so they cannot be classified now. The real
 detector's output itself varies slightly between processes on this Mac (2,357 to 2,360 detections, 6 or 7 tracks in
-six runs; identical within one process), so results near a decision boundary can change from run to run.
+eight runs; identical within one process), so results near a decision boundary change from run to run.
 
-What the investigation did find: replaying the recorded detections with small seeded perturbations (box jitter of
-4 px and 3 % dropped detections), 1 of 20 runs switched blue's track onto the unassigned referee figure after they
-overlapped (319 observations labelled with the wrong athlete), and the ground-contact rule cannot see this because the
-box is a complete, consistent person. The identity audit now separates `ambiguous_nearest_target`, `during_encounter`,
-`identity_switch` and `localization_error`.
+What the investigation found: replaying the recorded detections with small seeded perturbations (box jitter and
+dropped detections, 30 runs per setting), tracks switch identity as two people separate. Blue's track continues on the
+unassigned referee figure (from frame 167, just after the boxes stop overlapping), and in one run white's track
+continues on blue. The ground-contact rule cannot see this, because the box is a complete, consistent person. The
+identity audit separates `ambiguous_nearest_target`, `during_encounter`, `identity_switch` and `localization_error`
+and reports where each switch started.
 
-Conservative handling, now the default: the tracker marks observations whose box overlaps another tracked person's
-box (`near_other_track`, observation format 3, `encounter_iou` 0.05), and an operator's assignment of a track lapses at
-its first encounter after the assignment starts. The track stays unassigned (no samples) until a new assignment
-starting after the encounter confirms who it is. In the same replay, this gave 0 switched observations in 20 runs, for
-about 2 % fewer assigned observations. `camera_to_samples.py --trust-tracker-through-encounters` keeps the old
-behaviour. This is shown on drawn figures only; real players overlap far more often, so on real footage the
-re-confirmation workload, and whether IoU is the right trigger, are open questions.
+Conservative handling, now the default: the tracker marks observations whose box overlaps another tracked person's box
+(`near_other_track`, observation format 3, `encounter_iou` 0.05), and the encounter lasts until the boxes have been
+apart for `encounter_release_s` (0.5 s). An operator's assignment of a track lapses at its first encounter after the
+assignment starts, and the track stays unassigned (no samples) until a new assignment starting after the encounter
+confirms who it is. A first version without the release time did **not** prevent the switch: the simulated operator
+re-confirmed the track before it jumped (up to 4 of 30 runs still switched). With it, in two independent detector runs:
+
+| Setting (30 runs each) | Trusting the tracker | Lapse at encounters and re-confirm |
+|---|---|---|
+| 2 px jitter, 1 % dropped | 0 runs with a switch | 0 |
+| 4 px, 3 % | 0 and 1 runs (312 mislabelled observations) | 0 |
+| 6 px, 5 % | 2 and 4 runs (613 and 1,205 mislabelled observations) | 0 |
+
+The cost is availability: about 7 % fewer assigned observations, and red's 2-8 s distance through the engine now
+covers 4.8 s instead of 5.9 s (12.1 m included of a 16 m path, reported as partial coverage, never filled in) because
+the red/blue crossing is no longer trusted. `camera_to_samples.py --trust-tracker-through-encounters` keeps the old
+behaviour. This is shown on drawn figures with a simulated operator only; real players overlap far more often, so on
+real footage the re-confirmation workload, and whether box overlap is the right trigger, are open questions. Phantom
+distance from pixel noise is unchanged (noise suppression stays off).
 
 ### Remaining requirements for real player tracking
 

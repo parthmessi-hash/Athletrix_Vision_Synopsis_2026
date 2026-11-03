@@ -255,7 +255,7 @@ python scripts/wearable_tool.py replay scripts/examples/wearable/imaginaryvest_e
 # 3w. performance evidence: entered on the dashboard (Performance evidence card) or POST /api/v1/recordings/<id>/performance;
 #     a rubric only through PERFORMANCE_RUBRIC_PATH (none by default; the example rubric is FICTIONAL, for tests only)
 
-# 3x. the FICTIONAL full-product demo (isolated temporary database; exit 0 when all 24 checks pass)
+# 3x. the FICTIONAL full-product demo (isolated temporary database; exit 0 when all 27 checks pass)
 python scripts/product_demo.py run
 # ...or for the dashboard: build, import into a separate database, start an engine with the fictional profiles, register
 python scripts/product_demo.py build --out demo-run
@@ -652,7 +652,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (787 tests as of 2026-11-02; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
+# engine: full suite, isolated temporary databases (792 tests as of 2026-11-03; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -787,14 +787,28 @@ Checks run: full backend suite 760 passed; `verify_camera_pipeline.py` 16 of 16;
 | 1. Individual performance structure | Complete (manual entry) | One evidence kind per area (`decision`, `positioning` added; instruction-following only for coach strategy; version-1 observations readable as legacy, unscored), corrections that supersede with audit history, overlap rule (`potential_duplicate`, `distinct_from`), uncertain identity never scored, review time, rubric schema 2 (FICTIONAL example v2), saved reviews keep the rubric text and evidence copies. Hand-worked tests |
 | 2. Baselines and experimental index | Complete as software; FICTIONAL profile only | Baselines from stopped recordings with inclusion rules, statistics, devices, versions and recorded decisions; index with transforms, directions, bounds, weights, window, coverage, staleness, device and HRV-statistic rules, no later data, late receipts excluded, retrospective baselines refused or labelled. Hand-worked tests (z = (80 - 65) / (5 x sqrt(40/39)) = 2.962, score 74.06; RMSSD -20 % = 25) |
 | 3. Substitution-review core | Complete as software; FICTIONAL profile only | Deterministic rules, hysteresis, cooldown, coach constraints, role fit, context holds without bonuses, missing bench physiology never freshness; unit tests with injected series |
-| 4. Camera uncertainty | Investigated; protective default added; root cause of the original 3 observations unresolved | The 3 observations do not reproduce (deterministic rendering; detector output varies slightly between processes); perturbed replay found a real identity switch (blue onto the referee, 1 of 20 runs at 4 px / 3 %); assignments now lapse at close encounters until re-confirmed (0 of 20). Noise suppression stays off; camera movement is not an input of any interpretation |
+| 4. Camera uncertainty | Investigated; protective default added; root cause of the original 3 observations unresolved | The 3 observations do not reproduce (deterministic rendering; detector output varies slightly between processes); perturbed replay found real identity switches as people separate (blue onto the referee, white onto blue; up to 4 of 30 runs); assignments now lapse at close encounters, held for 0.5 s after separation, until re-confirmed (0 of 180 runs). Noise suppression stays off; camera movement is not an input of any interpretation |
 | 5. Dashboard review | Complete | Experimental review card and updated performance card; browser harness 80 of 80; real page on an isolated demo engine: S1 review later, S2 consider replacement with a bench option shown as "physiology not available, not freshness", rapid athlete switching, no console errors |
-| 6. Fictional product demo | Complete (fictional) | `scripts/product_demo.py run`: 10 scenario outputs as expected, two hand-worked checks (index 91.82, composite 36.05), save and reproduce, restart, correction, configuration change, export and import (format 5), removal: 24 of 24 |
+| 6. Fictional product demo | Complete (fictional) | `scripts/product_demo.py run`: 10 scenario outputs as expected, two hand-worked checks (index 91.82, composite 36.05), retrospective and as-entered labels, save and reproduce, restart, correction, configuration change, export and import (format 5), a changed sample caught by reproduction, removal: 27 of 27 |
 
 Checks run: full backend suite 787 passed; `product_demo.py run` 24 of 24; `verify_camera_pipeline.py` passed (11 of 11
 checks); `verify_evaluation_workflow.py` 46 of 46; `verify_portable_workflow.py` passed; browser harness 80 of 80.
 
 Software completion is not real-world validation: no real athlete, wearable, footage or team rule was used.
+
+**Completion pass (2026-11-03).**
+- **When evidence was known.** Every review can be retrospective (the default, labelled with what was entered after
+  the review time) or as entered by then (`app/core/knowledge.py`).
+- **Reproduction.** It now fails clearly (`evidence_changed`, `differs`).
+- **Corrections.** A correction can no longer be deleted, because that would silently revive the observation it replaced.
+- **Dashboard.** The review card can save and reproduce reviews and switch the knowledge mode.
+- **Camera identity.** The first protective rule failed under a stronger perturbation: switches start a few frames
+  after the boxes separate. With the 0.5 s encounter release time it gave 0 switches in 180 perturbed runs across two
+  detector runs, against up to 4 of 30 when trusting the tracker. The cost is availability (about 7 % fewer assigned
+  observations; red's crossing is now uncovered distance).
+
+Checks: backend 792 passed; demo 27 of 27; browser harness 82 of 82; the real dashboard on an isolated engine (retrospective and
+as-entered labels, save, reproduce, no console errors); `verify_camera_pipeline.py` 11 of 11.
 
 ## 10. Recommended next milestone
 
