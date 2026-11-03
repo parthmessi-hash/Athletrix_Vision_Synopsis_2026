@@ -12,4 +12,4 @@ def test_the_product_demo_runs_every_scenario_and_check():
     demo = importlib.util.module_from_spec(spec); spec.loader.exec_module(demo)
     lines = []
     assert demo.main(["run"], out=lines.append) == 0, "\n".join(lines)
-    assert sum("[ok]" in x for x in lines) == 24 and not any("[FAIL]" in x for x in lines)
+    assert sum("[ok]" in x for x in lines) == 27 and not any("[FAIL]" in x for x in lines)

@@ -1,6 +1,8 @@
 """Individual-performance evidence of a recording: add, list, delete, and the per-athlete review (evidence and, only
 with a configured rubric and enough evidence, area scores and a composite). See app/models/performance.py."""
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.recordings import require_member, require_recording
@@ -63,13 +65,18 @@ def list_observations(recording_id: str) -> list[PerformanceObservation]:
 
 @router.delete("/{recording_id}/athletes/{athlete_id}/performance/{observation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_observation(recording_id: str, athlete_id: str, observation_id: str) -> None:
-    """Delete one observation (for example one entered by mistake). Not reversible. An observation that a correction
-    supersedes is audit history and cannot be deleted; deleting the correction itself makes the earlier version count again."""
+    """Delete one observation entered by mistake. Not reversible. Observations in a correction chain are audit history and
+    cannot be deleted: neither a superseded observation nor a correction (deleting a correction would silently revive the
+    observation it replaced). To change a correction, correct it again."""
     rec = require_recording(recording_id)
     require_member(rec, athlete_id)
-    later = [o.id for o in performance_store.list(rec.id, athlete_id) if o.supersedes == observation_id]
+    mine = performance_store.list(rec.id, athlete_id)
+    later = [o.id for o in mine if o.supersedes == observation_id]
     if later:
         raise HTTPException(status_code=409, detail=f"observation {observation_id!r} is superseded by {later[0]!r} and kept as audit history")
+    target = next((o for o in mine if o.id == observation_id), None)
+    if target is not None and target.supersedes:
+        raise HTTPException(status_code=409, detail=f"observation {observation_id!r} corrects {target.supersedes!r}; deleting it would revive the replaced observation. Correct it again instead")
     if not performance_store.delete(rec.id, athlete_id, observation_id):
         raise HTTPException(status_code=404, detail=f"observation {observation_id!r} does not exist for this athlete and recording")
 
@@ -91,7 +98,8 @@ def parse_at(value: str | None, name: str = "at"):
 
 
 @router.get("/{recording_id}/athletes/{athlete_id}/performance-review")
-def performance_review(recording_id: str, athlete_id: str, at: str | None = None, window_s: float | None = Query(None, gt=0, le=6 * 3600)) -> dict:
+def performance_review(recording_id: str, athlete_id: str, at: str | None = None, window_s: float | None = Query(None, gt=0, le=6 * 3600),
+                       knowledge: Literal["retrospective", "as_entered"] = "retrospective") -> dict:
     """Evidence per area and, only with a configured rubric and enough counted evidence in all four areas, a composite.
     With `at`, only observations whose period ended by then (and, with `window_s`, started within the window) count."""
     rubric, sha = configured_rubric()
@@ -102,4 +110,6 @@ def performance_review(recording_id: str, athlete_id: str, at: str | None = None
         rec = require_recording(recording_id)
         athlete = require_member(rec, athlete_id)
         obs = performance_store.list(rec.id, athlete_id)
-    return {"recording_id": rec.id, "athlete": athlete.model_dump(mode="json"), **review(obs, rubric, sha, t, window_s)}
+    if knowledge == "as_entered" and t is None:
+        raise HTTPException(status_code=422, detail="knowledge=as_entered needs at")
+    return {"recording_id": rec.id, "athlete": athlete.model_dump(mode="json"), **review(obs, rubric, sha, t, window_s, knowledge)}

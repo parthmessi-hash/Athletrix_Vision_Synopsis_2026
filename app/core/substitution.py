@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from app.core.knowledge import baselines_as_of, entered_by, status_changed_later
 from app.core.performance import review as performance_review
 from app.core.physiology_index import compute_index, iso, select_baseline
 from app.models import Athlete
@@ -82,6 +83,11 @@ class ReviewInputs:
     substitution: tuple[SubstitutionProfile, str] | None
     index: tuple[IndexProfile, str] | None
     rubric: tuple[PerformanceRubric, str] | None
+    knowledge: str = "retrospective"     # or "as_entered" (app/core/knowledge.py)
+
+
+def known(inp: ReviewInputs, items: list, t: datetime) -> list:
+    return entered_by(items, t) if inp.knowledge == "as_entered" else items
 
 
 def norm(role: str | None) -> str | None:
@@ -93,13 +99,13 @@ def physiology_at(inp: ReviewInputs, athlete_id: str, t: datetime) -> dict:
         return {"available": False, "value": None, "reasons": ["no physiological index profile is configured (PHYSIOLOGICAL_INDEX_PROFILE_PATH)"]}
     profile, sha = inp.index
     d = inp.athletes[athlete_id]
-    b, timing, why = select_baseline(d.baselines, profile, t)
+    b, timing, why = select_baseline(baselines_as_of(d.baselines, t) if inp.knowledge == "as_entered" else d.baselines, profile, t)
     return compute_index(profile, sha, b, timing, d.samples, t, why)
 
 
 def performance_at(inp: ReviewInputs, prof: SubstitutionProfile, athlete_id: str, t: datetime) -> dict:
     rubric, sha = inp.rubric if inp.rubric else (None, None)
-    r = performance_review(inp.athletes[athlete_id].observations, rubric, sha, t, prof.performance.window_seconds)
+    r = performance_review(known(inp, inp.athletes[athlete_id].observations, t), rubric, sha, t, prof.performance.window_seconds)
     excluded_identity = sum(1 for o in r["observations"] if o["status"] == "identity_uncertain")
     sources: dict[str, int] = {}
     for a in r["areas"].values():
@@ -143,8 +149,9 @@ def review_points(inp: ReviewInputs, prof: SubstitutionProfile) -> list[datetime
 
 
 def _context_at(inp: ReviewInputs, athlete_id: str, t: datetime) -> tuple[ContextEntry | None, ContextEntry | None]:
-    team = select_effective([e for e in inp.context if e.athlete_id is None], t)
-    mine = select_effective([e for e in inp.context if e.athlete_id == athlete_id], t)
+    ctx = known(inp, inp.context, t)
+    team = select_effective([e for e in ctx if e.athlete_id is None], t)
+    mine = select_effective([e for e in ctx if e.athlete_id == athlete_id], t)
     return team, mine
 
 
@@ -162,7 +169,7 @@ def _candidates(inp: ReviewInputs, t: datetime, required: str | None, team_roste
 
 
 def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state: str, perf_state: str, phys: dict, perf: dict) -> dict:
-    team_roster, roster = effective_roster(inp.roster, t)
+    team_roster, roster = effective_roster(known(inp, inp.roster, t), t)
     me = roster.get(inp.athlete_id)
     team_ctx, my_ctx = _context_at(inp, inp.athlete_id, t)
     reasons, missing, tradeoffs, constraints, triggers = [], [], [], [], []
@@ -315,10 +322,11 @@ def substitution_review(inp: ReviewInputs) -> dict:
                     "note": f"the output changed to {emitted[-2] if len(emitted) > 1 else emitted[-1]} less than {prof.cooldown_seconds:g} s ago; the opposite output is held back until the cooldown ends"}
     for c in now["replacements"]:
         c["physiology"] = _brief(physiology_at(inp, c["athlete_id"], inp.at), bench=True)
-        c["performance_evidence"] = len([o for o in inp.athletes[c["athlete_id"]].observations if o.period_end <= inp.at])
+        c["performance_evidence"] = len([o for o in known(inp, inp.athletes[c["athlete_id"]].observations, inp.at) if o.period_end <= inp.at])
     history = [{"at": iso(t), "physiological_index": a["value"], "physiology_state": s1, "performance_composite": b["value"], "performance_state": s2,
                 "raw_outcome": d["outcome"], "outcome": e} for t, a, b, s1, s2, d, e in zip(pts, phys, perf, phys_states, perf_states, decisions, emitted)]
-    return {**head, "available": True, "outcome": emitted[-1], "raw_outcome": now["outcome"], "cooldown": cooldown,
+    knowledge = knowledge_summary(inp, perf[-1], phys[-1])
+    return {**head, "available": True, "knowledge": knowledge, "outcome": emitted[-1], "raw_outcome": now["outcome"], "cooldown": cooldown,
             "triggers": now["triggers"], "reasons": now["reasons"], "missing": now["missing"], "tradeoffs": now["tradeoffs"],
             "constraints_applied": now["constraints_applied"], "review_again_at": now["review_again_at"], "role": now.get("role"),
             "replacements": now["replacements"],
@@ -327,6 +335,31 @@ def substitution_review(inp: ReviewInputs) -> dict:
             "rules": "See app/core/substitution.py. Physiology and performance are separate inputs; coach-context evidence is shown as a tradeoff or a "
                      "reason to review, never as a bonus, and performance evidence is never counted again as context. Camera-derived movement and "
                      "distance are not inputs of this version, so uncertain camera workload cannot enter the output."}
+
+
+def knowledge_summary(inp: ReviewInputs, perf: dict, phys: dict) -> dict:
+    """What the result at T used that was entered after T (retrospective mode), or that it used only what was entered by T."""
+    t = inp.at
+    if inp.knowledge == "as_entered":
+        return {"mode": "as_entered", "later_entered": {},
+                "label": "As entered: only evidence entered by the review time was used (what a live system with these rules could have shown). "
+                         "Samples without receipt metadata are assumed available at their own timestamps."}
+    obs = {o.id: o for o in inp.athletes[inp.athlete_id].observations}
+    team_ctx, my_ctx = _context_at(inp, inp.athlete_id, t)
+    team_ros, ros = effective_roster(inp.roster, t)
+    used_ros = [e for e in (team_ros, ros.get(inp.athlete_id)) if e is not None]
+    base_id = (phys.get("baseline") or {}).get("id")
+    base = next((b for b in inp.athletes[inp.athlete_id].baselines if b.id == base_id), None)
+    later = {"performance_observations": sum(1 for i in perf.get("counted_observation_ids", []) if i in obs and obs[i].created_at > t),
+             "corrections": sum(1 for o in obs.values() if o.supersedes and o.created_at > t and o.period_end <= t),
+             "coach_context": sum(1 for e in (team_ctx, my_ctx) if e is not None and e.created_at > t),
+             "roster_state": sum(1 for e in used_ros if e.created_at > t),
+             "baseline": int(base is not None and status_changed_later(base, t))}
+    later = {k: v for k, v in later.items() if v}
+    return {"mode": "retrospective", "later_entered": later,
+            "label": ("Retrospective: this result uses evidence entered after the review time (" + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in later.items())
+                      + "), so it is NOT what the live system could have shown then; ask for knowledge=as_entered for that.") if later else
+                     "Everything this result used had been entered by the review time."}
 
 
 def _brief(p: dict, bench: bool = False) -> dict:

@@ -157,9 +157,12 @@ def test_corrections_supersede_overlaps_are_flagged_and_uncertain_identity_is_no
     unsure = post(dec(identity="uncertain", evidence_source="human_review_of_camera")).json()
     rv = client.get(f"{REC}/{rec}/athletes/a1/performance-review").json()
     assert {o["id"]: o["status"] for o in rv["observations"]}[unsure["id"]] == "identity_uncertain" and rv["areas"]["decision_making"]["evidence"]["counted"] == 0
-    assert client.delete(f"{REC}/{rec}/athletes/a1/performance/{fix['id']}").status_code == 204
+    r = client.delete(f"{REC}/{rec}/athletes/a1/performance/{fix['id']}")
+    assert r.status_code == 409 and "revive" in r.json()["detail"], "withdrawn evidence is never silently revived"
+    restore = post(obs(attempts=10, completions=4, b=300, supersedes=fix["id"], correction_reason="the first count was right after all")).json()
     rv = client.get(f"{REC}/{rec}/athletes/a1/performance-review").json()
-    assert {o["id"]: o["status"] for o in rv["observations"]}[first["id"]] == "potential_duplicate", "withdrawing the correction makes the earlier version count again; it overlaps the later one"
+    st = {o["id"]: o["status"] for o in rv["observations"]}
+    assert st[first["id"]] == st[fix["id"]] == "superseded" and st[restore["id"]] != "superseded", "an undo is an explicit, visible correction"
 
 
 def test_an_invalid_or_version_1_rubric_is_an_error_not_a_silent_default(client, rec, monkeypatch, tmp_path):

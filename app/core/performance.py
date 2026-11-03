@@ -130,8 +130,20 @@ def _measure(ev: dict, m) -> dict:
     return {"measure": m.measure, "available": True, "opportunities": n, "rate": round(rate, 4), "score": round(score, 2), "weight": m.weight}
 
 
+def _review_time(observations, status, at, window_s, knowledge) -> dict:
+    later = len([o for o in observations if status[o.id] == "counted" and o.created_at > at])
+    return {"at": at.isoformat().replace("+00:00", "Z"), "window_s": window_s, "knowledge": knowledge, "entered_after_review_time": later,
+            "label": "as entered: only observations entered by the review time" if knowledge == "as_entered" else
+                     (f"retrospective: {later} counted observations were entered after the review time; not what could have been shown live" if later
+                      else "every counted observation had been entered by the review time")}
+
+
 def review(observations: list[PerformanceObservation], rubric: PerformanceRubric | None, rubric_sha: str | None,
-           at: datetime | None = None, window_s: float | None = None) -> dict:
+           at: datetime | None = None, window_s: float | None = None, knowledge: str = "retrospective") -> dict:
+    """With `at` and knowledge "as_entered", only observations entered by `at` exist for the review (app/core/knowledge.py):
+    a correction entered later is ignored and the observation it replaced counts, as it would have then."""
+    if at is not None and knowledge == "as_entered":
+        observations = [o for o in observations if o.created_at <= at]
     status = classify(observations, at, window_s)
     areas = {a: {"evidence": _area_evidence(observations, status, a)} for a in AREAS}
     reasons = []
@@ -171,8 +183,7 @@ def review(observations: list[PerformanceObservation], rubric: PerformanceRubric
             "rubric": None if rubric is None else {"version": rubric.version, "sha256": rubric_sha, "fictional": rubric.fictional, "note": rubric.note},
             "composite": {"available": composite is not None, "value": composite, "fictional_rubric": bool(rubric and rubric.fictional),
                           "reasons": reasons if composite is None else [r for r in reasons if "left out" in r]},
-            "review_time": None if at is None else {"at": at.isoformat().replace("+00:00", "Z"), "window_s": window_s,
-                                                    "entered_after_review_time": len([o for o in observations if status[o.id] == "counted" and o.created_at > at])},
+            "review_time": None if at is None else _review_time(observations, status, at, window_s, knowledge),
             "counted_observation_ids": counted_ids,
             "observations": [o.model_dump(mode="json") | {"status": status[o.id], "superseded_by": superseded_by.get(o.id)}
                              for o in sorted(observations, key=lambda o: (o.period_start, o.created_at, o.id))],

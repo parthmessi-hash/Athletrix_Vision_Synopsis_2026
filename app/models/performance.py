@@ -23,7 +23,8 @@ ambiguous, other) or "no_opportunity" (nothing to assess happened). Missing evid
 CORRECTIONS. Observations are never edited in place. A correction is a new observation with `supersedes` (the id of the
 observation it replaces, same recording and athlete) and a `correction_reason`; the superseded one stays stored as audit
 history and no longer counts, so the two versions are never counted together. Only the latest version of a chain can be
-corrected again.
+corrected again, and no observation in a chain can be deleted (deleting a correction would silently revive what it
+replaced); to undo a correction, correct it again.
 
 OVERLAPS (inclusion rule). Two counted observations of the same athlete and kind whose periods overlap may count the same
 opportunities twice. Both are then left out of the measure and reported as a potential duplicate, unless one lists the

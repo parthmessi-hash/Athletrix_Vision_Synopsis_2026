@@ -339,6 +339,12 @@ def run(report_path: Path | None, out=print) -> int:
         s2 = {c["athlete_id"]: c for c in results["S2"]["replacements"]}
         check("S2 lists a bench option without physiology as unavailable, not fresh", s2["b02"]["role_fit"] == "fits" and not s2["b02"]["physiology"]["available"]
               and "not evidence that this athlete is fresh" in s2["b02"]["physiology"]["note"])
+        k = results["S2"]["knowledge"]
+        check("S2 at 40:00 is labelled retrospective: it counts annotations entered after 40:00", k["mode"] == "retrospective" and k["later_entered"].get("performance_observations", 0) > 0, k["label"][:120])
+        live = eng.get(f"/recordings/{rid}/athletes/p02/substitution-review", at=z(T_MAIN), knowledge="as_entered")
+        check("the same review as entered by 40:00 uses only what had been entered then", live["knowledge"]["mode"] == "as_entered"
+              and len(live["player"]["performance"]["counted_observation_ids"]) < len(results["S2"]["player"]["performance"]["counted_observation_ids"]),
+              f"{live['outcome']}; counted {len(live['player']['performance']['counted_observation_ids'])} instead of {len(results['S2']['player']['performance']['counted_observation_ids'])} observations")
         check("S2 never offers the athlete the coach ruled out", "b04" not in {c["athlete_id"] for c in results["S2"]["replacements"] if c["role_fit"] == "fits" and not c["blocked_reason"]})
 
         out("\nHAND-WORKED CHECKS (independent arithmetic, not the engine's code)")
@@ -353,7 +359,7 @@ def run(report_path: Path | None, out=print) -> int:
         out("\nPERSISTENCE, CORRECTIONS, CONFIGURATION, EXPORT/IMPORT, REMOVAL")
         saved = {sid: eng.post(f"/recordings/{rid}/athletes/{pid}/reviews", {"kind": "substitution", "at": z(t), "label": f"FICTIONAL demo {sid}"}) for sid, pid, t, *_ in SCENARIOS}
         rep = {sid: eng.get(f"/recordings/{rid}/reviews/{s['id']}/reproduce") for sid, s in saved.items()}
-        check("every saved review reproduces from its stored configuration and evidence", all(r["matches"] for r in rep.values()), f"{sum(r['matches'] for r in rep.values())}/{len(rep)}")
+        check("every saved review reproduces from its stored configuration and evidence", all(r["matches"] and r["status"] == "reproduced" for r in rep.values()), f"{sum(r['matches'] for r in rep.values())}/{len(rep)}")
         eng.close()
         eng = Engine(work / "demo.db", PROFILE_FILES)
         again = eng.get(f"/recordings/{rid}/athletes/p02/substitution-review", at=z(T_MAIN))
@@ -389,7 +395,13 @@ def run(report_path: Path | None, out=print) -> int:
         eng = Engine(work / "second.db", PROFILE_FILES)
         imported = eng.get(f"/recordings/{rid2}/reviews")
         rep2 = [eng.get(f"/recordings/{rid2}/reviews/{x['id']}/reproduce") for x in imported]
-        check("saved reviews reproduce on the second engine after import", len(rep2) == len(SCENARIOS) and all(x["matches"] and not x["recorded_samples_changed_for"] for x in rep2))
+        check("saved reviews reproduce on the second engine after import", len(rep2) == len(SCENARIOS) and all(x["status"] == "reproduced" for x in rep2))
+        with sqlite3.connect(work / "second.db") as con:   # damage one recorded sample on the copy: reproduction must say so
+            con.execute("UPDATE recording_physiological_samples SET payload = replace(payload, '\"device_id\":\"fictional-strap-p02\"', '\"device_id\":\"fictional-strap-x\"') "
+                        "WHERE recording_id = ? AND athlete_id = 'p02' AND ts_utc = (SELECT MIN(ts_utc) FROM recording_physiological_samples WHERE athlete_id = 'p02')", (rid2,))
+        s2 = next(x for x in imported if x["athlete_id"] == "p02")
+        bad = eng.get(f"/recordings/{rid2}/reviews/{s2['id']}/reproduce")
+        check("a changed recorded sample makes reproduction fail clearly", bad["status"] == "evidence_changed" and not bad["matches"] and "p02" in bad["recorded_samples_changed_for"], bad["explanation"][:100])
         eng.close()
         shutil.copy(work / "second.db", work / "removal.db")
         import importlib.util  # noqa: PLC0415

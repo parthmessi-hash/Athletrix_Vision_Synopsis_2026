@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.performance import parse_at
@@ -18,6 +20,7 @@ from app.api.recordings import require_member, require_recording
 from app.core import clock
 from app.core.clock import MAX_FUTURE_TIMESTAMP_SKEW
 from app.core.config import get_settings
+from app.core.knowledge import baselines_as_of
 from app.core.performance import RubricError, parse_rubric
 from app.core.performance import review as performance_review
 from app.core.physiology_index import ProfileError, baseline_stats, compute_index, history, iso, parse_profile, samples_digest, select_baseline
@@ -133,7 +136,8 @@ UNCONFIGURED = "no physiological index profile is configured (PHYSIOLOGICAL_INDE
 
 
 @router.get("/recordings/{recording_id}/athletes/{athlete_id}/physiological-index")
-def physiological_index(recording_id: str, athlete_id: str, at: str | None = None, baseline_id: str | None = None) -> dict:
+def physiological_index(recording_id: str, athlete_id: str, at: str | None = None, baseline_id: str | None = None,
+                        knowledge: Literal["retrospective", "as_entered"] = "retrospective") -> dict:
     """The experimental index at `at` (default: the recording's stop, or now). Uses only samples available at `at`."""
     prof = _index_profile()
     with get_database().read():
@@ -150,8 +154,10 @@ def physiological_index(recording_id: str, athlete_id: str, at: str | None = Non
         if not chosen:
             raise HTTPException(status_code=404, detail=f"baseline {baseline_id!r} does not exist for athlete {athlete_id!r}")
         baselines = chosen
+    if knowledge == "as_entered":
+        baselines = baselines_as_of(baselines, t)
     b, timing, why = select_baseline(baselines, profile, t)
-    return {"recording_id": rec.id, "athlete_id": athlete_id, **compute_index(profile, sha, b, timing, samples, t, why)}
+    return {"recording_id": rec.id, "athlete_id": athlete_id, "knowledge": knowledge, **compute_index(profile, sha, b, timing, samples, t, why)}
 
 
 @router.get("/recordings/{recording_id}/athletes/{athlete_id}/physiological-index/history")
@@ -209,7 +215,7 @@ def effective_roster_at(recording_id: str, at: str) -> dict:
 
 # ---- substitution review ----------------------------------------------------------------------------------------------------
 
-def gather(rec: Recording, athlete_id: str, at: datetime, parsed: dict) -> tuple[ReviewInputs, dict]:
+def gather(rec: Recording, athlete_id: str, at: datetime, parsed: dict, knowledge: str = "retrospective") -> tuple[ReviewInputs, dict]:
     """The review inputs from this engine's stored data, and the evidence snapshot to store with a saved review."""
     athletes, snap = {}, {}
     for a in rec.athletes:
@@ -220,31 +226,34 @@ def gather(rec: Recording, athlete_id: str, at: datetime, parsed: dict) -> tuple
                       "samples_up_to_at": len(samples), "samples_sha256": samples_digest(samples)}
     context, roster = context_store.list(rec.id), roster_store.list(rec.id)
     inp = ReviewInputs(rec.id, rec.started_at, rec.stopped_at, athlete_id, at, athletes, context, roster,
-                       parsed["substitution"], parsed["physiological_index"], parsed["performance_rubric"])
+                       parsed["substitution"], parsed["physiological_index"], parsed["performance_rubric"], knowledge)
     return inp, {"athletes": snap, "context": [e.model_dump(mode="json") for e in context], "roster": [e.model_dump(mode="json") for e in roster]}
 
 
 @router.get("/recordings/{recording_id}/athletes/{athlete_id}/substitution-review")
-def get_substitution_review(recording_id: str, athlete_id: str, at: str | None = None) -> dict:
-    """The experimental keep / consider replacement / review later / insufficient evidence output at `at`."""
+def get_substitution_review(recording_id: str, athlete_id: str, at: str | None = None,
+                            knowledge: Literal["retrospective", "as_entered"] = "retrospective") -> dict:
+    """The experimental keep / consider replacement / review later / insufficient evidence output at `at`. Retrospective
+    (default) uses everything stored now and says what was entered after `at`; as_entered uses only what had been entered."""
     parsed = parse_docs(configured_docs())
     with get_database().read():
         rec = require_recording(recording_id)
         require_member(rec, athlete_id)
         t = review_time(rec, parse_at(at))
-        inp, _ = gather(rec, athlete_id, t, parsed)
+        inp, _ = gather(rec, athlete_id, t, parsed, knowledge)
     return substitution_review(inp)
 
 
 # ---- saved reviews ----------------------------------------------------------------------------------------------------------
 
-def compute(kind: str, rec: Recording, athlete_id: str, at: datetime, window_s: float | None, docs: dict, evidence: dict | None) -> tuple[dict, dict]:
+def compute(kind: str, rec: Recording, athlete_id: str, at: datetime, window_s: float | None, docs: dict, evidence: dict | None,
+            knowledge: str = "retrospective") -> tuple[dict, dict]:
     """(result, inputs). With `evidence` (a saved snapshot), its copies are used instead of the current stored evidence."""
     parsed = parse_docs(docs)
     if kind == "performance":
         obs = ([PerformanceObservation.model_validate(o) for o in evidence["observations"]] if evidence else performance_store.list(rec.id, athlete_id))
         rub = parsed["performance_rubric"] or (None, None)
-        return performance_review(obs, rub[0], rub[1], at, window_s), {"observations": [o.model_dump(mode="json") for o in obs]}
+        return performance_review(obs, rub[0], rub[1], at, window_s, knowledge), {"observations": [o.model_dump(mode="json") for o in obs]}
     samples = [(s, r) for s, r in recording_store.all_with_receipts(rec.id, athlete_id, "physiological") if s.timestamp <= at]
     if kind == "physiological_index":
         baselines = [Baseline.model_validate(b) for b in evidence["baselines"]] if evidence else baseline_store.list(athlete_id)
@@ -252,9 +261,9 @@ def compute(kind: str, rec: Recording, athlete_id: str, at: datetime, window_s: 
         if parsed["physiological_index"] is None:
             return {"available": False, "value": None, "reasons": [UNCONFIGURED]}, snap
         p, sha = parsed["physiological_index"]
-        b, timing, why = select_baseline(baselines, p, at)
-        return compute_index(p, sha, b, timing, samples, at, why), snap
-    inp, snap = gather(rec, athlete_id, at, parsed)
+        b, timing, why = select_baseline(baselines_as_of(baselines, at) if knowledge == "as_entered" else baselines, p, at)
+        return {"knowledge": knowledge, **compute_index(p, sha, b, timing, samples, at, why)}, snap
+    inp, snap = gather(rec, athlete_id, at, parsed, knowledge)
     if evidence:
         for aid, d in inp.athletes.items():
             e = evidence["athletes"].get(aid, {"baselines": [], "observations": []})
@@ -276,8 +285,8 @@ def save_review(recording_id: str, athlete_id: str, body: ReviewRequest) -> Save
         rec = require_recording(recording_id)
         require_member(rec, athlete_id)
         t = review_time(rec, body.at)
-        result, evidence = compute(body.kind, rec, athlete_id, t, body.window_s, docs, None)
-    inputs = {"configuration": docs, "window_s": body.window_s, "evidence": evidence,
+        result, evidence = compute(body.kind, rec, athlete_id, t, body.window_s, docs, None, body.knowledge)
+    inputs = {"configuration": docs, "window_s": body.window_s, "knowledge": body.knowledge, "evidence": evidence,
               "note": "Exact configuration text and evidence copies; samples stay in the recording and are checked against samples_sha256 when reproducing."}
     return review_store.add(SavedReview(id=new_review_id(now), recording_id=rec.id, athlete_id=athlete_id, kind=body.kind, at=t, created_at=now,
                                         label=body.label, inputs=inputs, result=result))
@@ -298,7 +307,8 @@ def reproduce_review(recording_id: str, review_id: str) -> dict:
         saved = review_store.get(rec.id, review_id)
         if saved is None:
             raise HTTPException(status_code=404, detail=f"review {review_id!r} does not exist for recording {rec.id!r}")
-        result, evidence = compute(saved.kind, rec, saved.athlete_id, saved.at, saved.inputs.get("window_s"), saved.inputs["configuration"], saved.inputs["evidence"])
+        result, evidence = compute(saved.kind, rec, saved.athlete_id, saved.at, saved.inputs.get("window_s"), saved.inputs["configuration"], saved.inputs["evidence"],
+                                   saved.inputs.get("knowledge", "retrospective"))
         current_docs = configured_docs()
     stored_ev = saved.inputs["evidence"]
     digests = {}
@@ -306,12 +316,22 @@ def reproduce_review(recording_id: str, review_id: str) -> dict:
         digests = {saved.athlete_id: (stored_ev["samples_sha256"], evidence["samples_sha256"])}
     elif saved.kind == "substitution":
         digests = {a: (e.get("samples_sha256"), evidence["athletes"].get(a, {}).get("samples_sha256")) for a, e in stored_ev["athletes"].items()}
-    changed = sorted(a for a, (x, y) in digests.items() if x != y)
+    missing = sorted(a for a, (x, y) in digests.items() if y is None)
+    changed = sorted(a for a, (x, y) in digests.items() if y is not None and x != y)
+
     def comparable(r: dict) -> str:   # an imported copy has a new recording id; everything else must match
         return json.dumps({k: v for k, v in r.items() if k != "recording_id"}, sort_keys=True, default=str)
     same = comparable(result) == comparable(saved.result)
-    return {"review_id": saved.id, "kind": saved.kind, "at": iso(saved.at), "matches": same, "result": result, "saved_result": saved.result,
-            "recorded_samples_changed_for": changed,
+    if missing or changed:
+        status_, why = "evidence_changed", ("recorded samples are missing for " + ", ".join(missing) + "; " if missing else "") + \
+            ("recorded samples differ from the saved digest for " + ", ".join(changed) if changed else "")
+    elif not same:
+        status_, why = "differs", "same configuration and evidence, different result: the calculation code has changed since the review was saved"
+    else:
+        status_, why = "reproduced", "same configuration, evidence copies and recorded samples give the same result"
+    return {"review_id": saved.id, "kind": saved.kind, "at": iso(saved.at), "status": status_, "explanation": why.rstrip("; "),
+            "matches": same and not (missing or changed), "result": result, "saved_result": saved.result,
+            "recorded_samples_changed_for": changed, "recorded_samples_missing_for": missing, "knowledge": saved.inputs.get("knowledge", "retrospective"),
             "configuration_differs_from_current": {k: v != current_docs.get(k) for k, v in saved.inputs["configuration"].items()},
             "note": "Re-calculated from the saved configuration and evidence copies with this engine's code; samples re-read from the recording. "
                     "The engine's current configuration is not used."}

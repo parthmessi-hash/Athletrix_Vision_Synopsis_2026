@@ -21,6 +21,7 @@ class ReviewRequest(AthletrixModel):
     at: AwareDatetime = Field(..., description="The review time: no observation after it is used (see each calculation's rules).")
     window_s: float | None = Field(None, gt=0, le=6 * 3600, description="performance: only observations that started within this window before `at`.")
     label: str | None = Field(None, min_length=1, max_length=120)
+    knowledge: Literal["retrospective", "as_entered"] = Field("retrospective", description="retrospective: everything stored now (labelled); as_entered: only evidence entered by `at` (app/core/knowledge.py).")
 
 
 class SavedReview(AthletrixModel):
