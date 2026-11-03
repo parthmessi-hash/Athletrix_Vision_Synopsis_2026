@@ -28,6 +28,7 @@ from app.db import Database, to_utc_iso
 from app.store import baselines as baseline_store
 from app.store import context as context_store
 from app.store import performance as performance_store
+from app.store import responses as response_store
 from app.store import reviews as review_store
 from app.store import roster as roster_store
 from app.store.periods import new_period_id
@@ -123,16 +124,28 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
                 bid = baseline_store.new_baseline_id(now)
             baseline_store.insert(c, b.model_copy(update={"id": bid, "source_recording_id": new_id, "version": baseline_store.next_version(c, b.athlete_id),
                                                           "origin": "source_engine", "source_entry_id": b.source_entry_id or b.id}))
+        roster_map: dict[str, str] = {}
         for e in pkg.roster:
             rid = roster_store.new_roster_id(now)
-            while c.execute("SELECT 1 FROM recording_roster WHERE id = ?", (rid,)).fetchone():
+            while rid in roster_map.values() or c.execute("SELECT 1 FROM recording_roster WHERE id = ?", (rid,)).fetchone():
                 rid = roster_store.new_roster_id(now)
+            roster_map[e.id] = rid
             roster_store.insert(c, e.model_copy(update={"id": rid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": e.source_entry_id or e.id}))
+        review_map: dict[str, str] = {}
         for r in pkg.reviews:   # stored inputs and results are kept exactly as saved at the source
             vid = review_store.new_review_id(now)
-            while c.execute("SELECT 1 FROM recording_reviews WHERE id = ?", (vid,)).fetchone():
+            while vid in review_map.values() or c.execute("SELECT 1 FROM recording_reviews WHERE id = ?", (vid,)).fetchone():
                 vid = review_store.new_review_id(now)
+            review_map[r.id] = vid
             review_store.insert(c, r.model_copy(update={"id": vid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": r.source_entry_id or r.id}))
+        for r in pkg.responses:   # the response itself unchanged; its references point at the imported copies
+            pid = response_store.new_response_id(now)
+            while c.execute("SELECT 1 FROM recording_responses WHERE id = ?", (pid,)).fetchone():
+                pid = response_store.new_response_id(now)
+            rec_ref = r.recommendation.model_copy(update={"saved_review_id": review_map[r.recommendation.saved_review_id]}) if r.recommendation else None
+            response_store.insert(c, r.model_copy(update={"id": pid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": r.source_entry_id or r.id,
+                                                          "saved_review_id": review_map.get(r.saved_review_id) if r.saved_review_id else None, "recommendation": rec_ref,
+                                                          "roster_entry_ids": [roster_map[i] for i in r.roster_entry_ids]}))
         if checkpoint:
             checkpoint("review")
         c.execute("INSERT INTO recording_imports (recording_id, source_recording_id, package_sha256, package_format, package_generated_at, imported_at, period_id_map) VALUES (?, ?, ?, ?, ?, ?, ?)",

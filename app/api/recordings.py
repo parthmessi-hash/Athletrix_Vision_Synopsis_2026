@@ -35,6 +35,7 @@ from app.store.athletes import athlete_registry
 from app.store.context import context_store
 from app.store.baselines import baseline_store
 from app.store.performance import performance_store
+from app.store.responses import response_store
 from app.store.reviews import review_store
 from app.store.roster import roster_store
 from app.store.periods import period_store
@@ -514,11 +515,12 @@ def export_recording_package(recording_id: str) -> Response:
         baselines = baseline_store.for_recording(rec.id)
         roster = roster_store.list(rec.id)
         reviews = review_store.list(rec.id)
+        responses = response_store.list(rec.id)
         with get_database().read() as c:
             configuration = recording_store.configuration_in(c, rec.id).snapshot
     recording_doc = {"id": rec.id, "name": rec.name, "status": rec.status, "started_at": rec.started_at.isoformat().replace("+00:00", "Z"), "stopped_at": rec.stopped_at.isoformat().replace("+00:00", "Z")}
     settings_doc = {"distance_max_gap_seconds": settings.distance_max_gap_seconds, "distance_min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps}
-    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts, context, performance, baselines, roster, reviews)
+    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts, context, performance, baselines, roster, reviews, responses)
     return Response(
         content=body, media_type="application/zip",
         headers={

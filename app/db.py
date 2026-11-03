@@ -26,6 +26,8 @@ Design
     edited in place, a correction is a newer entry; `athlete_id` NULL means a team-level (match constraint) entry.
   - `recording_reviews` holds saved reviews (app/models/review.py): a result with the configuration content and evidence
     copies needed to reproduce it; written once.
+  - `recording_responses` holds coach / operator responses and lineup changes (app/models/response.py): written once,
+    one per (recording, client_token) so retries never duplicate.
   - `athlete_baselines` holds physiological baselines (app/models/baseline.py): statistics written once from a source
     recording; only the review status and its decision history change.
   - Optional receipt metadata (`receipt`, JSON text or NULL) on every sample row: when this engine received the sample
@@ -171,6 +173,15 @@ CREATE TABLE IF NOT EXISTS athlete_baselines (
     payload             TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS athlete_baselines_by_athlete ON athlete_baselines (athlete_id, version);
+CREATE TABLE IF NOT EXISTS recording_responses (
+    id           TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    athlete_id   TEXT NOT NULL,
+    client_token TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    UNIQUE (recording_id, client_token)
+);
 CREATE TABLE IF NOT EXISTS recording_imports (
     recording_id         TEXT PRIMARY KEY,
     source_recording_id  TEXT NOT NULL,

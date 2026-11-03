@@ -45,8 +45,8 @@ from app.store.recordings import TABLES as RECORDING_SAMPLE_TABLES
 
 ROLLING_SAMPLE_TABLES = ("physiological_samples", "tracking_samples")
 RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster",
-                    "recording_reviews", "recording_configurations", "recording_imports")
-PER_ATHLETE_RECORDING_TABLES = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster", "recording_reviews")
+                    "recording_reviews", "recording_responses", "recording_configurations", "recording_imports")
+PER_ATHLETE_RECORDING_TABLES = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster", "recording_reviews", "recording_responses")
 
 CANNOT_REMOVE = [
     "files exported earlier (JSON Lines, CSV, review JSON) and portable packages already copied anywhere, including other engines' databases that imported them",
@@ -221,6 +221,10 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
         # saved substitution reviews of other athletes embed copies of every roster athlete's evidence: removed with it
         _delete(plan, c, have, "recording_reviews", "recording_id = ? AND athlete_id != ? AND kind = 'substitution'", (rec_id, athlete_id),
                 f"saved substitution reviews of other athletes in {rec_id} (they embed copies of {athlete_id}'s evidence)")
+        # responses about those reviews, and lineup changes bringing this athlete on, refer to removed records: removed too
+        _delete(plan, c, have, "recording_responses", "recording_id = ? AND athlete_id != ? AND (json_extract(payload, '$.recommendation') IS NOT NULL "
+                "OR json_extract(payload, '$.lineup.incoming_athlete_id') = ?)", (rec_id, athlete_id, athlete_id),
+                f"responses in {rec_id} that refer to removed saved reviews or bring {athlete_id} on")
         if "recording_roster" in have:   # team entries naming the athlete in a match constraint: drop that item, keep the rest
             for row in c.execute("SELECT id, payload FROM recording_roster WHERE recording_id = ? AND athlete_id IS NULL", (rec_id,)).fetchall():
                 entry = json.loads(row["payload"])

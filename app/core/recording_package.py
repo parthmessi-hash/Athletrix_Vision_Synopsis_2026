@@ -1,6 +1,6 @@
 """Portable recording packages: a versioned ZIP that carries one stopped recording to another local engine.
 
-FORMAT (format "athletrix-recording-package", format_version 5; versions 1 to 4 are still read)
+FORMAT (format "athletrix-recording-package", format_version 6; versions 1 to 5 are still read)
   A ZIP archive (deflate) with exactly these members, all UTF-8:
     manifest.json   format, format_version, generated_at, the recording reference, member list with SHA-256 and byte
                     counts, record counts, and `settings_at_export` (the engine settings in force when the package was
@@ -34,6 +34,8 @@ FORMAT (format "athletrix-recording-package", format_version 5; versions 1 to 4 
     reviews.json    (version 5 only, may be empty) saved reviews (app/models/review.py) with their stored configuration
                     text and evidence copies. Imported unchanged apart from new ids and recording id: the evidence copies keep
                     the ids they had at the source engine, and nothing is recalculated with the importing engine's settings.
+    responses.json  (version 6 only, may be empty) coach / operator responses and lineup changes (app/models/response.py),
+                    imported with new ids and their saved-review and roster-entry references re-pointed.
   The manifest's checksums and counts let an importer detect accidental corruption; they are not a signature, and a
   package proves nothing about the accuracy of the measurements it carries. It is not a database backup: no registry,
   rolling history, device status, other recordings, configuration files, credentials, paths or logs are included.
@@ -69,19 +71,21 @@ from app.models.configuration import RecordingConfiguration
 from app.models.baseline import Baseline
 from app.models.context import ContextEntry
 from app.models.performance import PerformanceObservation
+from app.models.response import CoachResponse
 from app.models.review import SavedReview
 from app.models.roster import RosterEntry
 
 FORMAT = "athletrix-recording-package"
-FORMAT_VERSION = 5
-SUPPORTED_VERSIONS = (1, 2, 3, 4, 5)
+FORMAT_VERSION = 6
+SUPPORTED_VERSIONS = (1, 2, 3, 4, 5, 6)
 MEMBERS = ("manifest.json", "recording.json", "samples.jsonl", "periods.json")      # every version
 DATA_MEMBERS = ("recording.json", "samples.jsonl", "periods.json")
 V2_MEMBERS = ("receipts.jsonl",)                                                   # version 2 adds these
 V3_MEMBERS = ("context.json",)                                                     # version 3 adds these
 V4_MEMBERS = ("performance.json",)                                                 # version 4 adds these
 V5_MEMBERS = ("baselines.json", "roster.json", "reviews.json")                     # version 5 adds these
-ALL_MEMBERS = MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS + V5_MEMBERS
+V6_MEMBERS = ("responses.json",)                                                   # version 6 adds these
+ALL_MEMBERS = MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS + V5_MEMBERS + V6_MEMBERS
 V5_MODELS = {"baselines.json": Baseline, "roster.json": RosterEntry, "reviews.json": SavedReview}
 MODELS = {"physiological": PhysiologicalSample, "tracking": TrackingSample}
 
@@ -105,7 +109,7 @@ def sha256(data: bytes) -> str:
 def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[str, dict[str, list]], periods: Sequence, settings: dict, generated_at: datetime,
                   configuration: RecordingConfiguration | None = None, receipts: dict[str, dict[str, list]] | None = None,
                   context: Sequence[ContextEntry] = (), performance: Sequence[PerformanceObservation] = (), baselines: Sequence[Baseline] = (),
-                  roster: Sequence[RosterEntry] = (), reviews: Sequence[SavedReview] = ()) -> bytes:
+                  roster: Sequence[RosterEntry] = (), reviews: Sequence[SavedReview] = (), responses: Sequence[CoachResponse] = ()) -> bytes:
     """The ZIP bytes for one stopped recording. `samples[athlete_id][stream]` are the stored models, oldest first;
     `receipts[athlete_id][stream]` the matching receipt metadata (dict or None) in the same order."""
     rec_doc = {**recording, "athletes": [a.model_dump(mode="json") for a in athletes],
@@ -138,6 +142,7 @@ def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[st
         "baselines.json": json.dumps([b.model_dump(mode="json") for b in baselines], ensure_ascii=False, indent=2).encode("utf-8"),
         "roster.json": json.dumps([e.model_dump(mode="json") for e in roster], ensure_ascii=False, indent=2).encode("utf-8"),
         "reviews.json": json.dumps([r.model_dump(mode="json") for r in reviews], ensure_ascii=False, indent=2).encode("utf-8"),
+        "responses.json": json.dumps([r.model_dump(mode="json") for r in responses], ensure_ascii=False, indent=2).encode("utf-8"),
     }
     manifest = {
         "format": FORMAT,
@@ -147,14 +152,14 @@ def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[st
                        "Checksums detect accidental corruption only. Not a database backup and not evidence that the measurements are accurate.",
         "recording": {"id": recording["id"], "name": recording["name"], "started_at": recording["started_at"], "stopped_at": recording["stopped_at"]},
         "counts": {"athletes": len(athletes), "physiological_samples": counts["physiological"], "tracking_samples": counts["tracking"], "samples_by_athlete": per_athlete, "periods": len(periods_doc), "receipts": len(receipt_lines), "context_entries": len(context), "performance_observations": len(performance),
-                   "baselines": len(baselines), "roster_entries": len(roster), "saved_reviews": len(reviews)},
+                   "baselines": len(baselines), "roster_entries": len(roster), "saved_reviews": len(reviews), "responses": len(responses)},
         "members": {name: {"sha256": sha256(blob), "bytes": len(blob)} for name, blob in data.items()},
         "settings_at_export": {**settings, "note": "Engine settings in force when this package was written. They are not necessarily the settings in force while the data was recorded or reviewed, and an importing engine applies its own settings."},
     }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
-        for name in DATA_MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS + V5_MEMBERS:
+        for name in DATA_MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS + V5_MEMBERS + V6_MEMBERS:
             z.writestr(name, data[name])
     return buf.getvalue()
 
@@ -184,6 +189,7 @@ class Package:
     baselines: list[Baseline] = field(default_factory=list)                   # version 5
     roster: list[RosterEntry] = field(default_factory=list)                   # version 5
     reviews: list[SavedReview] = field(default_factory=list)                  # version 5
+    responses: list[CoachResponse] = field(default_factory=list)              # version 6
 
     def summary(self) -> dict:
         def bounds(models):
@@ -201,7 +207,7 @@ class Package:
                           "periods": sum(1 for p in self.periods if p["athlete_id"] == a.id)} for a in self.athletes],
             "counts": {"physiological_samples": sum(len(v["physiological"]) for v in self.samples.values()), "tracking_samples": sum(len(v["tracking"]) for v in self.samples.values()), "periods": len(self.periods),
                        "receipts": len(self.receipts), "context_entries": len(self.context), "performance_observations": len(self.performance),
-                       "baselines": len(self.baselines), "roster_entries": len(self.roster), "saved_reviews": len(self.reviews)},
+                       "baselines": len(self.baselines), "roster_entries": len(self.roster), "saved_reviews": len(self.reviews), "responses": len(self.responses)},
             "settings_at_export": self.manifest.get("settings_at_export"),
             "configuration_at_start": {"status": "captured", "snapshot": self.configuration.model_dump(mode="json")} if self.configuration is not None
                                       else {"status": "unavailable", "snapshot": None},
@@ -284,6 +290,11 @@ def read_package(data: bytes) -> Package:
         errors.append("missing required members: performance.json (format version 4)")
     if version < 4 and "performance.json" in blobs:
         errors.append(f"performance.json is not part of format version {version}")
+    for name in V6_MEMBERS:
+        if version >= 6 and name not in blobs:
+            errors.append(f"missing required members: {name} (format version 6)")
+        if version < 6 and name in blobs:
+            errors.append(f"{name} is not part of format version {version}")
     for name in V5_MEMBERS:
         if version >= 5 and name not in blobs:
             errors.append(f"missing required members: {name} (format version 5)")
@@ -295,7 +306,7 @@ def read_package(data: bytes) -> Package:
     if not isinstance(members, dict):
         errors.append("manifest.json: members are missing")
         fail()
-    for name in DATA_MEMBERS + (V2_MEMBERS if version >= 2 else ()) + (V3_MEMBERS if version >= 3 else ()) + (V4_MEMBERS if version >= 4 else ()) + (V5_MEMBERS if version >= 5 else ()):
+    for name in DATA_MEMBERS + (V2_MEMBERS if version >= 2 else ()) + (V3_MEMBERS if version >= 3 else ()) + (V4_MEMBERS if version >= 4 else ()) + (V5_MEMBERS if version >= 5 else ()) + (V6_MEMBERS if version >= 6 else ()):
         m = members.get(name)
         if not isinstance(m, dict) or m.get("sha256") != sha256(blobs[name]) or m.get("bytes") != len(blobs[name]):
             errors.append(f"{name}: checksum or size does not match the manifest (the file was changed or damaged)")
@@ -568,10 +579,36 @@ def read_package(data: bytes) -> Package:
                 v5[name].append(m)
             if not errors and counts.get(count_keys[name]) != len(v5[name]):
                 errors.append(f"{name}: count does not match the manifest (manifest {counts.get(count_keys[name])}, file {len(v5[name])})")
+    responses: list[CoachResponse] = []
+    if version >= 6 and not errors:
+        try:
+            raw = json.loads(blobs["responses.json"].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = None
+            errors.append(f"responses.json is not valid JSON ({exc})")
+        review_ids, roster_ids, seen_r = {r.id for r in v5["reviews.json"]}, {e.id for e in v5["roster.json"]}, set()
+        for n, item in enumerate(raw if isinstance(raw, list) else [], start=1):
+            try:
+                m = CoachResponse.model_validate(item)
+            except ValidationError as exc:
+                first = exc.errors()[0]
+                errors.append(f"responses.json item {n}: invalid ({'.'.join(map(str, first['loc']))}: {first['msg']})")
+                continue
+            named = [m.athlete_id] + ([m.lineup.incoming_athlete_id] if m.lineup else [])
+            if m.recording_id != rec["id"] or m.id in seen_r or any(a not in roster for a in named) \
+                    or (m.saved_review_id and m.saved_review_id not in review_ids) or any(i not in roster_ids for i in m.roster_entry_ids):
+                errors.append(f"responses.json item {n}: another recording, an athlete outside the roster, a repeated id, or a reference that is not in the package")
+                continue
+            seen_r.add(m.id)
+            responses.append(m)
+        if raw is not None and not isinstance(raw, list):
+            errors.append("responses.json must be a list")
+        if not errors and counts.get("responses") != len(responses):
+            errors.append(f"responses.json: count does not match the manifest (manifest {counts.get('responses')}, file {len(responses)})")
     if errors:
         fail()
     return Package(manifest=manifest, recording=rec, athletes=athletes, samples=samples, periods=periods, package_sha256=sha256(data), configuration=configuration, receipts=receipts,
-                   context=context, performance=performance, baselines=v5["baselines.json"], roster=v5["roster.json"], reviews=v5["reviews.json"])
+                   context=context, performance=performance, baselines=v5["baselines.json"], roster=v5["roster.json"], reviews=v5["reviews.json"], responses=responses)
 
 
 def latest_sample_after_stop(pkg: Package) -> timedelta | None:

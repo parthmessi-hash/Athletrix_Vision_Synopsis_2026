@@ -6,7 +6,7 @@ USAGE
     python scripts/product_demo.py build --out DIR          # write the demo package and print how to load it in the dashboard
     python scripts/product_demo.py register --url URL       # add the fictional athletes to that engine's registry (for the dashboard's athlete list)
 
-WHAT IT GENERATES (one 50-minute fictional match, recording package format 5)
+WHAT IT GENERATES (one 50-minute fictional match, recording package format 6)
   Physiology and performance are generated INDEPENDENTLY, from separate seeded random streams and separate scenario
   curves: physiology from a per-athlete "strain level" over time (rest, normal play, elevated), performance counts from
   a per-athlete "quality" curve. Performance is never derived from physiology or the other way round, so nothing here
@@ -51,6 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.core.physiology_index import baseline_stats  # noqa: E402
+from app.core.recording_package import FORMAT_VERSION as PACKAGE_VERSION  # noqa: E402
 from app.core.recording_package import build_package, read_package  # noqa: E402
 from app.models import Athlete, PhysiologicalSample  # noqa: E402
 from app.models.baseline import Baseline, BaselineCreate, RecordedDecision  # noqa: E402
@@ -213,7 +214,7 @@ def baseline(pid: str, samples: list) -> Baseline:
 
 
 def build() -> bytes:
-    """The demo package (format 5). Deterministic: same bytes apart from generated_at, which is fixed too."""
+    """The demo package (current format). Deterministic: same bytes apart from generated_at, which is fixed too."""
     phys_rng, perf_rng = random.Random("athletrix-demo-physiology"), random.Random("athletrix-demo-performance")
     athletes = [Athlete(id=pid, name=name, jersey_number=n, sport="soccer", team_id="fictional-team") for pid, name, n, *_ in PLAYERS]
     samples, perf, baselines = {}, [], []
@@ -386,8 +387,8 @@ def run(report_path: Path | None, out=print) -> int:
         pkg_bytes = eng.client.get(f"/api/v1/recordings/{rid}/package.zip").content
         eng.close()
         copy = read_package(pkg_bytes)
-        check("the exported package (format 5) carries baselines, roster, saved reviews and the correction",
-              copy.manifest["format_version"] == 5 and len(copy.baselines) == len(pkg.baselines) and len(copy.roster) == len(pkg.roster) and len(copy.reviews) == len(SCENARIOS)
+        check(f"the exported package (format {PACKAGE_VERSION}) carries baselines, roster, saved reviews and the correction",
+              copy.manifest["format_version"] == PACKAGE_VERSION and len(copy.baselines) == len(pkg.baselines) and len(copy.roster) == len(pkg.roster) and len(copy.reviews) == len(SCENARIOS)
               and len(copy.performance) == len(pkg.performance) + 1)
         db2 = Database(work / "second.db")
         rid2 = import_package(db2, copy, at(DURATION_S + 7200)).recording_id
@@ -463,7 +464,7 @@ def main(argv=None, out=print) -> int:
     args.out.mkdir(parents=True)
     pkg = args.out / "fictional-demo-match.zip"
     pkg.write_bytes(build())
-    out(f"wrote {pkg} (FICTIONAL data, recording package format 5)")
+    out(f"wrote {pkg} (FICTIONAL data, recording package format {PACKAGE_VERSION})")
     out("load it into a separate demo database and start an engine with the fictional profiles (from this folder):")
     out(f"  python scripts/recording_package.py import {pkg} --database {args.out}/demo.db")
     env = " ".join(f"{k}={v.relative_to(ROOT)}" for k, v in PROFILE_FILES.items())
