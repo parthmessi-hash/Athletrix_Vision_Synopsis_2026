@@ -5,11 +5,11 @@ Starting point: backend `e5adf26`, frontend `05c001a` (792 backend tests, 82 bro
 
 | # | Milestone | State | Where |
 |---|-----------|-------|-------|
-| 1 | One-command live fictional session | pending | `scripts/demo_launcher.py --session match` |
+| 1 | One-command live fictional session | done (speed-1 run: p08 R then K, p05 C after the tactic, p02 C after the decline) | `scripts/demo_launcher.py --session match` |
 | 2 | Team review endpoint | done (tests/test_team_review.py) | `GET /api/v1/recordings/{id}/team-review` |
-| 3 | Coach team view | pending | frontend `index.html` (Team review card) |
-| 4 | Coach responses and lineup changes | backend done (tests/test_coach_responses.py; package format 6); UI pending | `recording_responses`, `POST .../responses` |
-| 5 | Baseline and profile inspection | pending | `GET /api/v1/profiles`, `scripts/profile_tool.py`, baseline preview |
+| 3 | Coach team view | done (harness 86/86 at that point) | frontend `index.html` (Team review card) |
+| 4 | Coach responses and lineup changes | done: backend (tests/test_coach_responses.py; package format 6) and team-card responses | `recording_responses`, `POST .../responses` |
+| 5 | Baseline and profile inspection | done (tests/test_profiles.py; Baselines and profiles card; harness 87/87) | `GET /api/v1/profiles`, `scripts/profile_tool.py`, baseline preview |
 | 6 | Local video review and annotation | pending | frontend `tools/video-review.html` |
 | 7 | Optional lens-distortion calibration | pending | `camera_adapter/intrinsics.py` |
 | 8 | Evaluation workbench | pending | `scripts/evaluate.py` |

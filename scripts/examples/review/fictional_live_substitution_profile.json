@@ -1,0 +1,15 @@
+{
+  "format": "athletrix-substitution-profile",
+  "schema_version": 1,
+  "version": "fictional-live-substitution-1",
+  "fictional": true,
+  "note": "FICTIONAL thresholds for the paced live demo session (short steps so phases show within minutes). Not the team's rules, not validated, not an optimal-substitution model.",
+  "step_seconds": 10,
+  "lookback_seconds": 300,
+  "physiology": {"concern_at": 70, "clear_below": 55, "persistence_points": 3, "clear_points": 2},
+  "performance": {"window_seconds": 120, "concern_below": 45, "clear_at": 55, "persistence_points": 3, "clear_points": 2},
+  "performance_decline_requires_physiology": true,
+  "context": {"leadership": "hold_for_review", "pressure_situation": "hold_for_review", "partnerships": "hold_for_review"},
+  "cooldown_seconds": 60,
+  "review_again_after_seconds": 60
+}

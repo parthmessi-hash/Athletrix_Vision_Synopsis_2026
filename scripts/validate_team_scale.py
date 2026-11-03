@@ -861,8 +861,10 @@ def free_port() -> int:
 class IsolatedBackend:
     """Starts uvicorn for app.main:app on a free port with a fresh temporary database; stops exactly that process."""
 
-    def __init__(self, port: int | None = None, log_level: str = "warning", cors_origins: list[str] | None = None, retention_caps: dict[str, int] | None = None) -> None:
+    def __init__(self, port: int | None = None, log_level: str = "warning", cors_origins: list[str] | None = None, retention_caps: dict[str, int] | None = None,
+                 extra_env: dict[str, str] | None = None) -> None:
         self.port = port or free_port()
+        self.extra_env = dict(extra_env or {})   # e.g. the FICTIONAL profile paths of a demo session: this backend only, never .env
         self.cors_origins = cors_origins or ["http://localhost:3000"]
         self.retention_caps = dict(retention_caps or {})   # per-stream caps for this backend only, passed as environment variables; .env is untouched
         for stream, cap in self.retention_caps.items():
@@ -893,8 +895,8 @@ class IsolatedBackend:
         raise RuntimeError(f"backend on port {self.port} did not become ready within {ready_timeout_s} s; see {self.log_path}")
 
     def environment(self) -> dict[str, str]:
-        """The retention settings this backend is started with (empty: the backend's own defaults)."""
-        return {f"{stream.upper()}_RETENTION_SAMPLES": str(cap) for stream, cap in self.retention_caps.items()}
+        """The retention settings (and any extra settings) this backend is started with (empty: the backend's own defaults)."""
+        return {**{f"{stream.upper()}_RETENTION_SAMPLES": str(cap) for stream, cap in self.retention_caps.items()}, **self.extra_env}
 
     def stop(self) -> None:
         p = self.proc

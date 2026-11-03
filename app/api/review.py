@@ -523,3 +523,73 @@ def list_responses(recording_id: str, athlete_id: str | None = None) -> list[Coa
     with get_database().read():
         rec = require_recording(recording_id)
         return response_store.list(rec.id, athlete_id)
+
+
+# ---- profile and baseline inspection ----------------------------------------------------------------------------------------
+
+@router.get("/profiles")
+def configured_profiles() -> dict:
+    """The experimental profiles this engine is configured with (none by default): kind, version, SHA-256, fictional flag,
+    what they set, errors, warnings and compatibility problems between them. Read-only."""
+    from app.core.profiles import compatibility, inspect  # noqa: PLC0415
+    s = get_settings()
+    paths = {"physiological_index": s.physiological_index_profile_path, "substitution": s.substitution_profile_path, "performance_rubric": s.performance_rubric_path}
+    found = {}
+    for kind, path in paths.items():
+        if not path:
+            found[kind] = None
+            continue
+        try:
+            with open(path, "rb") as f:
+                r = inspect(f.read(), path.rsplit("/", 1)[-1])
+        except OSError as exc:
+            r = {"name": path.rsplit("/", 1)[-1], "kind": kind, "valid": False, "errors": [f"cannot read: {exc}"], "warnings": [], "summary": {}}
+        if r.get("kind") not in (None, kind):
+            r["errors"].append(f"configured as {kind} but the file is a {r['kind']}")
+            r["valid"] = False
+        found[kind] = r
+    return {"profiles": found, "compatibility": compatibility(found),
+            "note": "No profile ships with the engine; an unset profile means its calculation is unavailable. Saved reviews keep the exact text they were calculated with."}
+
+
+@router.post("/athletes/{athlete_id}/baselines/preview")
+def preview_baseline(athlete_id: str, body: BaselineCreate) -> dict:
+    """The statistics a baseline with this definition would have, without storing anything."""
+    with get_database().read():
+        rec = require_recording(body.source_recording_id)
+        require_member(rec, athlete_id)
+        if rec.stopped_at is None:
+            raise HTTPException(status_code=422, detail="a baseline is taken from a stopped recording, so its data can no longer change")
+        if any(r.start < rec.started_at or r.end > rec.stopped_at for r in body.ranges):
+            raise HTTPException(status_code=422, detail=f"every range must lie within recording '{rec.id}'")
+        samples = recording_store.all(rec.id, athlete_id, "physiological")
+    stats = baseline_stats(body, samples)
+    return {"athlete_id": athlete_id, "stored": False, "stats": {k: v.model_dump(mode="json") for k, v in stats.items()},
+            "data_start": iso(min(r.start for r in body.ranges)), "data_end": iso(max(r.end for r in body.ranges)),
+            "note": "Preview only: nothing was stored. Creating it stores these statistics with review status pending_review."}
+
+
+@router.get("/athletes/{athlete_id}/baselines/compatibility")
+def baseline_compatibility(athlete_id: str, at: str) -> dict:
+    """For each of the athlete's baselines: could the configured index profile use it at `at`, and if not, why."""
+    t = parse_at(at)
+    prof = _index_profile()
+    baselines = baseline_store.list(athlete_id)
+    if prof is None:
+        return {"athlete_id": athlete_id, "at": iso(t), "profile": None, "baselines": [{"id": b.id, "version": b.version, "usable": False, "reasons": [UNCONFIGURED]} for b in baselines]}
+    profile, sha = prof
+    rows = []
+    for b in baselines:
+        chosen, timing, why = select_baseline([b], profile, t)
+        reasons = list(why)
+        for spec in profile.signals:
+            st = b.stats.get(spec.signal)
+            if st is None:
+                reasons.append(f"has no {spec.signal}")
+            elif not st.sufficient:
+                reasons.append(f"{spec.signal}: {st.insufficient_reason}")
+            elif st.included < profile.baseline.min_samples:
+                reasons.append(f"{spec.signal}: {st.included} values, the profile needs {profile.baseline.min_samples}")
+        rows.append({"id": b.id, "version": b.version, "status": b.status, "condition": b.condition, "usable": chosen is not None, "timing": timing, "reasons": reasons})
+    return {"athlete_id": athlete_id, "at": iso(t), "profile": {"version": profile.version, "sha256": sha, "fictional": profile.fictional}, "baselines": rows,
+            "note": "A baseline can be usable overall while some of its signals are not; each signal's problems are listed."}

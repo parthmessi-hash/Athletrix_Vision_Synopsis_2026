@@ -20,7 +20,16 @@ database, never takes over an occupied port or stops unrelated processes, never 
 nothing. CORS is configured only for its own backend and only for its own frontend port. On normal exit, failure or
 Ctrl-C it stops only the two processes it started and removes only the temporary folder it created.
 
+SESSION MODE (--session match): instead of the simple sine-wave feed, a paced FICTIONAL match session
+(scripts/live_session.py): a pre-match rest recording and accepted fictional baselines, a roster with starters and
+bench players, coach context and match constraints, physiology and performance generated independently, and phases
+(maintained performance, a decline, a tactical change, missing data, recovery, a replacement option becoming
+unavailable, simulated coach responses). Only this demo backend gets the FICTIONAL live profiles (its own
+environment); the normal engine still starts with no profile. It is a paced script, not live capture.
+
 USAGE
+    python scripts/demo_launcher.py --session match                   # the fictional match session (about 6 minutes)
+    python scripts/demo_launcher.py --session match --speed 3 --duration 360 --exit-after-demo
     python scripts/demo_launcher.py                                  # frontend folder guessed next to this repository
     python scripts/demo_launcher.py --frontend "/path/to/Athletrix Fixed Website" --athletes 4 --duration 90 --device-status
     python scripts/demo_launcher.py --exit-after-demo                 # stop everything when data generation ends
@@ -241,14 +250,16 @@ def feed_team(
 class Demo:
     """Owns the temporary folder and the two child processes; cleanup stops only those."""
 
-    def __init__(self, frontend: Path, backend_port: int | None, frontend_port: int | None, retention_caps: dict[str, int] | None = None) -> None:
+    def __init__(self, frontend: Path, backend_port: int | None, frontend_port: int | None, retention_caps: dict[str, int] | None = None, extra_env: dict[str, str] | None = None) -> None:
         self.frontend = frontend
         self.tmp = tempfile.TemporaryDirectory(prefix="athletrix-demo-")
         self.tmp_path = Path(self.tmp.name)
         self.backend_port = choose_port(backend_port, "backend")
         self.frontend_port = choose_port(frontend_port, "frontend")
         self.retention_caps = dict(retention_caps or {})
-        self.backend = IsolatedBackend(port=self.backend_port, cors_origins=[f"http://localhost:{self.frontend_port}", f"http://127.0.0.1:{self.frontend_port}"], retention_caps=self.retention_caps)
+        self.backend = IsolatedBackend(port=self.backend_port, cors_origins=[f"http://localhost:{self.frontend_port}", f"http://127.0.0.1:{self.frontend_port}"], retention_caps=self.retention_caps,
+                                      **({"extra_env": extra_env} if extra_env else {}))
+        self.before_start: Callable[[Path], None] | None = None   # writes into the empty database before the backend opens it
         self.static: StaticServer | None = None
         self.cleaned = False
 
@@ -261,6 +272,8 @@ class Demo:
         return f"http://localhost:{self.frontend_port}/#demo"
 
     def start(self) -> None:
+        if self.before_start is not None:
+            self.before_start(self.backend.db_path)
         self.backend.start()
         copy_dir = self.tmp_path / "web"
         prepare_frontend_copy(self.frontend, copy_dir, self.backend_url)
@@ -298,7 +311,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--frontend", type=Path, default=DEFAULT_FRONTEND, help=f"folder containing the Athletrix_Web index.html (default {DEFAULT_FRONTEND})")
     p.add_argument("--athletes", type=int, default=DEFAULT_ATHLETES, help=f"fictional athletes on the demo team (default {DEFAULT_ATHLETES})")
-    p.add_argument("--duration", type=int, default=DEFAULT_DURATION_S, help=f"seconds of fictional data to generate (default {DEFAULT_DURATION_S})")
+    p.add_argument("--duration", type=int, default=None, help=f"seconds of fictional data to generate (default {DEFAULT_DURATION_S}; with --session match: scenario seconds, default 360)")
+    p.add_argument("--session", choices=["simple", "match"], default="simple", help="simple: the sine-wave feed (default); match: the paced fictional match session (scripts/live_session.py)")
+    p.add_argument("--speed", type=float, default=1.0, help="--session match: scenario seconds per wall second (default 1; timestamps stay real send times)")
     p.add_argument("--device-status", action="store_true", help="also send clearly fictional device-status reports every 5 s")
     p.add_argument("--backend-port", type=int, default=None, help="backend port (default: a free port; an occupied port is an error)")
     p.add_argument("--frontend-port", type=int, default=None, help="frontend port (default: a free port; an occupied port is an error)")
@@ -310,6 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, *, out: Callable[[str], None] = say, wait_for_interrupt: Callable[[], None] | None = None, demo_factory: Callable = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.duration is None:
+        args.duration = 360 if args.session == "match" else DEFAULT_DURATION_S
+    if args.session == "match":
+        return run_match(args, out, wait_for_interrupt, demo_factory)
     if args.athletes < 1 or args.duration < 1:
         out("athletes and duration must be at least 1")
         return 2
@@ -362,6 +381,84 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = say, wai
             + (f", {stats.accepted['status']} device-status reports" if args.device_status else "") + f" accepted; {sum(stats.failed.values())} failed. Nothing more will be sent; the dashboard keeps the retained readings.")
         if args.exit_after_demo:
             return 0 if sum(stats.failed.values()) == 0 else 1
+        out("Servers stay up for exploring the dashboard. Press Ctrl-C to stop and clean up.")
+        (wait_for_interrupt or (lambda: signal.pause()))()
+        return 0
+    finally:
+        if not stopping["done"]:
+            stopping["done"] = True
+            demo.cleanup()
+        for s, h in previous.items():
+            signal.signal(s, h)
+
+
+def run_match(args, out, wait_for_interrupt, demo_factory) -> int:
+    """--session match: the paced fictional match session against an isolated backend with the FICTIONAL live profiles."""
+    import live_session  # noqa: PLC0415
+    if args.duration < 60 or not (0.1 <= args.speed <= 20):
+        out("--duration must be at least 60 scenario seconds and --speed between 0.1 and 20")
+        return 2
+    frontend = args.frontend.expanduser()
+    if not (frontend / "index.html").is_file():
+        out(f"Frontend folder not found or has no index.html: {frontend}. Pass the Athletrix_Web folder with --frontend.")
+        return 2
+    env = {k: str(v) for k, v in live_session.LIVE_PROFILES.items()}
+    try:
+        demo = (demo_factory or Demo)(frontend, args.backend_port, args.frontend_port, {}, env)
+    except RuntimeError as exc:
+        out(f"Cannot start the demo: {exc}")
+        return 1
+    prepared = {}
+
+    def before(db_path):
+        prepared["rest"], prepared["bases"] = live_session.prepare_database(db_path, datetime.now(UTC))
+    demo.before_start = before
+    stopping = {"done": False}
+
+    def on_signal(signum, _frame):
+        if not stopping["done"]:
+            stopping["done"] = True
+            out("\nStopping the session (only the backend and frontend copy started here are stopped; the temporary folder is removed)…")
+            demo.cleanup()
+        raise SystemExit(130)
+
+    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        out("ATHLETRIX FICTIONAL MATCH SESSION · made-up athletes, data, profiles and coach decisions · a paced script, NOT live capture")
+        out(f"Temporary folder: {demo.tmp_path} (removed on exit)")
+        try:
+            demo.start()
+        except (RuntimeError, FileNotFoundError, OSError) as exc:
+            out(f"Startup failed: {exc}")
+            return 1
+        session = live_session.Session(demo.backend_url, prepared["rest"], prepared["bases"], duration_s=args.duration, speed=args.speed, out=out)
+        try:
+            rid = session.setup()
+        except RuntimeError as exc:
+            out(f"Session setup failed: {exc}")
+            return 1
+        wall = args.duration / args.speed
+        out(f"Backend {demo.backend_url} (FICTIONAL live profiles in its environment only) · frontend copy {demo.static.url if demo.static else '?'} · recording {rid}")
+        out("")
+        out(f"OPEN THE DASHBOARD:  {demo.dashboard_url}")
+        out("  1. Click Live Demo. The Team review card lists every player (roster order, never ranked) with status, latest reading,")
+        out("     experimental index, performance score, evidence age and the current experimental output. Click a player for details.")
+        out("  2. Watch the phases: p08's index rises then recovers; p02's performance declines; at half time the formation changes and")
+        out("     p05 is asked to play left wing-back; p06's strap stops; b01 becomes unavailable; simulated coach responses are recorded.")
+        out("  3. Record your own response or a lineup change from the player's details (it is stored as a person's response).")
+        out(f"  The script runs {args.duration:g} scenario seconds at speed {args.speed:g} (about {wall / 60:.1f} min). Ctrl-C stops and cleans up.")
+        out("")
+        stats = session.run()
+        try:
+            session.client.post(f"{demo.backend_url}/api/v1/recordings/{rid}/stop")
+        except Exception:  # noqa: BLE001
+            pass
+        out("Script finished; the session recording was stopped (open it with Review). Events:")
+        for e in stats.events:
+            out(f"  - {e}")
+        out(f"Sent: {stats.sent}; failed: {stats.failed or 'none'}")
+        if args.exit_after_demo:
+            return 0 if not stats.failed else 1
         out("Servers stay up for exploring the dashboard. Press Ctrl-C to stop and clean up.")
         (wait_for_interrupt or (lambda: signal.pause()))()
         return 0
