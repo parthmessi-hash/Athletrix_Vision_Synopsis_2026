@@ -59,14 +59,19 @@ def test_the_tracker_marks_overlapping_boxes_of_two_tracked_people():
     def detector(f):   # two people walk towards each other, overlap around frame 20, and part again
         a, b = 100 + 6 * f, 340 - 6 * f
         return np.array([[a, 200, a + 30, 300], [b, 205, b + 30, 305]], np.float32), np.array([0.9, 0.9], np.float32)
-    ft = FrameTracker(VideoTrackingConfig(), detector, 25.0, 960, 540)
+    ft = FrameTracker(VideoTrackingConfig(encounter_release_s=0), detector, 25.0, 960, 540)
     for f in range(40):
         ft.process(f, f / 25.0, f)
     near = sorted({o.frame for o in ft.obs if o.near_other_track})
     assert near and near[0] > 10 and near[-1] < 30, near
     pair = ft.summary()["encounters"]["pairs"]
-    assert len(pair) == 1 and pair[0]["first_frame"] == near[0] and pair[0]["last_frame"] == near[-1]
+    assert len(pair) == 1 and pair[0]["first_frame"] == near[0] and pair[0]["last_frame"] == near[-1], "without a release time: exactly the overlapping frames"
+    held = FrameTracker(VideoTrackingConfig(), detector, 25.0, 960, 540)     # default release 0.5 s = 12.5 frames at 25 fps
+    for f in range(40):
+        held.process(f, f / 25.0, f)
+    near_held = sorted({o.frame for o in held.obs if o.near_other_track})
+    assert near_held[0] == near[0] and near_held[-1] == near[-1] + 12, "the encounter lasts until the boxes have been apart for the release time"
     off = FrameTracker(VideoTrackingConfig(encounter_iou=0), detector, 25.0, 960, 540)
     for f in range(40):
         off.process(f, f / 25.0, f)
-    assert not any(o.near_other_track for o in off.obs) and VideoTrackingConfig(encounter_iou=1.5).validate()
+    assert not any(o.near_other_track for o in off.obs) and VideoTrackingConfig(encounter_iou=1.5).validate() and VideoTrackingConfig(encounter_release_s=-1).validate()

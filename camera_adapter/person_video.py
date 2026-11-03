@@ -95,6 +95,7 @@ class VideoTrackingConfig:
     ground_reference_frames: int = 15
     ground_min_reference: int = 5
     encounter_iou: float = 0.05     # boxes of two tracked people overlapping at least this much mark both observations near_other_track; 0 = off
+    encounter_release_s: float = 0.5   # an encounter ends only after the boxes have stayed apart this long (switches happen as they separate)
 
     def validate(self) -> list[str]:
         e = []
@@ -122,6 +123,8 @@ class VideoTrackingConfig:
             e.append("ground_min_height_ratio must be in (0, 1) and 1 <= ground_min_reference <= ground_reference_frames")
         if not (isinstance(self.encounter_iou, (int, float)) and 0 <= self.encounter_iou < 1):
             e.append("encounter_iou must be in [0, 1) (0 turns encounter marking off)")
+        if not (isinstance(self.encounter_release_s, (int, float)) and 0 <= self.encounter_release_s <= 10):
+            e.append("encounter_release_s must be between 0 and 10 seconds")
         return e
 
     def to_doc(self) -> dict:
@@ -268,6 +271,7 @@ class FrameTracker:
         self.detections_total = self.frames = 0
         self.t_detect = self.t_track = 0.0
         self.encounters: dict[tuple, list[int]] = {}   # (track, track) -> [first frame, last frame] of overlapping boxes
+        self.last_overlap: dict[str, float] = {}       # track -> time of its latest overlap (the encounter lasts encounter_release_s longer)
 
     def process(self, f: int, t: float, frame) -> list:
         """Process frame index `f` taken at `t` seconds (video or capture time); returns [(track_id, box, score, used)]."""
@@ -292,8 +296,10 @@ class FrameTracker:
                 for tb, bb in live[i + 1:]:
                     if box_iou(ba, bb) >= config.encounter_iou:
                         near |= {ta, tb}
+                        self.last_overlap[ta] = self.last_overlap[tb] = t
                         span = self.encounters.setdefault(tuple(sorted((ta, tb), key=lambda k: int(k.split("-")[1]))), [f, f])
                         span[1] = f
+        near |= {tid for tid, _ in live if tid in self.last_overlap and t - self.last_overlap[tid] <= config.encounter_release_s}
         for box, score, tid in zip(tracked.xyxy, tracked.confidence if tracked.confidence is not None else np.ones(len(tracked)), tracked.tracker_id):
             x1, y1, x2, y2 = (float(v) for v in box)
             if tid is None or int(tid) < 0:

@@ -28,7 +28,8 @@ Meaning of each field
                 example the box suddenly lost height, as when the legs are hidden) or "unknown" (not yet assessable).
                 Absent means not assessed. A confident detection can still have a suspect ground point.
   near_other_track  (version 3, optional, written only when true) the target's box overlapped another tracked person's
-                box in this frame. A tracker can swap or merge identities in such an encounter, so an operator's
+                box in this frame, or did so within the extractor's release time (identity switches were seen to start
+                a few frames after the boxes separate). A tracker can swap or merge identities in such an encounter, so an operator's
                 assignment of the track lapses at it (see apply_assignments) until the track is confirmed again.
 
 Validation is whole-file and strict (see `load`): unknown keys, non-finite numbers, positions outside the image,

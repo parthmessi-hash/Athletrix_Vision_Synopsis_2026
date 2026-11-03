@@ -57,7 +57,7 @@ PEOPLE_CHECK_MARKS = [(12, 7), (6, 10), (18, 4), (21, 12)]
 T0 = datetime(2026, 10, 20, 10, 0, 0, tzinfo=UTC)
 
 
-def people_check(workdir, model_path, out, stability_runs: int = 20) -> dict:
+def people_check(workdir, model_path, out, stability_runs: int = 30) -> dict:
     """Render the drawn-figure scene, run the real tracker, assign as an operator would, run the adapter, compare with truth."""
     import json  # noqa: PLC0415
 
@@ -195,12 +195,23 @@ def people_check(workdir, model_path, out, stability_runs: int = 20) -> dict:
             for policy, (reconf, trust_flag) in {"trust_tracker": (False, True), "lapse_and_reconfirm": (True, False)}.items():
                 a = apply_assignments(f2, operator(ft.obs, reconfirm=reconf)[0], trust_tracker_through_encounters=trust_flag)
                 k = audit(a.observations)
+                switches = []
+                if any(v.get("identity_switch") for v in k.values()):   # where did each switched track first follow another figure?
+                    for tid in {o.track_id for o in a.observations if o.athlete_id}:
+                        seq = [o for o in a.observations if o.track_id == tid and o.athlete_id]
+                        bad = next((o for o in seq if nearest(o)[0] != athlete_figure[o.athlete_id] and nearest(o)[1] <= tol_px(nearest(o)[0], o.video_time_s)
+                                    and math.dist((o.u_px, o.v_px), foot_px(athlete_figure[o.athlete_id], o.video_time_s)) > tol_px(athlete_figure[o.athlete_id], o.video_time_s)), None)
+                        if bad is not None:
+                            enc = [o.frame for o in ft.obs if o.track_id == tid and o.near_other_track and o.frame <= bad.frame]
+                            switches.append({"run": run_no, "track": tid, "assigned_figure": athlete_figure[bad.athlete_id], "followed_figure": nearest(bad)[0],
+                                             "first_frame": bad.frame, "last_encounter_before": max(enc) if enc else None})
                 totals[policy].append({"identity_switch": sum(v.get("identity_switch", 0) for v in k.values()),
-                                       "assigned": sum(1 for o in a.observations if o.athlete_id)})
+                                       "assigned": sum(1 for o in a.observations if o.athlete_id), "switches": switches})
         for policy, rows in totals.items():
             out["policies"][policy] = {"runs_with_identity_switch": sum(1 for r in rows if r["identity_switch"]),
                                        "switched_observations": sum(r["identity_switch"] for r in rows),
-                                       "assigned_observations_mean": round(statistics.fmean(r["assigned"] for r in rows), 1)}
+                                       "assigned_observations_mean": round(statistics.fmean(r["assigned"] for r in rows), 1),
+                                       "switch_onsets": [x for r in rows for x in r["switches"]]}
         return out
     # detection coverage: frames where a figure's feet are in view and some tracked observation lies near them
     by_frame: dict[int, list[Observation]] = {}
@@ -281,7 +292,7 @@ def people_check(workdir, model_path, out, stability_runs: int = 20) -> dict:
         "identity_audit": {"rule": "assignments lapse at close encounters; the simulated operator re-confirms each track after an encounter",
                            "kinds": kinds, "trust_tracker_kinds": kinds_trust, "encounters": log.get("encounters"),
                            "assignment_report": assigned.assignment_report,
-                           "stability": [stability(stability_runs, j, d) for j, d in ((2.0, 0.01), (4.0, 0.03))] if stability_runs else None,
+                           "stability": [stability(stability_runs, j, d) for j, d in ((2.0, 0.01), (4.0, 0.03), (6.0, 0.05))] if stability_runs else None,
                            "note": "kinds: ambiguous_nearest_target, during_encounter, identity_switch, localization_error (see audit())"},
         "ground_contact_evidence": gc, "ground_contact_policy_comparison": policy, "phantom_distance_while_resting": phantom,
         "detection_coverage": coverage,

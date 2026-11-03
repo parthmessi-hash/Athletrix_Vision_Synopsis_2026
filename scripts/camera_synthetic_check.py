@@ -289,6 +289,10 @@ def people_summary(r: dict, out: Callable[[str], None]) -> None:
         out(f"  stability replay ({st['runs']} perturbed runs, jitter {st['jitter_px']} px, {st['drop_fraction']:.0%} dropped): "
             + "; ".join(f"{k}: {v['runs_with_identity_switch']} runs with a switch, {v['switched_observations']} switched observations, {v['assigned_observations_mean']} assigned per run"
                         for k, v in st["policies"].items()))
+        for k, v in st["policies"].items():
+            for x in v["switch_onsets"]:
+                out(f"    {k}: run {x['run']} track {x['track']} (assigned {x['assigned_figure']}) follows {x['followed_figure']} from frame {x['first_frame']}; "
+                    + (f"last marked encounter at frame {x['last_encounter_before']}" if x["last_encounter_before"] is not None else "no marked encounter before it"))
     g = r["ground_point_error_while_legs_hidden_m"]
     hidden = "n/a" if not g else f"median {g['median_abs']} m, max {g['max_abs']} m"
     out(f"  ground-point error while yellow's legs are hidden by the board: {hidden}")
