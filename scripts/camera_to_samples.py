@@ -17,6 +17,10 @@ USAGE
             they occur in the video (the first sample is timestamped when sending starts): a live-paced PLAYBACK of a
             file, not live camera capture.
 
+IDENTITY: with an assignments file, an assignment covers its track only until the track's first close encounter with
+another tracked person (observations marked near_other_track, format 3); later observations stay unassigned until a new
+assignment for that track starts after the encounter. --trust-tracker-through-encounters keeps the earlier behaviour.
+
 TIME: sample timestamp = anchor + (video_time_s - 0). The anchor is never guessed: --anchor-utc is required, its meaning
 is recorded in the log, and timestamps are never rewritten afterwards to get past the engine's checks (a sample more
 than 5 s ahead of engine time is rejected by the engine, and the send stops there).
@@ -64,6 +68,8 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
     p.add_argument("--calibration", type=Path, required=True)
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--assignments", type=Path)
+    p.add_argument("--trust-tracker-through-encounters", action="store_true",
+                   help="keep assignments through close encounters between tracked people (default: an assignment lapses at the track's first encounter after it starts)")
     p.add_argument("--anchor-utc")
     p.add_argument("--out", type=Path)
     p.add_argument("--log", type=Path)
@@ -86,7 +92,11 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
     try:
         obs = obsmod.load(args.observations)
         if args.assignments:
-            obs = obsmod.apply_assignments(obs, obsmod.load_assignments(args.assignments))
+            obs = obsmod.apply_assignments(obs, obsmod.load_assignments(args.assignments), trust_tracker_through_encounters=args.trust_tracker_through_encounters)
+            rep = obs.assignment_report
+            if rep["observations_unassigned_after_encounter"]:
+                out(f"IDENTITY: {rep['observations_unassigned_after_encounter']} observations left unassigned after a close encounter with another tracked person "
+                    f"(per track {rep['per_track']}); confirm those tracks again with an assignment starting after the encounter")
         calib = cal.load(args.calibration)
         config = AdapterConfig.from_doc(json.loads(args.config.read_text(encoding="utf-8")))
         res = process(obs, calib, config)

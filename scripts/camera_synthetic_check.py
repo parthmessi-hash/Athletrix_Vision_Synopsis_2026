@@ -281,6 +281,14 @@ def people_summary(r: dict, out: Callable[[str], None]) -> None:
     out(f"  tracks per figure {r['tracks_per_figure']}; unassigned {r['unassigned_tracks']}")
     out(f"  detection coverage (feet in view): " + ", ".join(f"{k} {v['fraction']}" for k, v in r["detection_coverage"].items()))
     out(f"  identity mismatch observations (assigned box nearer another figure): {r['identity_mismatch_observations'] or 'none'}")
+    ia = r["identity_audit"]
+    out(f"  identity audit by kind (assignments lapse at encounters, re-confirmed): {ia['kinds'] or 'none'}; trusting the tracker through encounters: {ia['trust_tracker_kinds'] or 'none'}")
+    out(f"  encounters: {ia['encounters']['observations_near_other_track']} observations near another track, pairs "
+        + ", ".join(f"{'/'.join(p['tracks'])} {p['first_frame']}-{p['last_frame']}" for p in ia['encounters']['pairs']))
+    for st in ia["stability"] or []:
+        out(f"  stability replay ({st['runs']} perturbed runs, jitter {st['jitter_px']} px, {st['drop_fraction']:.0%} dropped): "
+            + "; ".join(f"{k}: {v['runs_with_identity_switch']} runs with a switch, {v['switched_observations']} switched observations, {v['assigned_observations_mean']} assigned per run"
+                        for k, v in st["policies"].items()))
     g = r["ground_point_error_while_legs_hidden_m"]
     hidden = "n/a" if not g else f"median {g['median_abs']} m, max {g['max_abs']} m"
     out(f"  ground-point error while yellow's legs are hidden by the board: {hidden}")

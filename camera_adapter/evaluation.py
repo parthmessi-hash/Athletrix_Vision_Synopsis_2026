@@ -57,7 +57,7 @@ PEOPLE_CHECK_MARKS = [(12, 7), (6, 10), (18, 4), (21, 12)]
 T0 = datetime(2026, 10, 20, 10, 0, 0, tzinfo=UTC)
 
 
-def people_check(workdir, model_path, out) -> dict:
+def people_check(workdir, model_path, out, stability_runs: int = 20) -> dict:
     """Render the drawn-figure scene, run the real tracker, assign as an operator would, run the adapter, compare with truth."""
     import json  # noqa: PLC0415
 
@@ -68,7 +68,13 @@ def people_check(workdir, model_path, out) -> dict:
     sp.render(video, camera)
     config = pv.VideoTrackingConfig()
     model_info = pv.verify_model(model_path, config.detector.model)
-    detector = pv.YoloxPersonDetector(model_path, config.detector)
+    yolox = pv.YoloxPersonDetector(model_path, config.detector)
+    recorded: list = []
+
+    def detector(frame):   # the real detector, with its outputs kept for the stability replay below
+        r = yolox(frame)
+        recorded.append(r)
+        return r
     preview = pv.PreviewWriter(None, workdir / "synthetic-people-tracks.png", sp.FPS, (sp.WIDTH, sp.HEIGHT))
     obs, log = pv.track_video(video, config, detector=detector, model_info=model_info, on_frame=preview)
     preview.close()
@@ -96,25 +102,106 @@ def people_check(workdir, model_path, out) -> dict:
                     best = (name, d)
         return best
 
-    # the operator's step, simulated: confirm each track from its first observations (as from the gallery); black stays unassigned
-    first: dict[str, Observation] = {}
-    for o in obs.observations:
-        first.setdefault(o.track_id, o)
-    assignments, track_figure = [], {}
-    for tid, o in sorted(first.items()):
-        name, d = nearest(o)
-        track_figure[tid] = name
-        if name in PEOPLE_ATHLETES and d <= max(15.0, 0.25 * height_px(name, o.video_time_s)):
-            assignments.append(Assignment(tid, PEOPLE_ATHLETES[name], o.frame, None, "operator step simulated from the first observation"))
-    assigned = apply_assignments(obs, assignments)
-    # identity audit: an assigned observation whose box foot is nearer another figure than its own (track drifted or merged)
-    mismatches: dict[str, int] = {}
+    def tol_px(name, t):
+        return max(15.0, 0.25 * height_px(name, t))
+
     athlete_figure = {v: k for k, v in PEOPLE_ATHLETES.items()}
-    for o in assigned.observations:
-        if o.athlete_id:
-            name, _ = nearest(o)
-            if name != athlete_figure[o.athlete_id]:
-                mismatches[o.athlete_id] = mismatches.get(o.athlete_id, 0) + 1
+
+    def operator(observations, reconfirm: bool):
+        """The operator's step, simulated from the truth: confirm each track at its first observation and, with `reconfirm`,
+        again after every close encounter (the track then follows whoever the truth says it follows; black and unclear
+        tracks stay unassigned). Returns (assignments, track -> figure at its first observation)."""
+        by_track: dict[str, list[Observation]] = {}
+        for o in observations:
+            by_track.setdefault(o.track_id, []).append(o)
+        out, first_fig = [], {}
+        for tid in sorted(by_track, key=lambda k: int(k.split("-")[1])):
+            seq = by_track[tid]
+            starts = [seq[0]] + ([b for a, b in zip(seq, seq[1:]) if a.near_other_track and not b.near_other_track] if reconfirm else [])
+            rows = []
+            for o in starts:
+                name, d = nearest(o)
+                if o is seq[0]:
+                    first_fig[tid] = name
+                rows.append((o.frame, PEOPLE_ATHLETES.get(name) if d <= tol_px(name, o.video_time_s) else None))
+            for (f0, ath), nxt in zip(rows, rows[1:] + [(None, None)]):
+                if ath:
+                    out.append(Assignment(tid, ath, f0, None if nxt[0] is None else nxt[0] - 1, "operator step simulated from the truth" + (" (re-confirmed after an encounter)" if f0 != seq[0].frame else "")))
+        return out, first_fig
+
+    def audit(assigned_obs):
+        """Identity audit of assigned observations whose box foot is nearer another figure than the assigned one, by kind:
+        ambiguous_nearest_target (the assigned figure's feet are within tolerance too), during_encounter (the box
+        overlapped another tracked box), identity_switch (5 or more consecutive observations of the track follow the
+        other figure within its tolerance) or localization_error (the box is off, e.g. clipped or partly occluded)."""
+        hits = []
+        for o in assigned_obs:
+            if not o.athlete_id:
+                continue
+            name, d = nearest(o)
+            own = athlete_figure[o.athlete_id]
+            if name != own:
+                d_own = math.dist((o.u_px, o.v_px), foot_px(own, o.video_time_s))
+                hits.append((o, name, d, d_own))
+        kinds: dict[str, dict[str, int]] = {}
+        run: list = []
+        def flush():
+            for o, name, d, d_own in run:
+                k = "identity_switch" if len(run) >= 5 and all(x[2] <= tol_px(x[1], x[0].video_time_s) for x in run) else "localization_error"
+                kinds.setdefault(o.athlete_id, {}).setdefault(k, 0)
+                kinds[o.athlete_id][k] += 1
+        prev = None
+        for h in hits:
+            o, name, d, d_own = h
+            if d_own <= tol_px(athlete_figure[o.athlete_id], o.video_time_s) or o.near_other_track:
+                k = "ambiguous_nearest_target" if not o.near_other_track else "during_encounter"
+                kinds.setdefault(o.athlete_id, {}).setdefault(k, 0)
+                kinds[o.athlete_id][k] += 1
+                continue
+            if prev is None or prev[0].track_id != o.track_id or prev[1] != name or o.frame - prev[0].frame > 3:
+                flush()
+                run = []
+            run.append(h)
+            prev = h
+        flush()
+        return kinds
+
+    assignments, track_figure = operator(obs.observations, reconfirm=True)
+    assigned = apply_assignments(obs, assignments)
+    kinds = audit(assigned.observations)
+    mismatches = {a: sum(v.values()) for a, v in kinds.items()}
+    trust = apply_assignments(obs, operator(obs.observations, reconfirm=False)[0], trust_tracker_through_encounters=True)
+    kinds_trust = audit(trust.observations)
+
+    def stability(runs: int, jitter_px: float, drop: float) -> dict:
+        """Replay the recorded detections through the same tracker with small seeded perturbations (box jitter, a few
+        dropped detections), as a stand-in for run-to-run detector variation, and audit both identity policies."""
+        import numpy as np  # noqa: PLC0415
+        out = {"runs": runs, "jitter_px": jitter_px, "drop_fraction": drop, "policies": {}}
+        totals = {"trust_tracker": [], "lapse_and_reconfirm": []}
+        for run_no in range(runs):
+            rng = np.random.default_rng(run_no + 1)
+            frames = iter(recorded)
+
+            def replay(_frame, frames=frames, rng=rng):
+                b, sc = next(frames)
+                b = np.asarray(b, dtype=np.float32).reshape(-1, 4) + rng.uniform(-jitter_px, jitter_px, (len(sc), 4)).astype(np.float32)
+                keep = rng.random(len(sc)) >= drop
+                return b[keep], np.asarray(sc, dtype=np.float32).reshape(-1)[keep]
+            ft = pv.FrameTracker(config, replay, sp.FPS, sp.WIDTH, sp.HEIGHT)
+            for f in range(len(recorded)):
+                ft.process(f, f / sp.FPS, None)
+            f2 = ObservationFile(obs.video, obs.extractor, ft.obs)
+            for policy, (reconf, trust_flag) in {"trust_tracker": (False, True), "lapse_and_reconfirm": (True, False)}.items():
+                a = apply_assignments(f2, operator(ft.obs, reconfirm=reconf)[0], trust_tracker_through_encounters=trust_flag)
+                k = audit(a.observations)
+                totals[policy].append({"identity_switch": sum(v.get("identity_switch", 0) for v in k.values()),
+                                       "assigned": sum(1 for o in a.observations if o.athlete_id)})
+        for policy, rows in totals.items():
+            out["policies"][policy] = {"runs_with_identity_switch": sum(1 for r in rows if r["identity_switch"]),
+                                       "switched_observations": sum(r["identity_switch"] for r in rows),
+                                       "assigned_observations_mean": round(statistics.fmean(r["assigned"] for r in rows), 1)}
+        return out
     # detection coverage: frames where a figure's feet are in view and some tracked observation lies near them
     by_frame: dict[int, list[Observation]] = {}
     for o in obs.observations:
@@ -188,9 +275,14 @@ def people_check(workdir, model_path, out) -> dict:
         "model": model_info, "tracking_config": config.to_doc(), "tracking_log": {k: log[k] for k in ("detections", "observations", "skipped", "tracks", "track_losses", "speed")},
         "calibration": {"fit_residual_rms_m": calib.fit_residual_m["rms"], "check_points_m": {k: calib.check_errors_m[k] for k in ("rms", "max")}},
         "track_to_figure_at_first_observation": track_figure,
-        "assignments": [asdict(a) for a in assignments], "unassigned_tracks": sorted(t for t in first if t not in {a.track_id for a in assignments}),
+        "assignments": [asdict(a) for a in assignments], "unassigned_tracks": sorted((t for t in track_figure if t not in {a.track_id for a in assignments}), key=lambda k: int(k.split("-")[1])),
         "tracks_per_figure": {n: sorted(t for t, f in track_figure.items() if f == n) for n in sp.FIGURES},
         "identity_mismatch_observations": mismatches,
+        "identity_audit": {"rule": "assignments lapse at close encounters; the simulated operator re-confirms each track after an encounter",
+                           "kinds": kinds, "trust_tracker_kinds": kinds_trust, "encounters": log.get("encounters"),
+                           "assignment_report": assigned.assignment_report,
+                           "stability": [stability(stability_runs, j, d) for j, d in ((2.0, 0.01), (4.0, 0.03))] if stability_runs else None,
+                           "note": "kinds: ambiguous_nearest_target, during_encounter, identity_switch, localization_error (see audit())"},
         "ground_contact_evidence": gc, "ground_contact_policy_comparison": policy, "phantom_distance_while_resting": phantom,
         "detection_coverage": coverage,
         "ground_point_error_while_legs_hidden_m": stats(hidden_err),
@@ -198,7 +290,8 @@ def people_check(workdir, model_path, out) -> dict:
         "errors": {a: {k: stats(v) for k, v in e.items()} for a, e in errors.items()},
         "engine_distance_red_2_to_8_s": {**red_run, "truth_m": 16.0},
         "limitations": ["Drawn cartoon figures on a clean striped field: real kits, motion blur, crowds, shadows, lighting, camera shake and compression are absent.",
-                        "The operator's assignment step is simulated from the analytic truth at each track's first observation.",
+                        "The operator's assignment step is simulated from the analytic truth at each track's first observation and after every close encounter.",
+                        "The stability replay perturbs recorded detections; it approximates, but is not, run-to-run detector variation on real footage.",
                         "One fixed camera, no lens distortion, no camera movement; detector behaviour on real footage is not shown by this check."],
     }
     out(f"  people scene: {log['detections']} detections, {len(log['tracks'])} tracks, {log['observations']} observations at {log['speed']['frames_per_second']} frames/s")

@@ -94,6 +94,7 @@ class VideoTrackingConfig:
     ground_min_height_ratio: float = 0.85
     ground_reference_frames: int = 15
     ground_min_reference: int = 5
+    encounter_iou: float = 0.05     # boxes of two tracked people overlapping at least this much mark both observations near_other_track; 0 = off
 
     def validate(self) -> list[str]:
         e = []
@@ -119,6 +120,8 @@ class VideoTrackingConfig:
         if not (0 < self.ground_min_height_ratio < 1 and isinstance(self.ground_reference_frames, int) and isinstance(self.ground_min_reference, int)
                 and 1 <= self.ground_min_reference <= self.ground_reference_frames):
             e.append("ground_min_height_ratio must be in (0, 1) and 1 <= ground_min_reference <= ground_reference_frames")
+        if not (isinstance(self.encounter_iou, (int, float)) and 0 <= self.encounter_iou < 1):
+            e.append("encounter_iou must be in [0, 1) (0 turns encounter marking off)")
         return e
 
     def to_doc(self) -> dict:
@@ -264,6 +267,7 @@ class FrameTracker:
         self.skipped = {"unconfirmed_track": 0, "box_touches_bottom_edge": 0, "box_too_small": 0}
         self.detections_total = self.frames = 0
         self.t_detect = self.t_track = 0.0
+        self.encounters: dict[tuple, list[int]] = {}   # (track, track) -> [first frame, last frame] of overlapping boxes
 
     def process(self, f: int, t: float, frame) -> list:
         """Process frame index `f` taken at `t` seconds (video or capture time); returns [(track_id, box, score, used)]."""
@@ -281,6 +285,15 @@ class FrameTracker:
         self.t_track += c - b
         self.frames += 1
         shown = []
+        near: set[str] = set()
+        live = [(f"trk-{int(tid)}", [float(v) for v in box]) for box, tid in zip(tracked.xyxy, tracked.tracker_id) if tid is not None and int(tid) >= 0]
+        if config.encounter_iou > 0:
+            for i, (ta, ba) in enumerate(live):
+                for tb, bb in live[i + 1:]:
+                    if box_iou(ba, bb) >= config.encounter_iou:
+                        near |= {ta, tb}
+                        span = self.encounters.setdefault(tuple(sorted((ta, tb), key=lambda k: int(k.split("-")[1]))), [f, f])
+                        span[1] = f
         for box, score, tid in zip(tracked.xyxy, tracked.confidence if tracked.confidence is not None else np.ones(len(tracked)), tracked.tracker_id):
             x1, y1, x2, y2 = (float(v) for v in box)
             if tid is None or int(tid) < 0:
@@ -309,7 +322,7 @@ class FrameTracker:
                 ground = ground_status(self.heights.setdefault(track_id, []), y2 - y1, config)
                 if ground is not None:
                     self.ground_counts[ground] += 1
-                self.obs.append(Observation(f, round(t, 6), track_id, round(u, 3), round(v, 3), round(min(1.0, max(0.0, float(score))), 4), None, ground))
+                self.obs.append(Observation(f, round(t, 6), track_id, round(u, 3), round(v, 3), round(min(1.0, max(0.0, float(score))), 4), None, ground, track_id in near))
         return shown
 
     def summary(self) -> dict:
@@ -319,6 +332,8 @@ class FrameTracker:
                 "ground_contact": {"rule": self.config.ground_contact_rule, **(self.ground_counts if self.config.ground_contact_rule != "none" else {})},
                 "tracks": {k: v.to_doc(self.fps) for k, v in sorted(self.tracks.items(), key=lambda kv: int(kv[0].split("-")[1]))},
                 "track_losses": sum(len(v.losses) for v in self.tracks.values()),
+                "encounters": {"iou_threshold": self.config.encounter_iou, "observations_near_other_track": sum(o.near_other_track for o in self.obs),
+                               "pairs": [{"tracks": list(k), "first_frame": v[0], "last_frame": v[1]} for k, v in sorted(self.encounters.items(), key=lambda kv: kv[1][0])]},
                 "detector_ms_per_frame": round(1000 * self.t_detect / n, 2), "tracker_ms_per_frame": round(1000 * self.t_track / n, 2)}
 
 
@@ -381,7 +396,7 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
                   "decoder_time_mismatches": len(mismatched), "decoder_time_mismatch_examples": [m for m in mismatched if m][:20],
                   "note": "a mismatch is a decoded frame whose decoder timestamp differs from frame / fps by more than max_time_mismatch_frames periods: a dropped or duplicated frame or a variable frame rate. Observations still use frame / fps; re-encode to a constant frame rate if mismatches are reported."},
         "model": model_info, "config": config.to_doc(), "versions": package_versions(),
-        **{k: track[k] for k in ("detections", "observations", "skipped", "ground_contact", "tracks", "track_losses")},
+        **{k: track[k] for k in ("detections", "observations", "skipped", "ground_contact", "tracks", "track_losses", "encounters")},
         "speed": {"mode": "offline file analysis: every frame, as fast as possible; observation times stay video-relative",
                   "source_duration_s": round(source_s, 3), "processing_duration_s": round(elapsed, 3), "wall_seconds": round(elapsed, 3),
                   "frames_per_second": round(frames / elapsed, 3) if elapsed > 0 else None, "video_seconds": round(source_s, 3),
@@ -393,6 +408,15 @@ def track_video(video_path: Path, config: VideoTrackingConfig, *, detector=None,
     }
     extractor = f"person detection {model_info['name'] if model_info else 'fixture'} + {config.tracker.implementation} (video tracking v1)"
     return ObservationFile(Video(width, height, round(fps, 6), Path(video_path).name), extractor, obs), log
+
+
+def box_iou(a, b) -> float:
+    """Intersection over union of two (x1, y1, x2, y2) boxes."""
+    w, h = min(a[2], b[2]) - max(a[0], b[0]), min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    inter = w * h
+    return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
 
 
 def ground_status(reference: list[float], box_height: float, config: VideoTrackingConfig) -> str | None:
