@@ -5,7 +5,7 @@ Sections 1-9 were checked against the code on 2026-10-25 and updated since; the
 status at a glance below was checked on 2026-10-29. Where something is a plan
 rather than working code it is marked **planned**.
 
-## 0. Product and status at a glance (2026-10-30)
+## 0. Product and status at a glance (2026-11-02)
 
 **Intended product.** Athletrix is a soccer-first coaching tool,
 designed to extend to other sports. It is meant to combine (1) wearable physiology
@@ -32,10 +32,10 @@ fictional formats, and the Zephyr reader is deliberately unimplemented.
 
 | Status | What |
 |--------|------|
-| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`, `value_basis`), SQLite persistence with retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence-, continuity- and prediction-aware distance), effort reviews, recordings with saved periods, configuration snapshots, receipt timing, portable packages (format 4) with import, local removal, coach-context records, individual-performance evidence (manual observations, versioned rubric, honest composite availability), and engine-mode dashboard cards for camera review, coach context and performance evidence. Camera adapter: observation contract v2 (ground-contact evidence), calibration, causal estimator with optional noise rules (off), ground-contact quality policy, time mapping, continuity, export and send; optional YOLOX + ByteTrack video input with offline and bounded (drop-oldest) processing and a benchmark. Wearable foundation (`wearable/`): readers, mapping, assignments, clock, normalization, export and paced replay. |
-| **Checked on synthetic or fictional data only** | Marker video, drawn-figure scene through the real detector and tracker, estimator and noise-rule comparison with development and held-out splits, bounded processing with synthetic frames and slow detectors, engine round trip, the wearable foundation with two FICTIONAL provider formats, the performance composite with a FICTIONAL rubric. None of this says anything about real players, real footage, a real camera's timing or a real wearable. |
+| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`, `value_basis`), SQLite persistence with retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence-, continuity- and prediction-aware distance), effort reviews, recordings with saved periods, configuration snapshots, receipt timing, portable packages (format 5) with import, local removal, coach-context records, individual-performance evidence (one evidence kind per area, corrections with audit history, overlap and identity rules, versioned rubric, honest composite availability), athlete baselines with recorded review decisions, an EXPERIMENTAL physiological index, roster state and match constraints, an EXPERIMENTAL rule-based substitution review (keep / consider replacement / review later / insufficient evidence) with saved, reproducible reviews, a fictional full-product demo, and engine-mode dashboard cards for camera review, coach context, performance evidence and the experimental review. Camera adapter: observation contract v3 (ground-contact evidence, close encounters with assignments that lapse until re-confirmed), calibration, causal estimator with optional noise rules (off), ground-contact quality policy, time mapping, continuity, export and send; optional YOLOX + ByteTrack video input with offline and bounded (drop-oldest) processing and a benchmark. Wearable foundation (`wearable/`): readers, mapping, assignments, clock, normalization, export and paced replay. |
+| **Checked on synthetic or fictional data only** | Marker video, drawn-figure scene through the real detector and tracker, estimator and noise-rule comparison with development and held-out splits, bounded processing with synthetic frames and slow detectors, engine round trip, the wearable foundation with two FICTIONAL provider formats, the performance composite with a FICTIONAL rubric, the physiological index and the substitution review with FICTIONAL profiles and a fictional 50-minute match. None of this says anything about real players, real footage, a real camera's timing or a real wearable. |
 | **Not yet evaluated** | Real sideline footage (no clip with verified permission), any real wearable feed (Zephyr access not yet available), clock alignment between camera and wearable, re-identification after long losses, YOLOX-Tiny accuracy on far or small players. |
-| **Planned, not implemented** | The fatigue index, automatic soccer event recognition (passes, turnovers, ball, decisions), the team's real performance rubric, the substitution model and its keep/replace/review recommendations, jersey or role recognition, multi-camera input, the Zephyr reader, any validation study. Coach context and performance evidence are inputs prepared for those models; they are not scores of their own. |
+| **Planned, not implemented** | The team's real index formula, rubric and substitution rules (only fictional profiles exist, and none ships), automatic soccer event recognition (passes, turnovers, ball, decisions), jersey or role recognition, multi-camera input, the Zephyr reader, any validation study. The index and the substitution review are software that runs with configured rules; nothing shows that they measure fatigue or improve decisions. |
 
 ## 1. Purpose and terminology
 
@@ -254,6 +254,16 @@ python scripts/wearable_tool.py replay scripts/examples/wearable/imaginaryvest_e
 
 # 3w. performance evidence: entered on the dashboard (Performance evidence card) or POST /api/v1/recordings/<id>/performance;
 #     a rubric only through PERFORMANCE_RUBRIC_PATH (none by default; the example rubric is FICTIONAL, for tests only)
+
+# 3x. the FICTIONAL full-product demo (isolated temporary database; exit 0 when all 24 checks pass)
+python scripts/product_demo.py run
+# ...or for the dashboard: build, import into a separate database, start an engine with the fictional profiles, register
+python scripts/product_demo.py build --out demo-run
+python scripts/recording_package.py import demo-run/fictional-demo-match.zip --database demo-run/demo.db
+DATABASE_PATH=demo-run/demo.db PHYSIOLOGICAL_INDEX_PROFILE_PATH=scripts/examples/review/fictional_index_profile.json \
+  SUBSTITUTION_PROFILE_PATH=scripts/examples/review/fictional_substitution_profile.json \
+  PERFORMANCE_RUBRIC_PATH=scripts/examples/performance/fictional_rubric_example.json uvicorn app.main:app --host 127.0.0.1 --port 8010
+python scripts/product_demo.py register --url http://127.0.0.1:8010
 
 # 4. frontend, from the Athletrix_Web folder (loopback only)
 python3 -m http.server 3000 --bind 127.0.0.1
@@ -642,7 +652,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (760 tests as of 2026-10-30; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
+# engine: full suite, isolated temporary databases (787 tests as of 2026-11-02; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -769,6 +779,22 @@ long losses; and, for any performance score, ball and event detection and a vali
 
 Checks run: full backend suite 760 passed; `verify_camera_pipeline.py` 16 of 16; `verify_evaluation_workflow.py` 46 of
 46; `verify_portable_workflow.py` passed; marker regression fixture unchanged; browser harness 76 of 76.
+
+## Checkpoint: experimental product loop with fictional data (2026-11-02)
+
+| Milestone | Status | How it was checked |
+|-----------|--------|--------------------|
+| 1. Individual performance structure | Complete (manual entry) | One evidence kind per area (`decision`, `positioning` added; instruction-following only for coach strategy; version-1 observations readable as legacy, unscored), corrections that supersede with audit history, overlap rule (`potential_duplicate`, `distinct_from`), uncertain identity never scored, review time, rubric schema 2 (FICTIONAL example v2), saved reviews keep the rubric text and evidence copies. Hand-worked tests |
+| 2. Baselines and experimental index | Complete as software; FICTIONAL profile only | Baselines from stopped recordings with inclusion rules, statistics, devices, versions and recorded decisions; index with transforms, directions, bounds, weights, window, coverage, staleness, device and HRV-statistic rules, no later data, late receipts excluded, retrospective baselines refused or labelled. Hand-worked tests (z = (80 - 65) / (5 x sqrt(40/39)) = 2.962, score 74.06; RMSSD -20 % = 25) |
+| 3. Substitution-review core | Complete as software; FICTIONAL profile only | Deterministic rules, hysteresis, cooldown, coach constraints, role fit, context holds without bonuses, missing bench physiology never freshness; unit tests with injected series |
+| 4. Camera uncertainty | Investigated; protective default added; root cause of the original 3 observations unresolved | The 3 observations do not reproduce (deterministic rendering; detector output varies slightly between processes); perturbed replay found a real identity switch (blue onto the referee, 1 of 20 runs at 4 px / 3 %); assignments now lapse at close encounters until re-confirmed (0 of 20). Noise suppression stays off; camera movement is not an input of any interpretation |
+| 5. Dashboard review | Complete | Experimental review card and updated performance card; browser harness 80 of 80; real page on an isolated demo engine: S1 review later, S2 consider replacement with a bench option shown as "physiology not available, not freshness", rapid athlete switching, no console errors |
+| 6. Fictional product demo | Complete (fictional) | `scripts/product_demo.py run`: 10 scenario outputs as expected, two hand-worked checks (index 91.82, composite 36.05), save and reproduce, restart, correction, configuration change, export and import (format 5), removal: 24 of 24 |
+
+Checks run: full backend suite 787 passed; `product_demo.py run` 24 of 24; `verify_camera_pipeline.py` passed (11 of 11
+checks); `verify_evaluation_workflow.py` 46 of 46; `verify_portable_workflow.py` passed; browser harness 80 of 80.
+
+Software completion is not real-world validation: no real athlete, wearable, footage or team rule was used.
 
 ## 10. Recommended next milestone
 

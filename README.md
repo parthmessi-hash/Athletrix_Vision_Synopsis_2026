@@ -1139,23 +1139,28 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 4)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 5)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
 with a safe filename `athletrix-recording-package-<id>-<UTC time>.zip`. It
-contains exactly seven members (version 1 packages, written before 2026-10-28,
-have the first four, version 2 packages the first five, version 3 the first six; all are still read):
+contains exactly ten members (version 1 packages, written before 2026-10-28,
+have the first four, version 2 packages the first five, version 3 the first six, version 4 the first seven; all are
+still read; version 5 adds `baselines.json`, `roster.json` and `reviews.json`, described in "Experimental review
+layer" below):
 
 | Member | Content |
 |--------|---------|
-| `manifest.json` | `format`, `format_version` (4), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries, performance observations) and `settings_at_export` |
+| `manifest.json` | `format`, `format_version` (5), `generated_at`, the recording reference, `members` (SHA-256 and byte count of each data member), `counts` (athletes, samples per stream, per athlete, periods, receipts, context entries, performance observations, baselines, roster entries, saved reviews) and `settings_at_export` |
 | `recording.json` | original `id`, `name`, `status` ("stopped"), `started_at` and `stopped_at` (the backend's clock while recording), `athletes` (the roster snapshot, in roster order) and `configuration_at_start` (the start-time snapshot, or null when the recording has none; see "Recording configuration snapshot") |
 | `samples.jsonl` | every recorded sample of every roster athlete in the existing `{type, sample}` interchange format, by athlete in roster order, then instant, physiological first at equal instants; payloads exactly as stored |
 | `periods.json` | saved periods: original `id`, `athlete_id`, `label`, `effort_start`, `effort_end` (as saved), `created_at` |
 | `receipts.jsonl` | receipt metadata for the samples that have it: one `{type, athlete_id, timestamp, received_at}` per line, `received_at` being when the engine where the recording was made received the sample live (see "Timing instrumentation"); kept apart so `samples.jsonl` stays in the interchange format |
 | `context.json` | the recording's coach-context entries exactly as stored, corrections included (see "Coach context"); may be an empty list |
 | `performance.json` | the recording's individual-performance evidence observations (see "Individual-performance evidence"); may be an empty list |
+| `baselines.json` | physiological baselines calculated from this recording, with their statistics and review decisions; may be an empty list |
+| `roster.json` | roster-state and match-constraint entries; may be an empty list |
+| `reviews.json` | saved reviews with their stored configuration text and evidence copies, imported unchanged apart from new ids; may be an empty list |
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
@@ -1532,10 +1537,24 @@ Structured evidence for the future four-area performance score (`app/models/perf
   strategy). Leadership, lineup chemistry and pressure-situation contributions stay in the coach-context records,
   and physiology never enters this layer, so nothing is counted twice and performance is never derived from
   fatigue, distance alone, preset ability or a clutch bonus.
-- **Event kinds (version 1)**: `pass` (execution; `attempts` and `completions` over the observation period),
-  `turnover` (execution; `possessions` and `turnovers`) and `tactical_observation` (one of the three other areas; an
-  `outcome` of followed, partially followed or not followed against an `instruction`, optionally linked to a
-  coach-context entry of the same recording through `coach_context_id`). Counts are kept, never only a percentage.
+- **Event kinds (one per area; schema 2026-11-02)**: `pass` (execution; `attempts` and `completions`), `turnover`
+  (execution; `possessions` and `turnovers`), `decision` (decision-making; `opportunities` judged against a stated
+  `criterion` as `rated_good` / `rated_acceptable` / `rated_poor`), `positioning` (movement and positioning; the same
+  counts against a positional expectation) and `tactical_observation` (following coach strategy only; `outcome`
+  against an `instruction`, optionally linked to a coach-context entry through `coach_context_id`). Pass completion is
+  never treated as decision quality, and "instruction followed" no longer stands in for decisions or positioning:
+  version-1 tactical observations filed under those areas stay readable and listed as `legacy_unscored`, and new
+  ones are refused (422). Counts are kept, never only a percentage.
+- **Corrections**: observations are never edited. A correction is a new observation with `supersedes` (the id it
+  replaces) and `correction_reason`; the superseded one is kept as audit history, cannot be deleted, and never counts
+  together with its correction. Only the latest version can be corrected (409 otherwise).
+- **Overlaps (inclusion rule)**: two counted observations of the same athlete and kind with overlapping periods are
+  both left out and reported as `potential_duplicate`, unless one lists the other in `distinct_from` or supersedes it.
+- **Identity**: `identity` `confirmed` or `uncertain` (omitted = not stated). Uncertain-identity observations are listed
+  and never scored. Every observation in the review carries a `status` (`counted`, `unable_to_assess`,
+  `no_opportunity`, `superseded`, `outside_review_time`, `legacy_unscored`, `identity_uncertain`, `potential_duplicate`).
+- **Review time**: `GET .../performance-review?at=...&window_s=...` counts only observations whose period ended by `at`
+  (and started within the window). Observations are entered after the fact; the response counts those entered later.
 - **States**: `assessed`, `unable_to_assess` (reason: `not_visible`, `off_camera`, `occluded`, `video_quality`,
   `ambiguous` or `other`) and `no_opportunity`. None of these is ever a zero.
 - **Sources**: `human_annotation`, optionally with `reference_label: true` for annotations meant to evaluate a future
@@ -1543,17 +1562,85 @@ Structured evidence for the future four-area performance score (`app/models/perf
   event recognition. Each observation also stores the athlete, role, observation period, annotator, frame references
   (`video`, `frame`, `video_time_s`) and event instants.
 - **Rubric**: a versioned JSON file named by `PERFORMANCE_RUBRIC_PATH` (`PerformanceRubric`). It sets area weights and,
-  per measure (`pass_completion`, `possession_retention`, `instruction_followed`), the weight, the floor and ceiling
-  rates mapped to 0 and 100, the credit for partially followed instructions, and the minimum opportunities. **No
+  per measure (`pass_completion`, `possession_retention`, `decision_quality`, `positioning_quality`,
+  `instruction_followed`; `schema_version: 2`, version-1 rubrics are refused), the weight, the floor and ceiling
+  rates mapped to 0 and 100, the credit for acceptable judgements and partially followed instructions, and the
+  minimum opportunities. **No
   rubric ships and none is configured by default**, so `GET .../athletes/{athlete}/performance-review` returns the
   evidence per area and `composite.available: false` with the reason. With a rubric, a measure below its minimum
   opportunities is unavailable, so is any area with an unavailable measure, and so is the composite unless all four
   areas are available. `scripts/examples/performance/fictional_rubric_example.json` is a **fictional** rubric used by
   the tests (`fictional: true` is echoed in every result); it is not the team's rubric.
-- **Preserved**: SQLite table `recording_performance`; package format 4 (`performance.json`; formats 1 to 3 are still
-  read) with new ids on import and `coach_context_id` re-pointed to the imported context entry; removed with its
+- **Preserved**: SQLite table `recording_performance`; package format 4 and later (`performance.json`) with new ids on
+  import and `coach_context_id`, `supersedes` and `distinct_from` re-pointed to the imported ids; removed with its
   recording or athlete by `scripts/local_data.py`; one observation can be deleted with
   `DELETE .../athletes/{athlete}/performance/{id}`.
+
+## Experimental review layer: baselines, physiological index, substitution review (2026-11-02)
+
+**Experimental decision support, demonstrated only with FICTIONAL data and profiles.** Nothing here is validated, no
+real-athlete profile exists, and the engine ships no profile: each calculation needs an explicitly configured file and
+otherwise says it is unavailable. The coach decides.
+
+- **Baselines** (`app/models/baseline.py`, `POST/GET /api/v1/athletes/{id}/baselines`): calculated once from a
+  **stopped** recording's samples in stated time ranges, under a stated condition (`seated_rest`, `warm_up`, ...), with
+  inclusion rules (minimum signal quality, source, minimum samples). Per signal: included count, exclusions by reason,
+  mean, sample SD, median, min, max, devices and sources; insufficient samples and zero variance are marked. Version
+  numbers increase per athlete. Review status `pending_review` / `accepted` / `rejected` is a person's decision
+  (`POST .../baselines/{id}/decision`), every decision is kept, and acceptance is **not** a scientific validation.
+- **Experimental physiological index** (`app/core/physiology_index.py`; profile `PHYSIOLOGICAL_INDEX_PROFILE_PATH`):
+  0-100 from the window mean of each configured signal against the athlete's own baseline (`z_score` or
+  `percent_change`, a direction, bounds, weights), with rolling window, input coverage, staleness and weight-coverage
+  rules, per-signal contributions and unavailability reasons. Only samples timestamped and received by the review time
+  are used; RMSSD and SDNN are never substituted for each other; a device that did not contribute to the baseline is
+  excluded when the profile requires the same device; a baseline using later data is refused or, if the profile allows
+  it, labelled `retrospective`. `GET /api/v1/recordings/{rec}/athletes/{id}/physiological-index?at=...` and
+  `.../physiological-index/history?step_s=60`. It does not confirm fatigue, injury, safety or readiness.
+- **Roster state** (`app/models/roster.py`, `POST/GET /api/v1/recordings/{rec}/roster`, `.../roster/effective?at=`):
+  per athlete on_field / bench / unavailable, current role and the roles the coach says they can play (exact text);
+  team entries hold match constraints (substitutions remaining or unknown, no substitution before, keep on the field,
+  do not bring on). Same correction rule as coach context.
+- **Substitution review** (`app/core/substitution.py`; profile `SUBSTITUTION_PROFILE_PATH`;
+  `GET /api/v1/recordings/{rec}/athletes/{id}/substitution-review?at=...`): keep / consider_replacement /
+  review_later / insufficient_evidence, from independent physiology and performance histories (hysteresis with
+  persistence counts, so one noisy reading does not flip the output), role fit, roster and constraints, with a
+  cooldown against contradictory flips. An elevated index alone never recommends a replacement; missing bench
+  physiology is reported as unavailable, never as freshness; leadership, pressure-situation and partnership evidence
+  is shown as a tradeoff or a reason to review later, never as a bonus. Camera-derived movement is not an input.
+  The module docstring lists every rule in order.
+- **Saved reviews** (`POST /api/v1/recordings/{rec}/athletes/{id}/reviews` with `kind` performance,
+  physiological_index or substitution; `GET .../reviews`; `GET .../reviews/{id}/reproduce`): the result is stored
+  with the exact configuration text, copies of the evidence used and a SHA-256 of the samples read. Reproducing
+  re-runs from those copies, never from the current settings, and reports whether samples or configuration changed.
+- **Packages**: format 5 adds `baselines.json`, `roster.json` and `reviews.json` (formats 1 to 4 still read).
+  Removal (`scripts/local_data.py`) covers baselines, roster entries and saved reviews; removing an athlete also
+  removes other athletes' saved substitution reviews in shared recordings, because they embed copies of that athlete's
+  evidence.
+- **FICTIONAL examples**: `scripts/examples/review/fictional_index_profile.json`,
+  `scripts/examples/review/fictional_substitution_profile.json` and the rubric
+  `scripts/examples/performance/fictional_rubric_example.json`.
+
+### Fictional full-product demo (`scripts/product_demo.py`)
+
+```bash
+python scripts/product_demo.py run                    # isolated temporary database; 10 scenario outputs and 24 checks; exit 0 when all pass
+python scripts/product_demo.py build --out demo-run   # the demo package (format 5) plus the commands below
+python scripts/recording_package.py import demo-run/fictional-demo-match.zip --database demo-run/demo.db
+DATABASE_PATH=demo-run/demo.db PHYSIOLOGICAL_INDEX_PROFILE_PATH=scripts/examples/review/fictional_index_profile.json \
+  SUBSTITUTION_PROFILE_PATH=scripts/examples/review/fictional_substitution_profile.json \
+  PERFORMANCE_RUBRIC_PATH=scripts/examples/performance/fictional_rubric_example.json uvicorn app.main:app --port 8010
+python scripts/product_demo.py register --url http://127.0.0.1:8010   # the fictional athletes, for the dashboard's list
+```
+
+Physiology and performance are generated from separate seeded streams and separate scenario curves, so their
+relationship in the demo says nothing about any real relationship. Scenarios: elevated index with maintained
+performance (review later), sustained decline with adequate physiology (consider replacement), the same decline with
+recorded leadership and a partnership (review later), a formation change asking for a role the player cannot play
+(consider replacement), missing and stale information (insufficient evidence), no goalkeeper on the bench (review
+later), recovery (review later at 23:00, keep at 40:00), uncertain player identity (insufficient evidence) and a
+single noisy reading (keep). `run` also checks two hand-worked calculations written independently of the engine's
+code, saving and reproducing every review, a restart, a correction, a configuration change, export and import into a
+second database, and removal of an athlete.
 
 ## Recording configuration snapshot (`configuration_at_start`)
 
@@ -2116,6 +2203,28 @@ YOLOX-Tiny (`scripts/examples/camera/video_tracking_config_tiny.json`; fetched e
 here; its effect on far or small players was not evaluated beyond observation counts (2,296 versus 2,345 for
 YOLOX-S on this scene), and every-3rd-frame sampling produced one extra track fragment. Real 1080p footage, real
 cameras and other machines will differ; run the benchmark on the sideline computer before relying on any setting.
+
+### 12. Identity at close encounters (2026-11-02)
+
+The three "identity mismatch" observations reported on 2026-10-30 for white's track do **not** reproduce: the drawn
+scene renders bit-identically, and neither that commit nor the current code shows them. They came from uncommitted
+work in progress, and their individual observations were not kept, so they cannot be classified now. The real
+detector's output itself varies slightly between processes on this Mac (2,357 to 2,360 detections, 6 or 7 tracks in
+six runs; identical within one process), so results near a decision boundary can change from run to run.
+
+What the investigation did find: replaying the recorded detections with small seeded perturbations (box jitter of
+4 px and 3 % dropped detections), 1 of 20 runs switched blue's track onto the unassigned referee figure after they
+overlapped (319 observations labelled with the wrong athlete), and the ground-contact rule cannot see this because the
+box is a complete, consistent person. The identity audit now separates `ambiguous_nearest_target`, `during_encounter`,
+`identity_switch` and `localization_error`.
+
+Conservative handling, now the default: the tracker marks observations whose box overlaps another tracked person's
+box (`near_other_track`, observation format 3, `encounter_iou` 0.05), and an operator's assignment of a track lapses at
+its first encounter after the assignment starts. The track stays unassigned (no samples) until a new assignment
+starting after the encounter confirms who it is. In the same replay, this gave 0 switched observations in 20 runs, for
+about 2 % fewer assigned observations. `camera_to_samples.py --trust-tracker-through-encounters` keeps the old
+behaviour. This is shown on drawn figures only; real players overlap far more often, so on real footage the
+re-confirmation workload, and whether IoU is the right trigger, are open questions.
 
 ### Remaining requirements for real player tracking
 
