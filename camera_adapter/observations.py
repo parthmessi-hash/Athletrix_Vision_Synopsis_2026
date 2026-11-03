@@ -222,7 +222,7 @@ def load_assignment_file(path: Path) -> AssignmentFile:
     version = doc.get("format_version") if isinstance(doc, dict) else None
     if not isinstance(doc, dict) or doc.get("format") != ASSIGN_FORMAT or version not in (1, 2) or not isinstance(doc.get("assignments"), list):
         raise ObservationError([f"{path}: expected format {ASSIGN_FORMAT!r} version 1 or 2 with an assignments list"])
-    top = {"format", "format_version", "assignments"} | ({"video", "operator_work"} if version == 2 else set())
+    top = {"format", "format_version", "assignments", "instructions", "tracks_to_review"} | ({"video", "operator_work"} if version == 2 else set())   # the template from camera_track_video.py carries the two informational keys
     errors = [f"unexpected top-level keys: {', '.join(sorted(set(doc) - top))}"] if set(doc) - top else []
     keys = ASSIGN_KEYS | ({"identity", "confirmed_by"} if version == 2 else set())
     out = []
