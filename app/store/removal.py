@@ -1,11 +1,14 @@
 """Inventory and scoped logical removal of stored research data in one local Athletrix database (see scripts/local_data.py).
 
 Two scopes:
-  recording  one recording: its row, roster snapshot (recording_athletes), recorded samples, saved periods, start-time
+  recording  one recording: its row, roster snapshot (recording_athletes), recorded samples, saved periods, coach context,
+             performance evidence, roster state, saved reviews, the baselines calculated from it, start-time
              configuration snapshot and import provenance. Rolling history, the registry, device status and every
              other recording are untouched.
   athlete    one athlete id across the database: registry row, rolling samples, and in every recording the membership
-             row, recorded samples and saved periods. A recording shared with other athletes stays valid for them (its
+             row, recorded samples, saved periods, context, performance evidence, roster state and saved reviews, plus
+             the athlete's baselines; other athletes' saved substitution reviews in a shared recording embed copies of
+             every roster athlete's evidence and are removed too. A recording shared with other athletes stays valid for them (its
              row, snapshot and the others' data are kept; import provenance loses only the removed period ids). A
              recording whose roster would become empty is removed entirely, because it would hold nothing.
              Device-status rows are keyed by device id, not by athlete, and a device can be reused by another athlete,
@@ -41,7 +44,9 @@ from app.core.db_lease import Lease, LeaseUnavailable
 from app.store.recordings import TABLES as RECORDING_SAMPLE_TABLES
 
 ROLLING_SAMPLE_TABLES = ("physiological_samples", "tracking_samples")
-RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_configurations", "recording_imports")
+RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster",
+                    "recording_reviews", "recording_configurations", "recording_imports")
+PER_ATHLETE_RECORDING_TABLES = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster", "recording_reviews")
 
 CANNOT_REMOVE = [
     "files exported earlier (JSON Lines, CSV, review JSON) and portable packages already copied anywhere, including other engines' databases that imported them",
@@ -126,7 +131,7 @@ def inventory(c: sqlite3.Connection) -> dict:
             recordings.append({"id": r["id"], "name": r["name"], "status": "stopped" if r["stopped_at"] else "active", "started_at": r["started_at"], "stopped_at": r["stopped_at"], "roster": roster,
                                **{t: count(c, t, "recording_id = ?", (r["id"],)) for t in RECORDING_SCOPED if t in have and t != "recording_athletes"}})
     ids: set[str] = {r[0] for r in c.execute("SELECT id FROM athletes")} if "athletes" in have else set()
-    per_athlete_tables = (*ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance")
+    per_athlete_tables = (*ROLLING_SAMPLE_TABLES, *PER_ATHLETE_RECORDING_TABLES, "athlete_baselines")
     for t in per_athlete_tables:
         if t in have:
             ids |= {r[0] for r in c.execute(f"SELECT DISTINCT athlete_id FROM {t}") if r[0] is not None}   # team-level context has none
@@ -152,6 +157,7 @@ def _whole_recording(plan: Plan, c, have: set[str], recording_id: str, why: str)
     _delete(plan, c, have, "recordings", "id = ?", (recording_id,), f"recording {recording_id} ({why})")
     for t in RECORDING_SCOPED:
         _delete(plan, c, have, t, "recording_id = ?", (recording_id,), f"rows of recording {recording_id}")
+    _delete(plan, c, have, "athlete_baselines", "source_recording_id = ?", (recording_id,), f"baselines calculated from recording {recording_id}")
 
 
 def plan_recording(c: sqlite3.Connection, recording_id: str) -> Plan:
@@ -185,7 +191,7 @@ def _device_ids(c, have: set[str], where: str, params: tuple) -> set[str]:
 def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tuple[str, ...] = ()) -> Plan:
     plan = Plan("athlete", athlete_id)
     have = tables(c)
-    tables_with_athlete = [t for t in ("athletes", *ROLLING_SAMPLE_TABLES, "recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance") if t in have]
+    tables_with_athlete = [t for t in ("athletes", *ROLLING_SAMPLE_TABLES, *PER_ATHLETE_RECORDING_TABLES, "athlete_baselines") if t in have]
     present = any(count(c, t, "id = ?" if t == "athletes" else "athlete_id = ?", (athlete_id,)) for t in tables_with_athlete)
     if not present:
         if device_status_ids:
@@ -195,9 +201,10 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
     _delete(plan, c, have, "athletes", "id = ?", (athlete_id,), "registry entry")
     for t in ROLLING_SAMPLE_TABLES:
         _delete(plan, c, have, t, "athlete_id = ?", (athlete_id,), "rolling samples")
+    _delete(plan, c, have, "athlete_baselines", "athlete_id = ?", (athlete_id,), "physiological baselines")
 
     rec_ids: set[str] = set()
-    for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance"):
+    for t in PER_ATHLETE_RECORDING_TABLES:
         if t in have:
             rec_ids |= {r[0] for r in c.execute(f"SELECT DISTINCT recording_id FROM {t} WHERE athlete_id = ?", (athlete_id,))}
     for rec_id in sorted(rec_ids):
@@ -209,8 +216,22 @@ def plan_athlete(c: sqlite3.Connection, athlete_id: str, device_status_ids: tupl
         if not others:
             _whole_recording(plan, c, have, rec_id, f"its only roster member was {athlete_id}")
             continue
-        for t in ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance"):
+        for t in PER_ATHLETE_RECORDING_TABLES:
             _delete(plan, c, have, t, "recording_id = ? AND athlete_id = ?", (rec_id, athlete_id), f"in shared recording {rec_id}")
+        # saved substitution reviews of other athletes embed copies of every roster athlete's evidence: removed with it
+        _delete(plan, c, have, "recording_reviews", "recording_id = ? AND athlete_id != ? AND kind = 'substitution'", (rec_id, athlete_id),
+                f"saved substitution reviews of other athletes in {rec_id} (they embed copies of {athlete_id}'s evidence)")
+        if "recording_roster" in have:   # team entries naming the athlete in a match constraint: drop that item, keep the rest
+            for row in c.execute("SELECT id, payload FROM recording_roster WHERE recording_id = ? AND athlete_id IS NULL", (rec_id,)).fetchall():
+                entry = json.loads(row["payload"])
+                changed = False
+                for key in ("keep_on_field", "do_not_bring_on"):
+                    kept_items = [i for i in entry.get(key, []) if i.get("athlete_id") != athlete_id]
+                    if len(kept_items) != len(entry.get(key, [])):
+                        entry[key], changed = kept_items, True
+                if changed:
+                    plan.updates.append({"table": "recording_roster", "recording_id": rec_id, "id": row["id"], "payload": json.dumps(entry, separators=(",", ":")),
+                                         "detail": f"drop {athlete_id} from the match constraints of roster entry {row['id']} of recording {rec_id}"})
         if "recording_context" in have:   # other entries naming the athlete as a partner: drop that partnership, keep the rest
             for row in c.execute("SELECT id, payload FROM recording_context WHERE recording_id = ? AND (athlete_id IS NULL OR athlete_id != ?)", (rec_id, athlete_id)).fetchall():
                 entry = json.loads(row["payload"])
@@ -293,8 +314,8 @@ def _execute_locked(path: Path, make_plan, checkpoint) -> Plan:
                 if checkpoint:
                     checkpoint(d["table"])
             for u in plan.updates:
-                if u["table"] == "recording_context":
-                    c.execute("UPDATE recording_context SET payload = ? WHERE id = ?", (u["payload"], u["id"]))
+                if u["table"] in ("recording_context", "recording_roster"):
+                    c.execute(f"UPDATE {u['table']} SET payload = ? WHERE id = ?", (u["payload"], u["id"]))
                 else:
                     c.execute("UPDATE recording_imports SET period_id_map = ? WHERE recording_id = ?", (json.dumps(u["period_id_map"], sort_keys=True), u["recording_id"]))
             for d in plan.deletes:      # verify inside the transaction: everything planned is gone

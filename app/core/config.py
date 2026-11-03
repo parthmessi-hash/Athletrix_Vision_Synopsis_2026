@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # Optional path of a versioned individual-performance rubric (app/models/performance.py PerformanceRubric). Unset
     # means no rubric is configured: the four-area composite is then unavailable. The engine ships no rubric of its own.
     performance_rubric_path: str | None = None
+    # Optional paths of the experimental physiological index profile and the experimental substitution-review profile
+    # (app/models/baseline.py IndexProfile, app/models/substitution.py SubstitutionProfile). Unset means unavailable; the
+    # engine ships neither, and no real-athlete profile exists. FICTIONAL examples live in scripts/examples/review/.
+    physiological_index_profile_path: str | None = None
+    substitution_profile_path: str | None = None
 
     @field_validator("code_revision", mode="before")
     @classmethod

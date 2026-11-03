@@ -1,6 +1,6 @@
 """Portable recording packages: a versioned ZIP that carries one stopped recording to another local engine.
 
-FORMAT (format "athletrix-recording-package", format_version 4; versions 1 to 3 are still read)
+FORMAT (format "athletrix-recording-package", format_version 5; versions 1 to 4 are still read)
   A ZIP archive (deflate) with exactly these members, all UTF-8:
     manifest.json   format, format_version, generated_at, the recording reference, member list with SHA-256 and byte
                     counts, record counts, and `settings_at_export` (the engine settings in force when the package was
@@ -27,6 +27,13 @@ FORMAT (format "athletrix-recording-package", format_version 4; versions 1 to 3 
                     (app/models/performance.py) exactly as stored; imported with new ids, origin "source_engine", the
                     original id as source_entry_id and coach_context_id re-pointed to the imported context entry.
                     Corrections (`supersedes`) and `distinct_from` statements are re-pointed to the imported ids.
+    baselines.json  (version 5 only, may be empty) the physiological baselines whose source is this recording
+                    (app/models/baseline.py), with their statistics and review decisions exactly as stored; imported with
+                    new ids, the new recording as source, origin "source_engine" and a version number of the importing engine.
+    roster.json     (version 5 only, may be empty) roster-state and match-constraint entries (app/models/roster.py).
+    reviews.json    (version 5 only, may be empty) saved reviews (app/models/review.py) with their stored configuration
+                    text and evidence copies. Imported unchanged apart from new ids and recording id: the evidence copies keep
+                    the ids they had at the source engine, and nothing is recalculated with the importing engine's settings.
   The manifest's checksums and counts let an importer detect accidental corruption; they are not a signature, and a
   package proves nothing about the accuracy of the measurements it carries. It is not a database backup: no registry,
   rolling history, device status, other recordings, configuration files, credentials, paths or logs are included.
@@ -59,18 +66,23 @@ from app.core.export import export_records
 from app.db import to_utc_iso
 from app.models import Athlete, PhysiologicalSample, TrackingSample
 from app.models.configuration import RecordingConfiguration
+from app.models.baseline import Baseline
 from app.models.context import ContextEntry
 from app.models.performance import PerformanceObservation
+from app.models.review import SavedReview
+from app.models.roster import RosterEntry
 
 FORMAT = "athletrix-recording-package"
-FORMAT_VERSION = 4
-SUPPORTED_VERSIONS = (1, 2, 3, 4)
+FORMAT_VERSION = 5
+SUPPORTED_VERSIONS = (1, 2, 3, 4, 5)
 MEMBERS = ("manifest.json", "recording.json", "samples.jsonl", "periods.json")      # every version
 DATA_MEMBERS = ("recording.json", "samples.jsonl", "periods.json")
 V2_MEMBERS = ("receipts.jsonl",)                                                   # version 2 adds these
 V3_MEMBERS = ("context.json",)                                                     # version 3 adds these
 V4_MEMBERS = ("performance.json",)                                                 # version 4 adds these
-ALL_MEMBERS = MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS
+V5_MEMBERS = ("baselines.json", "roster.json", "reviews.json")                     # version 5 adds these
+ALL_MEMBERS = MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS + V5_MEMBERS
+V5_MODELS = {"baselines.json": Baseline, "roster.json": RosterEntry, "reviews.json": SavedReview}
 MODELS = {"physiological": PhysiologicalSample, "tracking": TrackingSample}
 
 # Bounds on what a reader will process (accidental or hostile oversized archives are refused, never extracted).
@@ -92,7 +104,8 @@ def sha256(data: bytes) -> str:
 
 def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[str, dict[str, list]], periods: Sequence, settings: dict, generated_at: datetime,
                   configuration: RecordingConfiguration | None = None, receipts: dict[str, dict[str, list]] | None = None,
-                  context: Sequence[ContextEntry] = (), performance: Sequence[PerformanceObservation] = ()) -> bytes:
+                  context: Sequence[ContextEntry] = (), performance: Sequence[PerformanceObservation] = (), baselines: Sequence[Baseline] = (),
+                  roster: Sequence[RosterEntry] = (), reviews: Sequence[SavedReview] = ()) -> bytes:
     """The ZIP bytes for one stopped recording. `samples[athlete_id][stream]` are the stored models, oldest first;
     `receipts[athlete_id][stream]` the matching receipt metadata (dict or None) in the same order."""
     rec_doc = {**recording, "athletes": [a.model_dump(mode="json") for a in athletes],
@@ -122,6 +135,9 @@ def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[st
         "receipts.jsonl": "".join(json.dumps(r) + "\n" for r in receipt_lines).encode("utf-8"),
         "context.json": json.dumps([e.model_dump(mode="json") for e in context], ensure_ascii=False, indent=2).encode("utf-8"),
         "performance.json": json.dumps([o.model_dump(mode="json") for o in performance], ensure_ascii=False, indent=2).encode("utf-8"),
+        "baselines.json": json.dumps([b.model_dump(mode="json") for b in baselines], ensure_ascii=False, indent=2).encode("utf-8"),
+        "roster.json": json.dumps([e.model_dump(mode="json") for e in roster], ensure_ascii=False, indent=2).encode("utf-8"),
+        "reviews.json": json.dumps([r.model_dump(mode="json") for r in reviews], ensure_ascii=False, indent=2).encode("utf-8"),
     }
     manifest = {
         "format": FORMAT,
@@ -130,14 +146,15 @@ def build_package(recording: dict, athletes: Sequence[Athlete], samples: dict[st
         "description": "A portable copy of one stopped Athletrix recording: roster snapshot, every recorded sample and the saved effort periods. "
                        "Checksums detect accidental corruption only. Not a database backup and not evidence that the measurements are accurate.",
         "recording": {"id": recording["id"], "name": recording["name"], "started_at": recording["started_at"], "stopped_at": recording["stopped_at"]},
-        "counts": {"athletes": len(athletes), "physiological_samples": counts["physiological"], "tracking_samples": counts["tracking"], "samples_by_athlete": per_athlete, "periods": len(periods_doc), "receipts": len(receipt_lines), "context_entries": len(context), "performance_observations": len(performance)},
+        "counts": {"athletes": len(athletes), "physiological_samples": counts["physiological"], "tracking_samples": counts["tracking"], "samples_by_athlete": per_athlete, "periods": len(periods_doc), "receipts": len(receipt_lines), "context_entries": len(context), "performance_observations": len(performance),
+                   "baselines": len(baselines), "roster_entries": len(roster), "saved_reviews": len(reviews)},
         "members": {name: {"sha256": sha256(blob), "bytes": len(blob)} for name, blob in data.items()},
         "settings_at_export": {**settings, "note": "Engine settings in force when this package was written. They are not necessarily the settings in force while the data was recorded or reviewed, and an importing engine applies its own settings."},
     }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
-        for name in DATA_MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS:
+        for name in DATA_MEMBERS + V2_MEMBERS + V3_MEMBERS + V4_MEMBERS + V5_MEMBERS:
             z.writestr(name, data[name])
     return buf.getvalue()
 
@@ -164,6 +181,9 @@ class Package:
     receipts: dict[tuple, str] = field(default_factory=dict)            # (athlete_id, stream, UTC instant text) -> received_at as in the file
     context: list[ContextEntry] = field(default_factory=list)           # coach-context entries as stored at the source (version 3)
     performance: list[PerformanceObservation] = field(default_factory=list)   # performance evidence as stored at the source (version 4)
+    baselines: list[Baseline] = field(default_factory=list)                   # version 5
+    roster: list[RosterEntry] = field(default_factory=list)                   # version 5
+    reviews: list[SavedReview] = field(default_factory=list)                  # version 5
 
     def summary(self) -> dict:
         def bounds(models):
@@ -180,7 +200,8 @@ class Package:
                           "tracking": {"count": len(self.samples[a.id]["tracking"]), "bounds": bounds(self.samples[a.id]["tracking"])},
                           "periods": sum(1 for p in self.periods if p["athlete_id"] == a.id)} for a in self.athletes],
             "counts": {"physiological_samples": sum(len(v["physiological"]) for v in self.samples.values()), "tracking_samples": sum(len(v["tracking"]) for v in self.samples.values()), "periods": len(self.periods),
-                       "receipts": len(self.receipts), "context_entries": len(self.context), "performance_observations": len(self.performance)},
+                       "receipts": len(self.receipts), "context_entries": len(self.context), "performance_observations": len(self.performance),
+                       "baselines": len(self.baselines), "roster_entries": len(self.roster), "saved_reviews": len(self.reviews)},
             "settings_at_export": self.manifest.get("settings_at_export"),
             "configuration_at_start": {"status": "captured", "snapshot": self.configuration.model_dump(mode="json")} if self.configuration is not None
                                       else {"status": "unavailable", "snapshot": None},
@@ -263,13 +284,18 @@ def read_package(data: bytes) -> Package:
         errors.append("missing required members: performance.json (format version 4)")
     if version < 4 and "performance.json" in blobs:
         errors.append(f"performance.json is not part of format version {version}")
+    for name in V5_MEMBERS:
+        if version >= 5 and name not in blobs:
+            errors.append(f"missing required members: {name} (format version 5)")
+        if version < 5 and name in blobs:
+            errors.append(f"{name} is not part of format version {version}")
     if errors:
         fail()
     members = manifest.get("members")
     if not isinstance(members, dict):
         errors.append("manifest.json: members are missing")
         fail()
-    for name in DATA_MEMBERS + (V2_MEMBERS if version >= 2 else ()) + (V3_MEMBERS if version >= 3 else ()) + (V4_MEMBERS if version >= 4 else ()):
+    for name in DATA_MEMBERS + (V2_MEMBERS if version >= 2 else ()) + (V3_MEMBERS if version >= 3 else ()) + (V4_MEMBERS if version >= 4 else ()) + (V5_MEMBERS if version >= 5 else ()):
         m = members.get(name)
         if not isinstance(m, dict) or m.get("sha256") != sha256(blobs[name]) or m.get("bytes") != len(blobs[name]):
             errors.append(f"{name}: checksum or size does not match the manifest (the file was changed or damaged)")
@@ -511,10 +537,41 @@ def read_package(data: bytes) -> Package:
             performance.append(obs)
         if not errors and counts.get("performance_observations") != len(performance):
             errors.append(f"performance observation count does not match the manifest (manifest {counts.get('performance_observations')}, file {len(performance)})")
+    v5: dict[str, list] = {name: [] for name in V5_MEMBERS}
+    if version >= 5 and not errors:
+        count_keys = {"baselines.json": "baselines", "roster.json": "roster_entries", "reviews.json": "saved_reviews"}
+        for name, model in V5_MODELS.items():
+            try:
+                raw = json.loads(blobs[name].decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                errors.append(f"{name} is not valid JSON ({exc})")
+                continue
+            if not isinstance(raw, list):
+                errors.append(f"{name} must be a list")
+                continue
+            ids: set[str] = set()
+            for n, item in enumerate(raw, start=1):
+                try:
+                    m = model.model_validate(item)
+                except ValidationError as exc:
+                    first = exc.errors()[0]
+                    errors.append(f"{name} item {n}: invalid ({'.'.join(map(str, first['loc']))}: {first['msg']})")
+                    continue
+                own = m.source_recording_id if name == "baselines.json" else m.recording_id
+                named = [m.athlete_id] if getattr(m, "athlete_id", None) else []
+                if name == "roster.json":
+                    named += [x.athlete_id for x in m.keep_on_field + m.do_not_bring_on]
+                if own != rec["id"] or m.id in ids or any(a not in roster for a in named):
+                    errors.append(f"{name} item {n}: another recording, an athlete outside the roster, or a repeated id")
+                    continue
+                ids.add(m.id)
+                v5[name].append(m)
+            if not errors and counts.get(count_keys[name]) != len(v5[name]):
+                errors.append(f"{name}: count does not match the manifest (manifest {counts.get(count_keys[name])}, file {len(v5[name])})")
     if errors:
         fail()
     return Package(manifest=manifest, recording=rec, athletes=athletes, samples=samples, periods=periods, package_sha256=sha256(data), configuration=configuration, receipts=receipts,
-                   context=context, performance=performance)
+                   context=context, performance=performance, baselines=v5["baselines.json"], roster=v5["roster.json"], reviews=v5["reviews.json"])
 
 
 def latest_sample_after_stop(pkg: Package) -> timedelta | None:

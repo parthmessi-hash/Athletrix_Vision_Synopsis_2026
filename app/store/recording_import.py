@@ -6,7 +6,8 @@ id), its roster snapshot, the start-time configuration snapshot when the package
 imported from a package without it have none), every saved period (new ids, exact bounds,
 original labels and creation times), every coach-context entry (new id, origin "source_engine", original id kept as
 source_entry_id, content unchanged), every performance observation (likewise, with its coach_context_id re-pointed to
-the imported context entry) and a `recording_imports` row mapping the new ids to the original ones. Any failure
+the imported context entry; corrections re-pointed likewise), the recording's baselines, roster-state entries and
+saved reviews (new ids, origin "source_engine"; a saved review's stored inputs are kept as they were) and a `recording_imports` row mapping the new ids to the original ones. Any failure
 rolls the whole import back. The athlete registry, rolling history, device status and any active recording are never
 touched, and nothing existing is overwritten or merged.
 
@@ -24,8 +25,11 @@ from datetime import datetime
 
 from app.core.recording_package import Package, iso
 from app.db import Database, to_utc_iso
+from app.store import baselines as baseline_store
 from app.store import context as context_store
 from app.store import performance as performance_store
+from app.store import reviews as review_store
+from app.store import roster as roster_store
 from app.store.periods import new_period_id
 from app.store.recordings import TABLES, RecordingStore, new_recording_id
 
@@ -113,6 +117,24 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
                                                              "distinct_from": [obs_map[i] for i in o.distinct_from if i in obs_map]}))
         if checkpoint:
             checkpoint("performance")
+        for b in pkg.baselines:
+            bid = baseline_store.new_baseline_id(now)
+            while c.execute("SELECT 1 FROM athlete_baselines WHERE id = ?", (bid,)).fetchone():
+                bid = baseline_store.new_baseline_id(now)
+            baseline_store.insert(c, b.model_copy(update={"id": bid, "source_recording_id": new_id, "version": baseline_store.next_version(c, b.athlete_id),
+                                                          "origin": "source_engine", "source_entry_id": b.source_entry_id or b.id}))
+        for e in pkg.roster:
+            rid = roster_store.new_roster_id(now)
+            while c.execute("SELECT 1 FROM recording_roster WHERE id = ?", (rid,)).fetchone():
+                rid = roster_store.new_roster_id(now)
+            roster_store.insert(c, e.model_copy(update={"id": rid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": e.source_entry_id or e.id}))
+        for r in pkg.reviews:   # stored inputs and results are kept exactly as saved at the source
+            vid = review_store.new_review_id(now)
+            while c.execute("SELECT 1 FROM recording_reviews WHERE id = ?", (vid,)).fetchone():
+                vid = review_store.new_review_id(now)
+            review_store.insert(c, r.model_copy(update={"id": vid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": r.source_entry_id or r.id}))
+        if checkpoint:
+            checkpoint("review")
         c.execute("INSERT INTO recording_imports (recording_id, source_recording_id, package_sha256, package_format, package_generated_at, imported_at, period_id_map) VALUES (?, ?, ?, ?, ?, ?, ?)",
                   (new_id, rec["id"], pkg.package_sha256, f"{pkg.manifest['format']}/{pkg.manifest['format_version']}", pkg.manifest["generated_at"], to_utc_iso(now), json.dumps(id_map, sort_keys=True)))
         if checkpoint:

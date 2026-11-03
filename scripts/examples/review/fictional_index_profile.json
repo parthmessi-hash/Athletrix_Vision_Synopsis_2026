@@ -1,0 +1,51 @@
+{
+  "format": "athletrix-physiological-index-profile",
+  "schema_version": 1,
+  "version": "fictional-index-1",
+  "fictional": true,
+  "note": "FICTIONAL values made up to exercise the calculation and the demo. Not the team's formula, not validated, and never to be used on a real athlete. The index does not confirm fatigue, injury, safety or readiness.",
+  "window_seconds": 60,
+  "expected_interval_seconds": 1,
+  "min_input_coverage": 0.5,
+  "staleness_seconds": 20,
+  "min_weight_coverage": 0.6,
+  "baseline": {
+    "require_status": "accepted",
+    "conditions": [
+      "seated_rest",
+      "standing_rest"
+    ],
+    "min_samples": 30,
+    "same_device_required": true,
+    "allow_retrospective": false
+  },
+  "signals": [
+    {
+      "signal": "heart_rate_bpm",
+      "transform": "z_score",
+      "direction": "higher_is_more_strain",
+      "zero_at": 18,
+      "hundred_at": 36,
+      "weight": 2,
+      "min_samples_in_window": 20
+    },
+    {
+      "signal": "breathing_rate_bpm",
+      "transform": "z_score",
+      "direction": "higher_is_more_strain",
+      "zero_at": 8,
+      "hundred_at": 22,
+      "weight": 1,
+      "min_samples_in_window": 20
+    },
+    {
+      "signal": "hrv_rmssd_ms",
+      "transform": "percent_change",
+      "direction": "lower_is_more_strain",
+      "zero_at": 40,
+      "hundred_at": 90,
+      "weight": 1,
+      "min_samples_in_window": 20
+    }
+  ]
+}

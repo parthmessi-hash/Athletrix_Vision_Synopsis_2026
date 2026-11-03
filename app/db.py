@@ -22,6 +22,12 @@ Design
   - `recording_performance` holds individual-performance evidence observations of a recording (app/models/performance.py):
     entered by people, never edited in place (a correction is a new observation with a note; observations can be deleted
     individually), scored only through a configured rubric.
+  - `recording_roster` holds roster-state and match-constraint entries (app/models/roster.py), like coach context: never
+    edited in place, a correction is a newer entry; `athlete_id` NULL means a team-level (match constraint) entry.
+  - `recording_reviews` holds saved reviews (app/models/review.py): a result with the configuration content and evidence
+    copies needed to reproduce it; written once.
+  - `athlete_baselines` holds physiological baselines (app/models/baseline.py): statistics written once from a source
+    recording; only the review status and its decision history change.
   - Optional receipt metadata (`receipt`, JSON text or NULL) on every sample row: when this engine received the sample
     live (`{"received_at", "origin": "this_engine"}`) or, for imported recordings, when the original engine did
     (`"origin": "source_engine"`). NULL means not recorded (rows written before the column existed, or stored by a tool
@@ -137,6 +143,34 @@ CREATE TABLE IF NOT EXISTS recording_performance (
     payload          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recording_performance_by_athlete ON recording_performance (recording_id, athlete_id, period_start_utc);
+CREATE TABLE IF NOT EXISTS recording_roster (
+    id                 TEXT PRIMARY KEY,
+    recording_id       TEXT NOT NULL,
+    athlete_id         TEXT,
+    effective_from_utc TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    payload            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recording_roster_by_scope ON recording_roster (recording_id, athlete_id, effective_from_utc);
+CREATE TABLE IF NOT EXISTS recording_reviews (
+    id           TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    athlete_id   TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    at_utc       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    payload      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recording_reviews_by_athlete ON recording_reviews (recording_id, athlete_id, at_utc);
+CREATE TABLE IF NOT EXISTS athlete_baselines (
+    id                  TEXT PRIMARY KEY,
+    athlete_id          TEXT NOT NULL,
+    source_recording_id TEXT NOT NULL,
+    version             INTEGER NOT NULL,
+    created_at          TEXT NOT NULL,
+    payload             TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS athlete_baselines_by_athlete ON athlete_baselines (athlete_id, version);
 CREATE TABLE IF NOT EXISTS recording_imports (
     recording_id         TEXT PRIMARY KEY,
     source_recording_id  TEXT NOT NULL,
