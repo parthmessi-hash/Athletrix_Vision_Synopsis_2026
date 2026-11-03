@@ -10,7 +10,7 @@ Starting point: backend `e5adf26`, frontend `05c001a` (792 backend tests, 82 bro
 | 3 | Coach team view | done (harness 86/86 at that point) | frontend `index.html` (Team review card) |
 | 4 | Coach responses and lineup changes | done: backend (tests/test_coach_responses.py; package format 6) and team-card responses | `recording_responses`, `POST .../responses` |
 | 5 | Baseline and profile inspection | done (tests/test_profiles.py; Baselines and profiles card; harness 87/87) | `GET /api/v1/profiles`, `scripts/profile_tool.py`, baseline preview |
-| 6 | Local video review and annotation | pending | frontend `tools/video-review.html` |
+| 6 | Local video review and annotation | done on synthetic drawn figures (tests/video_review.test.html 3/3; real page: video, overlay, encounter lapse, hash matches Python, export loads in the backend); real footage pending | frontend `tools/video-review.html` |
 | 7 | Optional lens-distortion calibration | pending | `camera_adapter/intrinsics.py` |
 | 8 | Evaluation workbench | pending | `scripts/evaluate.py` |
 | 9 | End-to-end integration and failure checks | pending | `scripts/verify_operational_workflow.py` |

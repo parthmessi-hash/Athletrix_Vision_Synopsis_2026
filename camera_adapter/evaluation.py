@@ -126,7 +126,8 @@ def people_check(workdir, model_path, out, stability_runs: int = 30) -> dict:
                 rows.append((o.frame, PEOPLE_ATHLETES.get(name) if d <= tol_px(name, o.video_time_s) else None))
             for (f0, ath), nxt in zip(rows, rows[1:] + [(None, None)]):
                 if ath:
-                    out.append(Assignment(tid, ath, f0, None if nxt[0] is None else nxt[0] - 1, "operator step simulated from the truth" + (" (re-confirmed after an encounter)" if f0 != seq[0].frame else "")))
+                    out.append(Assignment(tid, ath, f0, None if nxt[0] is None else nxt[0] - 1, "operator step simulated from the truth" + (" (re-confirmed after an encounter)" if f0 != seq[0].frame else ""),
+                                          confirmed_by="simulated_oracle"))
         return out, first_fig
 
     def audit(assigned_obs):

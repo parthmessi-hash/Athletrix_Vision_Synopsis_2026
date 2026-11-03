@@ -75,3 +75,27 @@ def test_the_tracker_marks_overlapping_boxes_of_two_tracked_people():
     for f in range(40):
         off.process(f, f / 25.0, f)
     assert not any(o.near_other_track for o in off.obs) and VideoTrackingConfig(encounter_iou=1.5).validate() and VideoTrackingConfig(encounter_release_s=-1).validate()
+
+
+def test_assignment_files_version_2_keep_identity_status_operator_work_and_the_video_hash(tmp_path):
+    from camera_adapter.observations import AssignmentFile, dump_assignments, load_assignment_file
+    f = parse([header()] + [line(n) for n in range(6)])
+    doc = {"format": "athletrix-track-assignments", "format_version": 2, "video": {"name": "v.mp4", "sha256": "a" * 64},
+           "operator_work": {"seconds_spent": 75, "confirmations": 2, "corrections": 0, "uncertain_marks": 1, "unassigned_seconds": 0.3, "tool": "test"},
+           "assignments": [{"track_id": "trk-1", "athlete_id": "ath-1", "from_frame": 0, "to_frame": 2, "confirmed_by": "person"},
+                           {"track_id": "trk-1", "athlete_id": "ath-1", "from_frame": 3, "identity": "uncertain"}]}
+    (tmp_path / "a.json").write_text(json.dumps(doc))
+    af = load_assignment_file(tmp_path / "a.json")
+    out = apply_assignments(f, af.assignments)
+    assert [o.athlete_id for o in out.observations] == ["ath-1"] * 3 + [None] * 3, "an uncertain identity never feeds an athlete's samples"
+    assert out.assignment_report["observations_with_uncertain_identity"] == 3 and af.operator_work["seconds_spent"] == 75 and af.video["sha256"] == "a" * 64
+    dump_assignments(tmp_path / "b.json", AssignmentFile(af.assignments, af.video, af.operator_work))
+    assert load_assignment_file(tmp_path / "b.json").assignments == af.assignments
+    bad = {**doc, "format_version": 1}
+    (tmp_path / "c.json").write_text(json.dumps(bad))
+    with pytest.raises(ObservationError, match="unexpected top-level keys"):
+        load_assignment_file(tmp_path / "c.json")
+    doc["assignments"][0]["confirmed_by"] = "robot"
+    (tmp_path / "d.json").write_text(json.dumps(doc))
+    with pytest.raises(ObservationError, match="confirmed_by person or simulated_oracle"):
+        load_assignment_file(tmp_path / "d.json")

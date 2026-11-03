@@ -92,8 +92,15 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print, n
     try:
         obs = obsmod.load(args.observations)
         if args.assignments:
-            obs = obsmod.apply_assignments(obs, obsmod.load_assignments(args.assignments), trust_tracker_through_encounters=args.trust_tracker_through_encounters)
+            af = obsmod.load_assignment_file(args.assignments)
+            obs = obsmod.apply_assignments(obs, af.assignments, trust_tracker_through_encounters=args.trust_tracker_through_encounters)
             rep = obs.assignment_report
+            if af.operator_work:
+                out(f"OPERATOR WORK (from the assignments file): {json.dumps(af.operator_work)}")
+            if rep["observations_with_uncertain_identity"]:
+                out(f"IDENTITY: {rep['observations_with_uncertain_identity']} observations are assigned with identity 'uncertain' and are not used for any athlete")
+            if "simulated_oracle" in rep["confirmed_by"]:
+                out("NOTE: some assignments were made by a simulated oracle (a script reading synthetic truth), not by a person")
             if rep["observations_unassigned_after_encounter"]:
                 out(f"IDENTITY: {rep['observations_unassigned_after_encounter']} observations left unassigned after a close encounter with another tracked person "
                     f"(per track {rep['per_track']}); confirm those tracks again with an assignment starting after the encounter")

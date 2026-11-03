@@ -70,6 +70,7 @@ class FrameRef(AthletrixModel):
     video: str = Field(..., min_length=1, max_length=200, description="Video file name or id (not a path).")
     frame: int = Field(..., ge=0)
     video_time_s: float | None = Field(None, ge=0)
+    video_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$", exclude_if=_unset, description="SHA-256 of the reviewed file: identifies the file; not permission and not capture time.")
 
 
 class PerformanceObservationCreate(AthletrixModel):

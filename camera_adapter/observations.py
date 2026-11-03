@@ -193,17 +193,42 @@ class Assignment:
     from_frame: int = 0
     to_frame: int | None = None   # inclusive; None = until the track ends
     assigned_by: str = ""
+    identity: str = "confirmed"   # format 2: "uncertain" = recorded for audit, never used for an athlete's samples
+    confirmed_by: str = "person"  # format 2: "person" or "simulated_oracle" (a script that reads the synthetic truth)
+
+
+@dataclass
+class AssignmentFile:
+    """An assignments document with its version-2 extras (none for version 1)."""
+    assignments: list[Assignment]
+    video: dict | None = None           # {"name", "sha256"}: identifies the file the operator reviewed (not permission, not capture time)
+    operator_work: dict | None = None   # what the operator did and how long it took (see load_assignment_file)
 
 
 def load_assignments(path: Path) -> list[Assignment]:
-    """{"format": "athletrix-track-assignments", "format_version": 1, "assignments": [{track_id, athlete_id, from_frame, to_frame, assigned_by}]}"""
+    return load_assignment_file(path).assignments
+
+
+ASSIGN_KEYS = {"track_id", "athlete_id", "from_frame", "to_frame", "assigned_by"}
+WORK_KEYS = {"seconds_spent", "confirmations", "corrections", "uncertain_marks", "unassigned_seconds", "tool"}
+
+
+def load_assignment_file(path: Path) -> AssignmentFile:
+    """{"format": "athletrix-track-assignments", "format_version": 1 or 2, "assignments": [{track_id, athlete_id, from_frame,
+    to_frame, assigned_by}]}. Version 2 adds per assignment `identity` ("confirmed" | "uncertain") and `confirmed_by`
+    ("person" | "simulated_oracle"), and at the top `video` {"name", "sha256"} and `operator_work` {seconds_spent,
+    confirmations, corrections, uncertain_marks, unassigned_seconds, tool}: the operator's real effort, kept with the file."""
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(doc, dict) or doc.get("format") != ASSIGN_FORMAT or doc.get("format_version") != 1 or not isinstance(doc.get("assignments"), list):
-        raise ObservationError([f"{path}: expected format {ASSIGN_FORMAT!r} version 1 with an assignments list"])
-    out, errors = [], []
+    version = doc.get("format_version") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or doc.get("format") != ASSIGN_FORMAT or version not in (1, 2) or not isinstance(doc.get("assignments"), list):
+        raise ObservationError([f"{path}: expected format {ASSIGN_FORMAT!r} version 1 or 2 with an assignments list"])
+    top = {"format", "format_version", "assignments"} | ({"video", "operator_work"} if version == 2 else set())
+    errors = [f"unexpected top-level keys: {', '.join(sorted(set(doc) - top))}"] if set(doc) - top else []
+    keys = ASSIGN_KEYS | ({"identity", "confirmed_by"} if version == 2 else set())
+    out = []
     for n, a in enumerate(doc["assignments"], start=1):
-        if not isinstance(a, dict) or not {"track_id", "athlete_id"} <= set(a) or not set(a) <= {"track_id", "athlete_id", "from_frame", "to_frame", "assigned_by"}:
-            errors.append(f"assignment {n}: needs track_id and athlete_id (optional from_frame, to_frame, assigned_by)")
+        if not isinstance(a, dict) or not {"track_id", "athlete_id"} <= set(a) or not set(a) <= keys:
+            errors.append(f"assignment {n}: needs track_id and athlete_id (optional {', '.join(sorted(keys - {'track_id', 'athlete_id'}))})")
             continue
         if not all(isinstance(a[k], str) and a[k].strip() for k in ("track_id", "athlete_id")) or a["track_id"] == a["athlete_id"]:
             errors.append(f"assignment {n}: track_id and athlete_id must be distinct non-blank strings")
@@ -212,14 +237,31 @@ def load_assignments(path: Path) -> list[Assignment]:
         if not isinstance(lo, int) or lo < 0 or (hi is not None and (not isinstance(hi, int) or hi < lo)):
             errors.append(f"assignment {n}: frame range invalid")
             continue
-        out.append(Assignment(a["track_id"], a["athlete_id"], lo, hi, str(a.get("assigned_by", ""))))
+        if a.get("identity", "confirmed") not in ("confirmed", "uncertain") or a.get("confirmed_by", "person") not in ("person", "simulated_oracle"):
+            errors.append(f"assignment {n}: identity must be confirmed or uncertain, confirmed_by person or simulated_oracle")
+            continue
+        out.append(Assignment(a["track_id"], a["athlete_id"], lo, hi, str(a.get("assigned_by", "")), a.get("identity", "confirmed"), a.get("confirmed_by", "person")))
     for i, a in enumerate(out):
         for b in out[i + 1:]:
             if a.track_id == b.track_id and not (a.to_frame is not None and a.to_frame < b.from_frame or b.to_frame is not None and b.to_frame < a.from_frame):
                 errors.append(f"track {a.track_id!r} has overlapping assignments")
+    video, work = doc.get("video"), doc.get("operator_work")
+    if video is not None and (not isinstance(video, dict) or set(video) != {"name", "sha256"} or not isinstance(video.get("sha256"), str) or len(video["sha256"]) != 64):
+        errors.append("video must be {name, sha256 (64 hex characters)}")
+    if work is not None and (not isinstance(work, dict) or not set(work) <= WORK_KEYS):
+        errors.append(f"operator_work may only hold {', '.join(sorted(WORK_KEYS))}")
     if errors:
         raise ObservationError(errors)
-    return out
+    return AssignmentFile(out, video, work)
+
+
+def dump_assignments(path: Path, f: AssignmentFile) -> None:
+    doc = {"format": ASSIGN_FORMAT, "format_version": 2, "assignments": [asdict(a) for a in f.assignments]}
+    if f.video:
+        doc["video"] = f.video
+    if f.operator_work:
+        doc["operator_work"] = f.operator_work
+    Path(path).write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
 
 def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trust_tracker_through_encounters: bool = False) -> ObservationFile:
@@ -233,6 +275,7 @@ def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trus
     errors = []
     result = []
     lapsed: dict[str, int] = {}
+    uncertain: dict[str, int] = {}
     encounters: dict[str, list[int]] = {}
     for o in f.observations:
         if o.near_other_track:
@@ -240,6 +283,9 @@ def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trus
     for o in f.observations:
         hit = [a for a in assignments if a.track_id == o.track_id and a.from_frame <= o.frame and (a.to_frame is None or o.frame <= a.to_frame)]
         athlete = hit[0].athlete_id if hit else None
+        if hit and hit[0].identity == "uncertain":   # recorded for audit; an uncertain identity never feeds an athlete's samples
+            uncertain[o.track_id] = uncertain.get(o.track_id, 0) + 1
+            athlete = None
         if athlete is not None and not trust_tracker_through_encounters and any(hit[0].from_frame < e <= o.frame for e in encounters.get(o.track_id, ())):
             lapsed[o.track_id] = lapsed.get(o.track_id, 0) + 1
             athlete = None
@@ -254,5 +300,7 @@ def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trus
         raise ObservationError(errors)
     report = {"rule": "trust_tracker_through_encounters" if trust_tracker_through_encounters else "lapse_at_encounter",
               "observations_unassigned_after_encounter": sum(lapsed.values()), "per_track": lapsed,
+              "observations_with_uncertain_identity": sum(uncertain.values()), "uncertain_per_track": uncertain,
+              "confirmed_by": sorted({a.confirmed_by for a in assignments}),
               "encounter_observations": {k: len(v) for k, v in encounters.items()}}
     return ObservationFile(video=f.video, extractor=f.extractor, observations=result, assignment_report=report)
