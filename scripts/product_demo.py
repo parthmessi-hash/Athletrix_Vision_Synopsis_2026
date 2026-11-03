@@ -213,9 +213,9 @@ def baseline(pid: str, samples: list) -> Baseline:
                     decisions=[RecordedDecision(decision="accepted", decided_by="fictional analyst", note="FICTIONAL demo decision: rest period looked steady", decided_at=created)])
 
 
-def build() -> bytes:
+def build(variant: str = "") -> bytes:
     """The demo package (current format). Deterministic: same bytes apart from generated_at, which is fixed too."""
-    phys_rng, perf_rng = random.Random("athletrix-demo-physiology"), random.Random("athletrix-demo-performance")
+    phys_rng, perf_rng = random.Random("athletrix-demo-physiology" + variant), random.Random("athletrix-demo-performance" + variant)   # a variant: same scenario, other draws
     athletes = [Athlete(id=pid, name=name, jersey_number=n, sport="soccer", team_id="fictional-team") for pid, name, n, *_ in PLAYERS]
     samples, perf, baselines = {}, [], []
     for pid, _, _, starter, role, _, strap in PLAYERS:
@@ -225,7 +225,7 @@ def build() -> bytes:
             baselines.append(baseline(pid, p))
         if starter:
             perf += performance(pid, role, perf_rng)
-    rec = {"id": REC, "name": "FICTIONAL demo match (made-up data)", "status": "stopped", "started_at": z(0), "stopped_at": z(DURATION_S)}
+    rec = {"id": REC, "name": "FICTIONAL demo match (made-up data)" + (f" [{variant}]" if variant else ""), "status": "stopped", "started_at": z(0), "stopped_at": z(DURATION_S)}
     return build_package(rec, athletes, samples, [], {"note": "fictional demo"}, at(DURATION_S + 600), None, None, context(), perf, baselines, roster(), [])
 
 

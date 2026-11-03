@@ -84,6 +84,7 @@ class ReviewInputs:
     index: tuple[IndexProfile, str] | None
     rubric: tuple[PerformanceRubric, str] | None
     knowledge: str = "retrospective"     # or "as_entered" (app/core/knowledge.py)
+    rule_variant: str = "context_aware"  # or "score_only": for evaluation only (scripts/evaluate.py), ignores roles, constraints and context
 
 
 def known(inp: ReviewInputs, items: list, t: datetime) -> list:
@@ -188,7 +189,7 @@ def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state
     role_src = "coach_context" if my_ctx and my_ctx.role.status == "recorded" else ("roster" if me.current_role else None)
     required = my_ctx.role.value if role_src == "coach_context" else me.current_role
     able = [norm(r) for r in me.able_roles]
-    role_mismatch = bool(required and able and norm(required) not in able)
+    role_mismatch = bool(required and able and norm(required) not in able) and inp.rule_variant != "score_only"
     res["role"] = {"required": required, "required_from": role_src, "able_roles": me.able_roles,
                    "fit": None if not (required and able) else not role_mismatch,
                    "team_instruction": team_ctx.tactical_instruction.value if team_ctx and team_ctx.tactical_instruction.status == "recorded" else None,
@@ -232,6 +233,12 @@ def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state
         return out("review_later")
     cands = _candidates(inp, t, required, team_roster, roster)
     res["replacements"] = cands
+    if inp.rule_variant == "score_only":   # evaluation variant: any bench player counts, no constraint or context applies
+        reasons.append("score-only variant (evaluation): roles, coach constraints and context are ignored")
+        if not cands:
+            reasons.append("no bench athlete")
+            return out("review_later")
+        return out("consider_replacement")
     suitable = [c for c in cands if c["role_fit"] == "fits" and not c["blocked_reason"]]
     keep = {n.athlete_id: n.reason for n in (team_roster.keep_on_field if team_roster else [])}
     if inp.athlete_id in keep:
@@ -277,6 +284,8 @@ def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state
 
 def substitution_review(inp: ReviewInputs) -> dict:
     head = {"recording_id": inp.recording_id, "athlete_id": inp.athlete_id, "at": iso(inp.at), "label": LABEL, "outcomes": list(OUTCOMES)}
+    if inp.rule_variant != "context_aware":
+        head["rule_variant"] = inp.rule_variant
     profiles = {"substitution": None, "physiological_index": None, "performance_rubric": None}
     if inp.substitution:
         p, sha = inp.substitution
