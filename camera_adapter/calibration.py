@@ -5,14 +5,18 @@ for the eight free entries with h33 = 1, de-normalised). Plain Python, no NumPy 
 cross-checks it against OpenCV's findHomography when OpenCV is installed.
 
 Assumptions (stated in every calibration file): a fixed camera (moving, zooming or refocusing it requires a new
-calibration), an approximately planar ground, no lens distortion correction (a wide-angle lens bends straight lines and
-this model cannot represent that), and image points measured in the same full-resolution frame as the observations.
+calibration), an approximately planar ground, and image points measured in the same full-resolution frame as the
+observations. Lens distortion: optional. Without a lens model (every version-1 file, and version-2 files with
+"lens": null) a wide-angle lens bends straight lines and this model cannot represent that. With a lens model
+(camera_adapter/intrinsics.py, embedded in the file with its hash), the measured points stay in RAW pixels in the file,
+the homography is fitted to their undistorted positions, and every observation is undistorted the same way before it
+is mapped. The lens model must have been calibrated at exactly this resolution.
 
 Fitting points determine the transformation; their residual is NOT independent accuracy. Check points are never used
 in the fit, and their errors in metres are the only independent figure this file reports. No universal acceptable-error
 threshold is applied: what is acceptable depends on the use and must be decided and recorded by the people using it.
 
-FILE (format "athletrix-camera-calibration", version 1): see `Calibration.to_doc`.
+FILE (format "athletrix-camera-calibration", version 2; version 1 is still read, as "no lens model"): see `Calibration.to_doc`.
 """
 
 from __future__ import annotations
@@ -25,7 +29,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 FORMAT = "athletrix-camera-calibration"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+READABLE_VERSIONS = (1, 2)
 METHOD = "normalised DLT, linear least squares, h33 = 1 (camera_adapter/calibration.py)"
 DUPLICATE_IMAGE_PX = 0.5
 DUPLICATE_FIELD_M = 0.01
@@ -38,7 +43,6 @@ CONVENTIONS = {
 ASSUMPTIONS = [
     "fixed camera: moving, zooming or refocusing it requires a new calibration",
     "approximately planar ground; points off the plane (a raised ball, a head) are not mapped correctly",
-    "no lens-distortion model: wide-angle distortion is not corrected",
     "fitting residual is not independent accuracy; only check points that were not used in the fit say anything independent",
     "no universal acceptable-error threshold is implied",
 ]
@@ -186,14 +190,19 @@ class Calibration:
     fit_residual_m: dict = field(default_factory=dict)
     check_errors_m: dict | None = None
     software: dict = field(default_factory=dict)
+    lens: object | None = None   # camera_adapter.intrinsics.Intrinsics, or None (no lens model)
+
+    def corrected(self, u: float, v: float) -> tuple[float, float]:
+        """The point the homography works on: undistorted with the lens model, or as measured without one."""
+        return self.lens.undistort([(u, v)])[0] if self.lens is not None else (u, v)
 
     @property
     def front_sign(self) -> float:
-        return math.copysign(1.0, apply_h(self.image_to_field, *self.fit_points[0]["image"])[2])
+        return math.copysign(1.0, apply_h(self.image_to_field, *self.corrected(*self.fit_points[0]["image"]))[2])
 
     def to_field(self, u: float, v: float) -> tuple[float, float] | None:
-        """Field position of an image point, or None when it maps beyond the horizon (the opposite side of w)."""
-        x, y, w = apply_h(self.image_to_field, u, v)
+        """Field position of a RAW image point, or None when it maps beyond the horizon (the opposite side of w)."""
+        x, y, w = apply_h(self.image_to_field, *self.corrected(u, v))
         if w == 0 or math.copysign(1.0, w) != self.front_sign or not (math.isfinite(x) and math.isfinite(y)):
             return None
         return x, y
@@ -208,23 +217,30 @@ class Calibration:
                 "image": {"width": self.width, "height": self.height}, "conventions": CONVENTIONS,
                 "fit_points": self.fit_points, "check_points": self.check_points, "image_to_field": self.image_to_field,
                 "fit_residual_m": self.fit_residual_m, "check_errors_m": self.check_errors_m,
-                "assumptions": ASSUMPTIONS, "software": self.software}
+                "lens": None if self.lens is None else {**self.lens.to_doc(), "sha256": self.lens.sha256()},
+                "image_points": "raw pixels as measured",
+                "homography_input": "undistorted pixels (lens model above)" if self.lens is not None else "raw pixels (no lens model: distortion not corrected)",
+                "assumptions": ASSUMPTIONS + ([] if self.lens is not None else ["no lens-distortion model: wide-angle distortion is not corrected"]), "software": self.software}
 
     def save(self, path: Path) -> None:
         Path(path).write_text(json.dumps(self.to_doc(), indent=2) + "\n", encoding="utf-8")
 
 
-def _errors(h, points) -> dict:
+def _errors(h, points, lens=None) -> dict:
     per = []
     for p in points:
-        x, y, w = apply_h(h, *p["image"])
+        x, y, w = apply_h(h, *(lens.undistort([tuple(p["image"])])[0] if lens is not None else p["image"]))
         per.append({"label": p.get("label", ""), "error_m": math.dist((x, y), p["field"])})
     errs = [e["error_m"] for e in per]
     return {"per_point": per, "rms": math.sqrt(sum(e * e for e in errs) / len(errs)), "max": max(errs)}
 
 
-def fit(width: int, height: int, fit_points: list[dict], check_points: list[dict] | None = None, *, camera_id: str = "", software: dict | None = None) -> Calibration:
+def fit(width: int, height: int, fit_points: list[dict], check_points: list[dict] | None = None, *, camera_id: str = "", software: dict | None = None,
+        lens=None) -> Calibration:
+    """`lens` (camera_adapter.intrinsics.Intrinsics) is optional; it must have been calibrated at width x height."""
     check_points = check_points or []
+    if lens is not None and (lens.width, lens.height) != (width, height):
+        raise CalibrationError([f"the lens model was calibrated at {lens.width}x{lens.height}, not {width}x{height}; it is valid only at its own resolution"])
     if not (isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0):
         raise CalibrationError(["image width and height must be positive integers"])
     errors = validate_points(fit_points, width, height, "fit point", 4) + validate_points(check_points, width, height, "check point", 0)
@@ -234,33 +250,43 @@ def fit(width: int, height: int, fit_points: list[dict], check_points: list[dict
             errors.append("check points must not repeat fitting points (they would not be independent)")
     if errors:
         raise CalibrationError(errors)
-    h = fit_homography([p["image"] for p in fit_points], [p["field"] for p in fit_points])
+    src = [p["image"] for p in fit_points] if lens is None else lens.undistort([tuple(p["image"]) for p in fit_points])
+    h = fit_homography(src, [p["field"] for p in fit_points])
     if not all(math.isfinite(v) for row in h for v in row) or abs(det3(h)) < 1e-15:
         raise CalibrationError(["the fitted transformation is unusable (singular or not finite)"])
-    signs = {math.copysign(1.0, apply_h(h, *p["image"])[2]) for p in fit_points + check_points}
+    signs = {math.copysign(1.0, apply_h(h, *(p["image"] if lens is None else lens.undistort([tuple(p["image"])])[0]))[2]) for p in fit_points + check_points}
     if len(signs) != 1:
         raise CalibrationError(["the points lie on both sides of the image horizon for this transformation; the arrangement or the measurements are inconsistent"])
     cal = Calibration(width, height, [dict(p) for p in fit_points], [dict(p) for p in check_points], h, camera_id=camera_id,
                       created_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                      software={"method": METHOD, **(software or {})})
-    cal.fit_residual_m = {**_errors(h, fit_points), "note": "residual of the points used for fitting; not independent accuracy"}
-    cal.check_errors_m = ({**_errors(h, check_points), "note": "points not used in the fit: independent check of this calibration only"} if check_points else None)
+                      software={"method": METHOD, **(software or {})}, lens=lens)
+    cal.fit_residual_m = {**_errors(h, fit_points, lens), "note": "residual of the points used for fitting; not independent accuracy"}
+    cal.check_errors_m = ({**_errors(h, check_points, lens), "note": "points not used in the fit: independent check of this calibration only"} if check_points else None)
     return cal
 
 
 def load(path: Path) -> Calibration:
     """Read and re-validate a calibration file; the stored transformation is refitted and must agree (detects edits)."""
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(doc, dict) or doc.get("format") != FORMAT or doc.get("format_version") != FORMAT_VERSION:
-        raise CalibrationError([f"{path}: not an {FORMAT} version {FORMAT_VERSION} file"])
+    if not isinstance(doc, dict) or doc.get("format") != FORMAT or doc.get("format_version") not in READABLE_VERSIONS:
+        raise CalibrationError([f"{path}: not an {FORMAT} file of version {' or '.join(map(str, READABLE_VERSIONS))}"])
+    lens = None
+    if doc.get("lens"):
+        from camera_adapter.intrinsics import IntrinsicsError, from_doc  # noqa: PLC0415
+        try:
+            lens = from_doc(doc["lens"])
+        except IntrinsicsError as exc:
+            raise CalibrationError([f"{path}: lens model: {e}" for e in exc.errors]) from exc
+        if doc["lens"].get("sha256") != lens.sha256():
+            raise CalibrationError([f"{path}: the embedded lens model does not match its hash (edited or corrupted file)"])
     try:
         img = doc["image"]
-        cal = fit(img["width"], img["height"], doc["fit_points"], doc.get("check_points") or [], camera_id=doc.get("camera_id", ""), software=doc.get("software"))
+        cal = fit(img["width"], img["height"], doc["fit_points"], doc.get("check_points") or [], camera_id=doc.get("camera_id", ""), software=doc.get("software"), lens=lens)
     except (KeyError, TypeError) as exc:
         raise CalibrationError([f"{path}: missing or malformed field ({exc})"]) from exc
     stored = doc.get("image_to_field")
     probe = [p["image"] for p in doc["fit_points"]]
-    if not isinstance(stored, list) or any(math.dist(apply_h(stored, *q)[:2], cal.to_field(*q) or (math.inf, math.inf)) > 1e-6 for q in probe):
+    if not isinstance(stored, list) or any(math.dist(apply_h(stored, *cal.corrected(*q))[:2], cal.to_field(*q) or (math.inf, math.inf)) > 1e-6 for q in probe):
         raise CalibrationError([f"{path}: the stored transformation does not match its fitting points (edited or corrupted file)"])
     cal.created_at = doc.get("created_at", "")
     return cal

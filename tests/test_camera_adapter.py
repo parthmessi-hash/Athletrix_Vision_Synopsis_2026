@@ -80,7 +80,8 @@ def test_calibration_recovers_a_known_mapping_and_reports_check_points_separatel
     path = tmp_path / "cal.json"
     calibration.save(path)
     doc = json.loads(path.read_text())
-    assert doc["format_version"] == 1 and doc["image"] == {"width": 960, "height": 540} and any("fixed camera" in a for a in doc["assumptions"])
+    assert doc["format_version"] == 2 and doc["lens"] is None and doc["image"] == {"width": 960, "height": 540} and any("fixed camera" in a for a in doc["assumptions"])
+    assert any("no lens-distortion model" in a for a in doc["assumptions"]) and doc["homography_input"].startswith("raw pixels")
     assert cal.load(path).to_field(*project(20, 10)) is not None
     doc["image_to_field"][0][0] += 0.01
     path.write_text(json.dumps(doc))

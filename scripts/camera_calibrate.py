@@ -2,6 +2,7 @@
 
 USAGE
     python scripts/camera_calibrate.py fit POINTS.json --out CALIBRATION.json      # fit and save (refuses to overwrite)
+    python scripts/camera_calibrate.py fit POINTS.json --out CALIBRATION.json --intrinsics LENS.json   # with an optional lens model
     python scripts/camera_calibrate.py check CALIBRATION.json                      # re-validate a saved file and summarise
 
 POINTS.json (format "athletrix-calibration-points", version 1):
@@ -44,7 +45,9 @@ def summary(c: cal.Calibration, out: Callable[[str], None]) -> None:
             out(f"    {p['label'] or '(unlabelled)'}: {p['error_m']:.4f} m")
     else:
         out("  no check points: there is no independent estimate of this calibration's error")
-    out("  assumptions: " + "; ".join(cal.ASSUMPTIONS))
+    out("  lens model: " + (f"{c.lens.camera_id or '(unnamed)'} calibrated at {c.lens.width}x{c.lens.height}, sha256 {c.lens.sha256()[:16]}…; the homography uses undistorted points"
+                            if c.lens is not None else "none (distortion not corrected)"))
+    out("  assumptions: " + "; ".join(c.to_doc()["assumptions"]))
 
 
 def opencv_version() -> str | None:
@@ -61,6 +64,7 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
     f = sub.add_parser("fit")
     f.add_argument("points", type=Path)
     f.add_argument("--out", type=Path, required=True)
+    f.add_argument("--intrinsics", type=Path, help="optional lens model (scripts/camera_intrinsics.py); the points stay raw and are undistorted before fitting")
     c = sub.add_parser("check")
     c.add_argument("calibration", type=Path)
     try:
@@ -81,8 +85,15 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
             out(f"INVALID: {args.points} is not an {POINTS_FORMAT} version 1 file")
             return 1
         img = doc.get("image") or {}
+        lens = None
+        if args.intrinsics is not None:
+            from camera_adapter import intrinsics as intr  # noqa: PLC0415
+            try:
+                lens = intr.load(args.intrinsics)
+            except intr.IntrinsicsError as exc:
+                raise cal.CalibrationError([f"intrinsics: {e}" for e in exc.errors]) from exc
         calib = cal.fit(img.get("width"), img.get("height"), doc.get("fit_points") or [], doc.get("check_points") or [], camera_id=str(doc.get("camera_id", "")),
-                        software={"tool": "scripts/camera_calibrate.py", "points_file": args.points.name, "opencv": opencv_version()})
+                        software={"tool": "scripts/camera_calibrate.py", "points_file": args.points.name, "opencv": opencv_version()}, lens=lens)
     except (cal.CalibrationError, ValueError, OSError) as exc:
         out("INVALID CALIBRATION: nothing was saved.")
         for e in getattr(exc, "errors", [str(exc)]):
