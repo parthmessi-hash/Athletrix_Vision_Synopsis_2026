@@ -154,6 +154,7 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
         threading.Thread(target=poller, daemon=True).start()
     lateness = []
     rounds_total = 0
+    last_progress = [now()]
     deadline = now() + timedelta(minutes=args.duration_min) if args.duration_min else None
     cycle = 0
     while True:
@@ -181,6 +182,12 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
                     if w > 0:
                         sleep(w)
                     lateness.append(max(0.0, (now() - target).total_seconds()))
+                    if (now() - last_progress[0]).total_seconds() >= 30:
+                        last_progress[0] = now()
+                        srt = sorted(lateness[-6000:])
+                        write_json(args.out / "progress.json", {"at": z(now()), "rounds_done": rounds_total, "sent": api.sent, "failed": api.failed,
+                                                                "lateness_s_recent": {"p50": srt[len(srt) // 2], "p95": srt[int(0.95 * len(srt))], "max": srt[-1]},
+                                                                "pilot_view_polls": len(polls), "events_tail": log["events"][-3:]})
                     t = now()
                     ph = (t - start).total_seconds()
                     if (t - t_hr).total_seconds() >= 1.0 - 1e-6:
@@ -278,16 +285,65 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
     return log
 
 
-def finish(args, api: Api, log: dict, out) -> dict:
-    """Export, import into a second isolated database, reproduce every prediction, and run the paired report."""
-    rid = log["recording_id"]
-    pkg_bytes = api.c.get(api.base + f"/api/v1/recordings/{rid}/package.zip").content
-    pkg_path = args.out / "pilot-package.zip"
-    pkg_path.write_bytes(pkg_bytes)
+def write_json(path: Path, doc: dict) -> None:
+    """Atomic write: a crash never leaves a half-written artifact."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, default=str))
+    tmp.replace(path)
+
+
+def run_metadata(args, argv) -> dict:
+    from app.core.fatigue import RULES_VERSION, parse_profile  # noqa: PLC0415
+    import hashlib  # noqa: PLC0415
+    def git(*a):
+        try:
+            return subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+    text = Path(args.profile).read_text()
+    return {"command": [sys.executable, str(Path(__file__).resolve()), *argv], "code_root": str(ROOT), "commit": git("rev-parse", "HEAD"),
+            "uncommitted_changes": bool(git("status", "--porcelain")), "rules_version": RULES_VERSION, "profile": {"file": str(args.profile), "sha256": parse_profile(text)[1]},
+            "profile_file_sha256": hashlib.sha256(text.encode()).hexdigest(), "python": sys.version.split()[0], "started_at": z(datetime.now(UTC)),
+            "workload": {"mode": args.mode, "participants": [c for c, *_ in PARTICIPANTS], "camera_only_players": CAMERA_ONLY, "rounds_per_turn": args.rounds,
+                         "round_s": args.round_s, "sprint_s": args.sprint_s, "duration_min": args.duration_min,
+                         "inputs": "FICTIONAL heart rate 1 Hz for the wearer; SYNTHETIC camera tracking 10 Hz for the wearer and two camera-only players; "
+                                   "no video decoding, detection or tracking; no wearable; no person"}}
+
+
+STEPS = ("export", "reproduce", "analysis")
+
+
+def step(args, name: str, fn, out) -> dict:
+    t0 = time.monotonic()
+    try:
+        res = {"status": "ok", **fn()}
+    except Exception as exc:  # noqa: BLE001  a failed step is recorded; earlier artifacts stay
+        import traceback  # noqa: PLC0415
+        res = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()[-3000:]}
+        out(f"step {name} FAILED: {res['error']} (earlier artifacts are kept; rerun with --resume {args.out})")
+    res["seconds"] = round(time.monotonic() - t0, 2)
+    write_json(args.out / f"{name}.json", res)
+    return res
+
+
+def export_step(args, api: Api, rid: str) -> dict:
+    import hashlib  # noqa: PLC0415
+    from app.core.recording_package import read_package  # noqa: PLC0415
+    r = api.c.get(api.base + f"/api/v1/recordings/{rid}/package.zip")
+    r.raise_for_status()
+    (args.out / "pilot-package.zip").write_bytes(r.content)
+    pkg = read_package(r.content)
+    return {"file": "pilot-package.zip", "sha256": hashlib.sha256(r.content).hexdigest(), "format_version": pkg.manifest["format_version"],
+            "counts": pkg.manifest["counts"], "study_entries": len(pkg.study), "predictions": sum(1 for e in pkg.study if e.kind == "prediction")}
+
+
+def reproduce_step(args) -> dict:
+    """Import the exported package into a fresh database and reproduce every saved prediction with THIS code."""
+    from collections import Counter  # noqa: PLC0415
     from app.core.recording_package import read_package  # noqa: PLC0415
     from app.db import Database  # noqa: PLC0415
     from app.store.recording_import import import_package  # noqa: PLC0415
-    pkg = read_package(pkg_bytes)
+    pkg = read_package((args.out / "pilot-package.zip").read_bytes())
     db_path = Path(tempfile.mkdtemp(prefix="athletrix-pilot-import-")) / "import.db"
     db = Database(db_path)
     new = import_package(db, pkg, datetime.now(UTC)).recording_id
@@ -298,7 +354,16 @@ def finish(args, api: Api, log: dict, out) -> dict:
         f"es=c.get('/api/v1/recordings/{new}/study').json()['entries'];"
         f"print(json.dumps([c.get('/api/v1/recordings/{new}/study/predictions/'+e['id']+'/reproduce').json()['status'] for e in es if e['kind']=='prediction']))")],
         cwd=ROOT, capture_output=True, text=True, env={**os.environ, "FATIGUE_PROFILE_PATH": ""})
-    statuses = json.loads(rep.stdout.strip().splitlines()[-1]) if rep.returncode == 0 else [f"error: {rep.stderr[-300:]}"]
+    if rep.returncode != 0:
+        raise RuntimeError("reproduction subprocess failed: " + rep.stderr[-500:])
+    statuses = json.loads(rep.stdout.strip().splitlines()[-1])
+    preds = [e for e in pkg.study if e.kind == "prediction"]
+    unavailable = {}
+    for e in preds:   # deliberately unavailable scores are saved results, not reproduction failures
+        cands = ((e.prediction or {}).get("result") or {}).get("candidates") or {}
+        for c, v in cands.items():
+            if not v.get("available"):
+                unavailable[c] = unavailable.get(c, 0) + 1
     import shutil  # noqa: PLC0415
     import sqlite3  # noqa: PLC0415
     copy = db_path.parent / "removal.db"
@@ -311,20 +376,51 @@ def finish(args, api: Api, log: dict, out) -> dict:
     left = con.execute("SELECT COUNT(*) FROM recording_study WHERE athlete_id = ?", (PARTICIPANTS[0][1],)).fetchone()[0]
     others = con.execute("SELECT COUNT(*) FROM recording_study WHERE athlete_id != ? OR athlete_id IS NULL", (PARTICIPANTS[0][1],)).fetchone()[0]
     con.close()
-    removal = {"athlete": PARTICIPANTS[0][0], "exit": rcode, "study_entries_left_for_them": left, "other_study_entries_kept": others,
-               "exported_package_still_holds_them": sum(1 for e in pkg.study if e.athlete_id == PARTICIPANTS[0][1]),
-               "note": "local removal deletes this engine's copy only; packages already exported (and their copies) are not touched"}
-    lines = []
+    return {"predictions": len(preds), "statuses": dict(Counter(statuses)), "all_reproduced": bool(statuses) and all(x == "reproduced" for x in statuses),
+            "candidate_scores_deliberately_unavailable_when_saved": unavailable,
+            "note": "an unavailable score saved with its reason reproduces as unavailable: that is not a reproduction failure",
+            "removal_on_a_copy": {"athlete": PARTICIPANTS[0][0], "exit": rcode, "study_entries_left_for_them": left, "other_study_entries_kept": others,
+                                  "exported_package_still_holds_them": sum(1 for e in pkg.study if e.athlete_id == PARTICIPANTS[0][1]),
+                                  "note": "local removal deletes this engine's copy only; packages already exported (and their copies) are not touched"}}
+
+
+def analysis_step(args) -> dict:
     import importlib.util  # noqa: PLC0415
     spec = importlib.util.spec_from_file_location("evaluate_pilot_reh", ROOT / "scripts" / "evaluate.py")
     ev = importlib.util.module_from_spec(spec); spec.loader.exec_module(ev)
-    code = ev.main(["pilot", "--packages", str(pkg_path), "--out", str(args.out / "report")], out=lines.append)
-    res = json.loads((args.out / "report" / "results.json").read_text()) if code == 0 else {}
-    return {"package": {"file": pkg_path.name, "format_version": pkg.manifest["format_version"], "study_entries": len(pkg.study), "predictions": sum(1 for e in pkg.study if e.kind == "prediction")},
-            "removal_on_a_copy": removal,
-            "reproduction_on_second_database": {"statuses": statuses, "all_reproduced": bool(statuses) and all(s == "reproduced" for s in statuses)},
-            "report": {"exit": code, "matched_rows": res.get("matched_rows"), "coverage": {c: v["usable"] for c, v in res.get("coverage", {}).items()},
-                       "pooled_r": {c: res["pooled"][c]["r"] for c in ("vest_only", "camera_only", "combined")} if res else None, "targets": res.get("targets")}}
+    target = args.out / "report"
+    if target.exists():
+        target = args.out / f"report-rerun-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    lines = []
+    code = ev.main(["pilot", "--packages", str(args.out / "pilot-package.zip"), "--out", str(target)], out=lines.append)
+    if code != 0:
+        raise RuntimeError("evaluate.py pilot exited " + str(code) + ": " + " | ".join(lines[-3:]))
+    res = json.loads((target / "results.json").read_text())
+    return {"report_dir": target.name, "matched_rows": res.get("matched_rows"), "coverage": {c: v["usable"] for c, v in res.get("coverage", {}).items()},
+            "pooled_r": {c: res["pooled"][c]["r"] for c in ("vest_only", "camera_only", "combined")}, "targets": res.get("targets"),
+            "timing_evidence_counts": res.get("timing_evidence_counts")}
+
+
+def finish(args, api: Api | None, log: dict | None, out, steps=STEPS) -> dict:
+    """Export, reproduce in a fresh database, analyse: each step writes its own artifact, so a late failure never erases
+    an earlier result. ATHLETRIX_REHEARSAL_FAIL_AFTER=<step> raises after that step (a test hook)."""
+    fail_after = os.environ.get("ATHLETRIX_REHEARSAL_FAIL_AFTER")
+    res = {}
+    for name in steps:
+        if name == "export":
+            res["export"] = step(args, "export", lambda: export_step(args, api, log["recording_id"]), out)
+        elif name == "reproduce":
+            res["reproduce"] = step(args, "reproduce", lambda: reproduce_step(args), out)
+        else:
+            res["analysis"] = step(args, "analysis", lambda: analysis_step(args), out)
+        if fail_after == name:
+            raise RuntimeError(f"deliberate failure after the {name} step (ATHLETRIX_REHEARSAL_FAIL_AFTER)")
+    ex, rp, an = res.get("export", {}), res.get("reproduce", {}), res.get("analysis", {})
+    return {"package": {k: ex.get(k) for k in ("file", "format_version", "study_entries", "predictions")} if ex else None,
+            "removal_on_a_copy": rp.get("removal_on_a_copy"),
+            "reproduction_on_second_database": {"statuses": rp.get("statuses"), "all_reproduced": rp.get("all_reproduced", False)},
+            "report": {"exit": 0 if an.get("status") == "ok" else 1, **{k: an.get(k) for k in ("matched_rows", "coverage", "pooled_r", "targets")}},
+            "steps": {k: v.get("status") for k, v in res.items()}}
 
 
 def main(argv=None, out=print) -> int:
@@ -339,9 +435,22 @@ def main(argv=None, out=print) -> int:
     ap.add_argument("--dropout-s", type=float, default=20.0)
     ap.add_argument("--duration-min", type=float, default=0.0, help="wall mode: keep rotating participants for this long (the reliability check)")
     ap.add_argument("--hold", action="store_true", help="wall mode: keep the engine running after the export until Ctrl-C")
+    ap.add_argument("--resume", type=Path, help="rerun only later steps from a run folder's saved package (use the same frozen code snapshot)")
+    ap.add_argument("--steps", default="reproduce,analysis", help="with --resume: which steps to rerun (default reproduce,analysis)")
     ap.add_argument("--port", type=int)
     ap.add_argument("--cors-origin", default="http://127.0.0.1:3918")
     args = ap.parse_args(argv)
+    if args.resume:
+        args.out = args.resume
+        if not (args.out / "pilot-package.zip").is_file():
+            out(f"{args.out} has no pilot-package.zip to resume from")
+            return 2
+        steps = tuple(x for x in args.steps.split(",") if x in ("reproduce", "analysis"))
+        fin = finish(args, None, None, out, steps)
+        meta = {"resumed_at": z(datetime.now(UTC)), "code_root": str(ROOT), "steps": steps, "result": fin["steps"]}
+        write_json(args.out / f"resume-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json", meta)
+        out(json.dumps(meta, default=str))
+        return 0 if all(v == "ok" for v in fin["steps"].values()) else 1
     if args.out.exists():
         out(f"{args.out} exists; not overwritten")
         return 2
@@ -349,6 +458,7 @@ def main(argv=None, out=print) -> int:
         out("--duration-min is a wall-clock reliability check; the accelerated mode is never a timed run")
         return 2
     args.out.mkdir(parents=True)
+    write_json(args.out / "run.json", run_metadata(args, list(argv) if argv is not None else sys.argv[1:]))
     players = [(aid, f"Fictional participant {code}", int(aid[2:]) + 10, False, None, [], True) for code, aid, _, _ in PARTICIPANTS]
     started = time.monotonic()
     summary = {"mode": args.mode, "fictional": True, "profile": Path(args.profile).name, "started_at": z(datetime.now(UTC)),
@@ -387,6 +497,8 @@ def main(argv=None, out=print) -> int:
                 api.c = TestClient(create_app())
             log = run(args, api, lambda: state["now"], sleep, out, restart)
             db = box["db"]
+            write_json(args.out / "ingest.json", {"log": {k: v for k, v in log.items() if k != "events"}, "events": log.get("events"), "requests": api.sent,
+                                                        "failed_requests": api.failed, "finished_at": z(datetime.now(UTC))})
             fin = finish(args, api, log, out)
         finally:
             clock.utc_now, clock.receipt_now = saved
@@ -420,6 +532,8 @@ def main(argv=None, out=print) -> int:
                 eng.proc.terminate(); eng.proc.wait(timeout=10); eng.proc = None
                 eng.start()
             log = run(args, api, lambda: datetime.now(UTC), time.sleep, out, restart)
+            write_json(args.out / "ingest.json", {"log": {k: v for k, v in log.items() if k != "events"}, "events": log.get("events"), "requests": api.sent,
+                                                        "failed_requests": api.failed, "finished_at": z(datetime.now(UTC))})
             fin = finish(args, api, log, out)
             summary["engine_memory_mb"] = {"samples": len(rss), "first": round(rss[0], 1) if rss else None, "max": round(max(rss), 1) if rss else None, "last": round(rss[-1], 1) if rss else None}
             summary["engine_alive_at_end"] = eng.proc.poll() is None
@@ -444,9 +558,9 @@ def main(argv=None, out=print) -> int:
                    wall_seconds=round(time.monotonic() - started, 1))
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
     out(json.dumps({k: summary[k] for k in ("mode", "label", "wall_seconds", "failed_requests", "reproduction_on_second_database", "report")}, indent=1, default=str))
-    rem = fin["removal_on_a_copy"]
+    rem = fin["removal_on_a_copy"] or {}
     ok = (not {k: v for k, v in api.failed.items() if k != "pilot_view"} and summary["reproduction_on_second_database"]["all_reproduced"] and fin["report"]["exit"] == 0
-          and rem["exit"] == 0 and rem["study_entries_left_for_them"] == 0 and rem["other_study_entries_kept"] > 0)
+          and rem.get("exit") == 0 and rem.get("study_entries_left_for_them") == 0 and rem.get("other_study_entries_kept", 0) > 0)
     out("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
