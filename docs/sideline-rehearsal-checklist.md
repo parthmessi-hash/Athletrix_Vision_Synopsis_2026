@@ -7,8 +7,8 @@ Starting point: backend `b1ea01c`, frontend `26a7e04` (808 backend tests, harnes
 |---|-----------|-------|----------------------|
 | 1 | Missing-evidence decision semantics | done | decision rules 2 in `app/core/substitution.py` (keep needs every required input; unconfirmed reading -> review later; explicit performance-only route needs `routes.performance_only` AND roster `inputs.physiology = not_used`; context-only observation). Tests: `tests/test_substitution_review.py`, `tests/test_evidence_quality.py`; verifier p06 check; before/after: old code `keep`, new `insufficient_evidence` on the same inputs |
 | 2 | Evidence quality view | done | `app/core/evidence.py`, team review `evidence`, `GET /recordings/{id}/evidence`; retries keep first receipt (`duplicate_arrivals`), replacements counted, rejected writes logged (`ingest_rejections`); team card evidence line + technical details; harness 88/88 |
-| 3 | Session setup and preflight | pending | |
-| 4 | Calibration and clock alignment workflow | pending | |
+| 3 | Session setup and preflight | done | `app/models/session.py`, `POST/GET /api/v1/preflight` (three readiness areas), `scripts/sideline_session.py` (preflight/start/status/stop/inspect, resumable), dashboard Session setup card (harness 89/89), `scripts/verify_session_workflow.py` 14/14 (startup failure, kill/restart, clean shutdown); templates in `scripts/examples/session/` |
+| 4 | Calibration and clock alignment workflow | done on synthetic inputs | `camera_adapter/setup.py` + `scripts/camera_setup.py` (checklist, inspect, compatible: resolution/camera/settings invalidation), calibration records `camera_settings`; `app/core/alignment.py` + `scripts/time_align.py` (bases, offset/drift, leave-one-out uncertainty, mismatched events flagged, replay anchor, cross-stream availability). Tests: `tests/test_session_setup.py`. Physical camera and real clocks untested |
 | 5 | Identity confirmation queue | pending | |
 | 6 | Annotation and reviewer workflow | pending | |
 | 7 | Evaluation pilot rehearsal | pending | |
@@ -17,4 +17,4 @@ Starting point: backend `b1ea01c`, frontend `26a7e04` (808 backend tests, harnes
 
 Open defects: none known. Fixed on the way: `compute_index` always appended the "available signals carry x%" reason (a for/else), even when the index was available.
 
-Verified commands: `python scripts/verify_operational_workflow.py` (18/18), `.venv/bin/python -m pytest -q` (820 passed).
+Verified commands: `python scripts/verify_operational_workflow.py` (18/18), `python scripts/verify_session_workflow.py` (14/14), `.venv/bin/python -m pytest -q` (827 passed).

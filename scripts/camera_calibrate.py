@@ -93,7 +93,8 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = print) -
             except intr.IntrinsicsError as exc:
                 raise cal.CalibrationError([f"intrinsics: {e}" for e in exc.errors]) from exc
         calib = cal.fit(img.get("width"), img.get("height"), doc.get("fit_points") or [], doc.get("check_points") or [], camera_id=str(doc.get("camera_id", "")),
-                        software={"tool": "scripts/camera_calibrate.py", "points_file": args.points.name, "opencv": opencv_version()}, lens=lens)
+                        software={"tool": "scripts/camera_calibrate.py", "points_file": args.points.name, "opencv": opencv_version()}, lens=lens,
+                        camera_settings=doc.get("camera_settings"))
     except (cal.CalibrationError, ValueError, OSError) as exc:
         out("INVALID CALIBRATION: nothing was saved.")
         for e in getattr(exc, "errors", [str(exc)]):

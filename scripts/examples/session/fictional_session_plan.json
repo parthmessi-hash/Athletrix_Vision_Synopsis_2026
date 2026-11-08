@@ -1,0 +1,140 @@
+{
+  "_note": "FICTIONAL example plan for rehearsals and tests. Not a real team, roster or device assignment.",
+  "format": "athletrix-session-plan",
+  "schema_version": 1,
+  "name": "FICTIONAL rehearsal session",
+  "fictional": true,
+  "team_id": "fictional-rehearsal",
+  "sport": "soccer",
+  "athletes": [
+    {
+      "id": "f01",
+      "name": "Fictional Midfielder A",
+      "jersey_number": 8,
+      "status": "on_field",
+      "current_role": "central midfielder",
+      "able_roles": [
+        "central midfielder"
+      ],
+      "inputs": {
+        "physiology": "expected",
+        "physiology_interval_s": 1.0,
+        "camera": null,
+        "camera_interval_s": null
+      },
+      "wearable_device_id": "fictional-strap-f01"
+    },
+    {
+      "id": "f02",
+      "name": "Fictional Centre Back",
+      "jersey_number": 4,
+      "status": "on_field",
+      "current_role": "centre back",
+      "able_roles": [
+        "centre back"
+      ],
+      "inputs": {
+        "physiology": "expected",
+        "physiology_interval_s": 1.0,
+        "camera": null,
+        "camera_interval_s": null
+      },
+      "wearable_device_id": "fictional-strap-f02"
+    },
+    {
+      "id": "f03",
+      "name": "Fictional Right Back",
+      "jersey_number": 2,
+      "status": "on_field",
+      "current_role": "right back",
+      "able_roles": [
+        "right back"
+      ],
+      "inputs": {
+        "physiology": "expected",
+        "physiology_interval_s": 1.0,
+        "camera": null,
+        "camera_interval_s": null
+      },
+      "wearable_device_id": "fictional-strap-f03"
+    },
+    {
+      "id": "f04",
+      "name": "Fictional Winger",
+      "jersey_number": 7,
+      "status": "on_field",
+      "current_role": "winger",
+      "able_roles": [
+        "winger",
+        "forward"
+      ],
+      "inputs": {
+        "physiology": "not_used",
+        "physiology_interval_s": null,
+        "camera": null,
+        "camera_interval_s": null
+      },
+      "wearable_device_id": null
+    },
+    {
+      "id": "f05",
+      "name": "Fictional Bench Utility",
+      "jersey_number": 14,
+      "status": "bench",
+      "current_role": null,
+      "able_roles": [
+        "central midfielder",
+        "right back"
+      ],
+      "inputs": {
+        "physiology": "expected",
+        "physiology_interval_s": 1.0,
+        "camera": null,
+        "camera_interval_s": null
+      },
+      "wearable_device_id": "fictional-strap-f05"
+    },
+    {
+      "id": "f06",
+      "name": "Fictional Bench Forward",
+      "jersey_number": 17,
+      "status": "bench",
+      "current_role": null,
+      "able_roles": [
+        "forward",
+        "winger"
+      ],
+      "inputs": {
+        "physiology": "not_used",
+        "physiology_interval_s": null,
+        "camera": null,
+        "camera_interval_s": null
+      },
+      "wearable_device_id": null
+    }
+  ],
+  "sources": {
+    "wearable": {
+      "selected": true,
+      "note": "FICTIONAL replay of made-up readings; no real wearable"
+    },
+    "camera": {
+      "selected": false,
+      "calibration_path": null,
+      "time_mapping_path": null,
+      "clip_or_camera": null
+    }
+  },
+  "constraints": {
+    "substitutions_remaining": 3,
+    "no_substitution_before": null,
+    "keep_on_field": [],
+    "do_not_bring_on": [
+      {
+        "athlete_id": "f06",
+        "reason": "fictional: kept for the next fixture"
+      }
+    ]
+  },
+  "min_free_storage_mb": 200
+}

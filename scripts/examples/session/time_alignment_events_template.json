@@ -1,0 +1,16 @@
+{
+  "_instructions": "Blank reference events for scripts/time_align.py fit. stream_time_s is the stream's own clock (video seconds, device seconds); reference_utc is the reference clock with timezone. basis: capture_time_mapping (measured clock), operator_estimate (matched events) or replay_anchor (playback only). Give 3+ events spread over the session to estimate drift.",
+  "stream": "camera",
+  "stream_id": "",
+  "basis": "operator_estimate",
+  "reference_uncertainty_s": null,
+  "tolerance_s": 0.1,
+  "events": [
+    {
+      "label": "",
+      "stream_time_s": null,
+      "reference_utc": "",
+      "note": ""
+    }
+  ]
+}

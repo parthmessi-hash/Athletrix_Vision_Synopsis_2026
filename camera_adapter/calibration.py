@@ -191,6 +191,7 @@ class Calibration:
     check_errors_m: dict | None = None
     software: dict = field(default_factory=dict)
     lens: object | None = None   # camera_adapter.intrinsics.Intrinsics, or None (no lens model)
+    camera_settings: dict | None = None   # operator-stated lens / zoom / focus / mount note; None = not recorded
 
     def corrected(self, u: float, v: float) -> tuple[float, float]:
         """The point the homography works on: undistorted with the lens model, or as measured without one."""
@@ -218,6 +219,7 @@ class Calibration:
                 "fit_points": self.fit_points, "check_points": self.check_points, "image_to_field": self.image_to_field,
                 "fit_residual_m": self.fit_residual_m, "check_errors_m": self.check_errors_m,
                 "lens": None if self.lens is None else {**self.lens.to_doc(), "sha256": self.lens.sha256()},
+                "camera_settings": self.camera_settings,
                 "image_points": "raw pixels as measured",
                 "homography_input": "undistorted pixels (lens model above)" if self.lens is not None else "raw pixels (no lens model: distortion not corrected)",
                 "assumptions": ASSUMPTIONS + ([] if self.lens is not None else ["no lens-distortion model: wide-angle distortion is not corrected"]), "software": self.software}
@@ -236,7 +238,7 @@ def _errors(h, points, lens=None) -> dict:
 
 
 def fit(width: int, height: int, fit_points: list[dict], check_points: list[dict] | None = None, *, camera_id: str = "", software: dict | None = None,
-        lens=None) -> Calibration:
+        lens=None, camera_settings: dict | None = None) -> Calibration:
     """`lens` (camera_adapter.intrinsics.Intrinsics) is optional; it must have been calibrated at width x height."""
     check_points = check_points or []
     if lens is not None and (lens.width, lens.height) != (width, height):
@@ -259,7 +261,7 @@ def fit(width: int, height: int, fit_points: list[dict], check_points: list[dict
         raise CalibrationError(["the points lie on both sides of the image horizon for this transformation; the arrangement or the measurements are inconsistent"])
     cal = Calibration(width, height, [dict(p) for p in fit_points], [dict(p) for p in check_points], h, camera_id=camera_id,
                       created_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                      software={"method": METHOD, **(software or {})}, lens=lens)
+                      software={"method": METHOD, **(software or {})}, lens=lens, camera_settings=camera_settings)
     cal.fit_residual_m = {**_errors(h, fit_points, lens), "note": "residual of the points used for fitting; not independent accuracy"}
     cal.check_errors_m = ({**_errors(h, check_points, lens), "note": "points not used in the fit: independent check of this calibration only"} if check_points else None)
     return cal
@@ -281,7 +283,8 @@ def load(path: Path) -> Calibration:
             raise CalibrationError([f"{path}: the embedded lens model does not match its hash (edited or corrupted file)"])
     try:
         img = doc["image"]
-        cal = fit(img["width"], img["height"], doc["fit_points"], doc.get("check_points") or [], camera_id=doc.get("camera_id", ""), software=doc.get("software"), lens=lens)
+        cal = fit(img["width"], img["height"], doc["fit_points"], doc.get("check_points") or [], camera_id=doc.get("camera_id", ""), software=doc.get("software"), lens=lens,
+                  camera_settings=doc.get("camera_settings"))
     except (KeyError, TypeError) as exc:
         raise CalibrationError([f"{path}: missing or malformed field ({exc})"]) from exc
     stored = doc.get("image_to_field")

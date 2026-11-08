@@ -1,0 +1,19 @@
+{
+  "_instructions": "Blank session plan: fill in real values, keep fictional false for a real session. Keys starting with _ are ignored. physiology/camera: expected | not_used | null (not stated). An interval is the stated sampling schedule; leave null if not known (expected counts then stay unknown).",
+  "format": "athletrix-session-plan",
+  "schema_version": 1,
+  "name": "",
+  "fictional": false,
+  "team_id": "",
+  "sport": "soccer",
+  "athletes": [
+    {"id": "", "name": "", "jersey_number": 0, "status": "on_field", "current_role": "", "able_roles": [""],
+     "inputs": {"physiology": null, "physiology_interval_s": null, "camera": null, "camera_interval_s": null}, "wearable_device_id": null}
+  ],
+  "sources": {
+    "wearable": {"selected": false, "note": "Zephyr access is not confirmed; no reader exists yet"},
+    "camera": {"selected": false, "calibration_path": null, "time_mapping_path": null, "clip_or_camera": {"width": null, "height": null, "camera_id": null, "camera_settings": null}}
+  },
+  "constraints": {"substitutions_remaining": null, "no_substitution_before": null, "keep_on_field": [], "do_not_bring_on": []},
+  "min_free_storage_mb": 500
+}

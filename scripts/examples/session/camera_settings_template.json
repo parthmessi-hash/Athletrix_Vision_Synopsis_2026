@@ -1,0 +1,9 @@
+{
+  "_instructions": "Camera settings as they are NOW (for scripts/camera_setup.py compatible --settings). Put the same keys in the calibration points file as camera_settings when calibrating.",
+  "camera_id": "",
+  "zoom": "",
+  "focus": "",
+  "lens": "",
+  "mount": "",
+  "stabilisation": ""
+}
