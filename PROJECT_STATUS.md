@@ -5,7 +5,7 @@ Sections 1-9 were checked against the code on 2026-10-25 and updated since; the
 status at a glance below was checked on 2026-10-29. Where something is a plan
 rather than working code it is marked **planned**.
 
-## 0. Product and status at a glance (2026-11-03)
+## 0. Product and status at a glance (2026-11-07)
 
 **Intended product.** Athletrix is a soccer-first coaching tool,
 designed to extend to other sports. It is meant to combine (1) wearable physiology
@@ -32,7 +32,7 @@ fictional formats, and the Zephyr reader is deliberately unimplemented.
 
 | Status | What |
 |--------|------|
-| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`, `value_basis`), SQLite persistence with retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence-, continuity- and prediction-aware distance), effort reviews, recordings with saved periods, configuration snapshots, receipt timing, portable packages (format 6) with import, local removal, coach-context records, individual-performance evidence (one evidence kind per area, corrections with audit history, overlap and identity rules, versioned rubric, honest composite availability), athlete baselines with recorded review decisions, an EXPERIMENTAL physiological index, roster state and match constraints, an EXPERIMENTAL rule-based substitution review (keep / consider replacement / review later / insufficient evidence) with saved, reproducible reviews, a fictional full-product demo, a one-command paced fictional match session (`demo_launcher.py --session match`), a one-request team review, coach responses and lineup changes, profile inspection, baseline preview and compatibility, a local video review tool with time-bounded identity confirmation and operator-work counts, an optional lens-distortion stage (calibration format 2), an evaluation workbench, an end-to-end workflow check and a check entry point, and engine-mode dashboard cards for team review, baselines and profiles, camera review, coach context, performance evidence and the experimental review. Camera adapter: observation contract v3 (ground-contact evidence, close encounters with assignments that lapse until re-confirmed), calibration, causal estimator with optional noise rules (off), ground-contact quality policy, time mapping, continuity, export and send; optional YOLOX + ByteTrack video input with offline and bounded (drop-oldest) processing and a benchmark. Wearable foundation (`wearable/`): readers, mapping, assignments, clock, normalization, export and paced replay. |
+| **Implemented (engine and dashboard)** | Provider-agnostic sample ingestion (physiological and tracking, optional `source`, `device_id`, `segment_id`, `value_basis`), SQLite persistence with retention caps, live snapshots, windows, descriptive summaries (heart-rate counts, means, peaks; gap-, confidence-, continuity- and prediction-aware distance), effort reviews, recordings with saved periods, configuration snapshots, receipt timing, portable packages (format 7) with import, local removal, coach-context records, individual-performance evidence (one evidence kind per area, corrections with audit history, overlap and identity rules, versioned rubric, honest composite availability), athlete baselines with recorded review decisions, an EXPERIMENTAL physiological index, roster state and match constraints, an EXPERIMENTAL rule-based substitution review (keep / consider replacement / review later / insufficient evidence) with saved, reproducible reviews, a fictional full-product demo, a one-command paced fictional match session (`demo_launcher.py --session match`), a one-request team review, coach responses and lineup changes, profile inspection, baseline preview and compatibility, a local video review tool with time-bounded identity confirmation, a confirmation queue and a blind annotation sheet panel, decision rules version 2 (keep needs every required input; missing evidence never falls back), a per-player evidence-quality view, a session plan with preflight and a resumable session tool, calibration compatibility checks and operator time alignment, blind reviewer annotation sheets, an optional lens-distortion stage (calibration format 2), an evaluation workbench, an end-to-end workflow check and a check entry point, and engine-mode dashboard cards for team review, baselines and profiles, camera review, coach context, performance evidence and the experimental review. Camera adapter: observation contract v3 (ground-contact evidence, close encounters with assignments that lapse until re-confirmed), calibration, causal estimator with optional noise rules (off), ground-contact quality policy, time mapping, continuity, export and send; optional YOLOX + ByteTrack video input with offline and bounded (drop-oldest) processing and a benchmark. Wearable foundation (`wearable/`): readers, mapping, assignments, clock, normalization, export and paced replay. |
 | **Checked on synthetic or fictional data only** | Marker video, drawn-figure scene through the real detector and tracker, estimator and noise-rule comparison with development and held-out splits, bounded processing with synthetic frames and slow detectors, engine round trip, the wearable foundation with two FICTIONAL provider formats, the performance composite with a FICTIONAL rubric, the physiological index and the substitution review with FICTIONAL profiles and a fictional 50-minute match, the paced live session, identity confirmation on the drawn-figure scene, lens distortion on synthetic geometry, and the evaluation workbench on a fictional dataset (its coach judgments partly written from the demo's expected outputs). None of this says anything about real players, real footage, a real camera's timing or a real wearable. |
 | **Not yet evaluated** | Real sideline footage (no clip with verified permission), any real wearable feed (Zephyr access not yet available), clock alignment between camera and wearable, re-identification after long losses, YOLOX-Tiny accuracy on far or small players. |
 | **Planned, not implemented** | The team's real index formula, rubric and substitution rules (only fictional profiles exist, and none ships), automatic soccer event recognition (passes, turnovers, ball, decisions), jersey or role recognition, multi-camera input, the Zephyr reader, any validation study. The index and the substitution review are software that runs with configured rules; nothing shows that they measure fatigue or improve decisions. |
@@ -660,7 +660,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (808 tests as of 2026-11-03; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
+# engine: full suite, isolated temporary databases (835 tests as of 2026-11-07; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
@@ -817,6 +817,25 @@ Software completion is not real-world validation: no real athlete, wearable, foo
 
 Checks: backend 792 passed; demo 27 of 27; browser harness 82 of 82; the real dashboard on an isolated engine (retrospective and
 as-entered labels, save, reproduce, no console errors); `verify_camera_pipeline.py` 11 of 11.
+
+## Checkpoint: sideline rehearsal (2026-11-07)
+
+Checklist: `docs/sideline-rehearsal-checklist.md`. Operator guide, calibration evidence, Zephyr questions and team
+decisions: `docs/sideline-rehearsal-guide.md`. Every result below is software behaviour on FICTIONAL or synthetic data.
+
+| Milestone | Status | Verification |
+|-----------|--------|--------------|
+| 1. Missing-evidence decisions | Complete | p06 case: old code "keep", new "insufficient evidence" on identical inputs; tests for fresh, stale, disconnected and fresh again, a healthy neighbour, one bad reading, the explicit route, an unavailable replacement returning, an expired instruction, no profile, unknown roster, stopped versus active; harness: an older success after a newer failure is dropped; verifier p06 check |
+| 2. Evidence quality | Complete | tests/test_evidence_quality.py (retries, replacements, rejected writes, device report, expected counts only from a stated interval); team card evidence line and technical detail |
+| 3. Session setup and preflight | Complete | tests/test_session_setup.py; verify_session_workflow.py 14/14 (startup failure, kill and restart, resume, clean shutdown); Session setup card; real browser |
+| 4. Calibration and clock alignment | Complete on synthetic inputs | known offsets and drift recovered, a mismatched event flagged, incompatible calibrations refused; physical camera and real clocks untested |
+| 5. Identity confirmation | Complete on synthetic cases and the drawn-figure clip | five cases (crossing, prolonged occlusion, referee, track restart, corrected mistake); gap lapse in Python and JS; a real-clip bug found and fixed; operator time with a person not measured |
+| 6. Annotation and reviewers | Complete (fictional reviewers) | tests/test_annotation.py; blind panel refuses another reviewer's labelled copy (real browser) |
+| 7. Evaluation pilot rehearsal | Complete (fictional dataset) | Q1 to Q4, five variants, self-check 10/10 with planted errors caught, sensitivity on development only, manifest refusal; verify_evaluation_workflow 46/46 |
+| 8. Failure recovery and saved evidence | Complete (fictional) | verify_operational_workflow 22/22; package format 7 with v6 still read; rehearsal_load 90 s: 19,930 inputs, 0 failed, paused wearables never "keep" while stale; real browser: engine killed and restarted under the open dashboard |
+| 9. Rehearsal guide and decision checklist | Complete | docs/sideline-rehearsal-guide.md, docs/team-decisions-template.md, templates in scripts/examples/session and scripts/examples/annotation |
+
+Real-world validation: none.
 
 ## Checkpoint: operational prototype (2026-11-03)
 

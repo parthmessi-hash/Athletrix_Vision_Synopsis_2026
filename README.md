@@ -1139,7 +1139,7 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 6)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 7)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
@@ -1162,6 +1162,10 @@ layer" below):
 | `roster.json` | roster-state and match-constraint entries; may be an empty list |
 | `reviews.json` | saved reviews with their stored configuration text and evidence copies, imported unchanged apart from new ids; may be an empty list |
 | `responses.json` | (version 6) coach / operator responses and lineup changes, with saved-review and roster-entry references re-pointed on import; may be an empty list |
+
+Version 7 adds no member: roster entries may carry `inputs` (the session plan's expected sources and stated sampling
+intervals) and performance observations may carry `confidence`, `rationale` and `instruction_exception`. Versions 1 to 6
+still read, with those fields absent (not stated, never assumed).
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
@@ -1655,6 +1659,48 @@ single noisy reading (keep). The 40:00 reviews are retrospective (the last five-
 code, saving and reproducing every review, a restart, a correction, a configuration change, export and import into a
 second database, a deliberately changed recorded sample that reproduction must report, and removal of an athlete.
 
+## Sideline rehearsal (2026-11-07): missing-data decisions, evidence quality, session setup, evaluation pilot
+
+**A rehearsal with FICTIONAL athletes, readings, profiles, reviewers and coach decisions. It shows the software
+behaving as described; it validates nothing on real players, a real wearable or a real camera, and is not a basis for
+real substitutions.** The operator guide, the exact calibration evidence, the Zephyr open questions and the team's
+decisions are in `docs/sideline-rehearsal-guide.md` (decision template: `docs/team-decisions-template.md`; batch
+checkpoint: `docs/sideline-rehearsal-checklist.md`).
+
+- **Decision rules version 2** (`app/core/substitution.py`). "Keep" needs every required input: the physiological index
+  and the performance composite. A missing, stale, disconnected or uncertain input gives "insufficient evidence", and
+  the other input is never a fallback. One unconfirmed reading gives "review later" at the point where it could be
+  confirmed. A role mismatch with a missing input is a labelled context-only observation, never a recommendation. A
+  performance-only route exists only when the profile enables it AND the player's session plan says no wearable is used.
+  Saved reviews keep their result; reproducing one saved under version 1 says the rules changed.
+- **Evidence quality** (`app/core/evidence.py`). For each player and source: observed time, receipt time and age; status
+  (present, delayed, stale, disconnected, unavailable, not used, unknown); window counts; an expected count only from a
+  stated sampling interval; exclusions by reason; retries (kept once, first receipt kept), replacements and rejected
+  writes (`ingest_rejections`); device reports; camera gaps and segments; and which inputs the review used. It is part
+  of the team review, with `GET /api/v1/recordings/{id}/evidence` when no recommendation is wanted. Labels use
+  adjustable engineering defaults (`EVIDENCE_*` settings), not the team's freshness requirements.
+- **Session setup** (`app/models/session.py`, `POST/GET /api/v1/preflight`, `scripts/sideline_session.py`). A plan, then
+  preflight with separate readiness for raw recording, camera review and the experimental recommendation, then a
+  resumable start, status, stop and inspect. The plan becomes roster entries with `inputs` and the recording's start
+  metadata; there is no second configuration system. Dashboard: Session setup card.
+- **Camera and clock** (`camera_adapter/setup.py`, `scripts/camera_setup.py`, `app/core/alignment.py`,
+  `scripts/time_align.py`). A capture checklist; calibration inspection and compatibility, which resolution, camera or
+  settings changes invalidate; fit error versus independent check-point error; time alignment from reference events with
+  offset, drift, leave-one-out uncertainty and mismatched events flagged, never dropped. Bases are stated (capture
+  mapping, operator estimate, replay anchor); without an alignment, cross-stream comparison is unavailable.
+- **Identity confirmation** (Athletrix_Web `tools/video-review.*`, `camera_adapter/observations.py`). A queue of
+  track starts, possible restarts, ends of encounter holds and long gaps. An assignment also lapses after a gap longer
+  than 1 s. Separately confirmed intervals never share a continuity segment. Reaching the end of a hold makes a track
+  eligible, not identified.
+- **Reviewer annotation** (`app/core/annotation.py`, `scripts/annotate.py`, video tool Annotation sheet panel). Blind
+  sheets with separate execution, decision, positioning and tactical questions; comparison with assessable counts and
+  every disagreement; adjudication that keeps the originals; import into manual evidence.
+- **Evaluation pilot rehearsal** (`scripts/evaluate.py`). Q1 software reproduction (planted alterations detected), Q2
+  camera positions and identity swaps, Q3 reviewer agreement, Q4 recommendation versus judgment under five variants;
+  independently written expectations with planted errors; development-only sensitivity; a pinned manifest.
+- **Checks**: `scripts/verify_session_workflow.py` (14), `scripts/verify_operational_workflow.py` (22),
+  `scripts/rehearsal_load.py` (team-scale stale-state behaviour), package format 7.
+
 ## Operational prototype (2026-11-03): live session, team review, responses, video review, evaluation
 
 **Software that runs locally, demonstrated with FICTIONAL data and profiles. Nothing here is validated on real players,
@@ -1668,7 +1714,7 @@ camera adapter ─────────────────────�
 people: context, roster, performance ────┤──> samples, receipts, ├─> GET .../substitution-review, physiological-index,
         evidence, baselines, responses ──┘   evidence, baselines,│     performance-review (per athlete)
                                               roster, responses  ├─> POST .../reviews (saved, pinned), .../reproduce
-                                                                 └─> package.zip (format 6) ─> import on another engine
+                                                                 └─> package.zip (format 7) ─> import on another engine
 ```
 Each sample keeps three times apart: when it was measured (`timestamp`), when this engine received it (receipt
 metadata) and its age at the review time. Every entry by a person (observation, correction, context, roster entry,
