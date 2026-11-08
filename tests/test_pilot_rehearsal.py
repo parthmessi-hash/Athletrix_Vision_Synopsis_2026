@@ -29,5 +29,10 @@ def test_accelerated_rehearsal_end_to_end(tmp_path):
     p2r2 = next(r for r in report["rows"] if r["participant"] == "P2" and r["round"] == 2)
     assert p2r2["scores"]["combined"] is None and p2r2["scores"]["camera_only"] is not None and "stale" in p2r2["reasons"]["combined"][0]
     assert next(r for r in report["rows"] if r["participant"] == "P3" and r["round"] == 1)["outcome_missing"] == "equipment_failure"
-    assert [(x["participant"], x["round"]) for x in report["ineligible"]] == [("P1", 3)] and "false start" in report["ineligible"][0]["reason"]
+    assert [(x["participant"], x["round"]) for x in report["ineligible"]] == [("P1", 3), ("P2", 1)], report["ineligible"]
+    assert "false start" in report["ineligible"][0]["reason"] and "marker_only" in report["ineligible"][1]["reason"], "the missed save is labelled, not hidden"
+    assert report["timing_evidence_counts"].get("saved_before_recorded_start / timing_gate") == 1 and report["policy"] == "confirmed_sequence"
+    p3r2 = next(r for r in report["rows"] if r["participant"] == "P3" and r["round"] == 2)
+    assert p3r2["scores"]["vest_only"] is not None and p3r2["scores"]["camera_only"] is None and p3r2["scores"]["combined"] is None, "a camera gap: vest stays, combined never one-source"
+    assert all(t["exit"] == 0 for t in s["log"]["timing_sheet"]), s["log"]["timing_sheet"]
     assert pilot_rehearsal.main(["--mode", "accelerated", "--duration-min", "90", "--out", str(tmp_path / "x")], out=lines.append) == 2, "never a 90-minute claim"

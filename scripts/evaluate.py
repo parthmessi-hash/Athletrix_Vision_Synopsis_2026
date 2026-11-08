@@ -4,8 +4,8 @@ USAGE
     python scripts/evaluate.py make-fictional --out DIR          # a FICTIONAL dataset to exercise the workbench (labelled fictional)
     python scripts/evaluate.py manifest DATASET.json --out MANIFEST.json [profile options]   # pin what a run will use
     python scripts/evaluate.py pilot-pin --profile PROFILE.json --analysis-split participant|session [--held-out P3 ...] --out PIN.json
-    python scripts/evaluate.py pilot (--packages A.zip [B.zip ...] | --rows ROWS.json) --out DIR [--pin PIN.json]
-                               # the fatigue pilot's paired report: saved pre-sprint scores vs timed sprint slowdown
+    python scripts/evaluate.py pilot (--packages A.zip [B.zip ...] | --rows ROWS.json) --out DIR [--manifest STUDY_MANIFEST.json] [--pin PIN.json]
+                               # the fatigue pilot's paired report: saved pre-sprint scores vs percent increase in sprint time
     python scripts/evaluate.py run DATASET.json --out DIR [--split development|held_out|all] [--manifest MANIFEST.json]
                                [--index-profile A.json [--index-profile B.json]] [--substitution-profile S.json] [--rubric R.json]
                                [--expected EXPECTED.json] [--no-sensitivity]
@@ -718,7 +718,7 @@ def pilot_pin(args, out) -> int:
     _, sha = parse_profile(text)
     pin = {"format": "athletrix-pilot-pin", "format_version": 1, "pinned_at": datetime.now().astimezone().isoformat(timespec="seconds"),
            "profile_sha256": sha, "profile_file": Path(args.profile).name, "split_by": args.analysis_split, "held_out": sorted(args.held_out or []),
-           "analysis": {"outcome": "percent slowdown of the timed 20 m sprint against the participant's best valid time in that session",
+           "analysis": {"outcome": "percent increase in sprint time relative to the participant's best valid time in that session",
                         "statistic": "Pearson r per candidate on matched rows; per participant, per session and pooled", "targets": ["combined r >= 0.5", "combined r above both single-source r"]},
            "note": "Pin the profile and the analysis before collecting the held-out data. Rows whose recording started before pinned_at are never reported as held out."}
     if args.out.exists():
@@ -729,13 +729,32 @@ def pilot_pin(args, out) -> int:
     return 0
 
 
+MANIFEST_FORMAT = "athletrix-study-manifest"
+MANIFEST_KEYS = ("study_id", "fictional", "declared_at", "profile_sha256", "baseline_procedure", "timing", "camera", "rounds", "analysis", "approval")
+
+
+def load_manifest(path: Path) -> tuple[dict, str]:
+    data = Path(path).read_bytes()
+    m = json.loads(data)
+    if m.get("format") != MANIFEST_FORMAT or m.get("format_version") != 1:
+        raise ValueError(f"{path} is not an {MANIFEST_FORMAT} version 1 file")
+    missing = [k for k in MANIFEST_KEYS if k not in m]
+    if missing:
+        raise ValueError(f"the study manifest lacks {', '.join(missing)}")
+    if m["timing"].get("policy") not in ("independent_start_reference", "confirmed_sequence"):
+        raise ValueError("timing.policy must be independent_start_reference or confirmed_sequence")
+    if not m["profile_sha256"]:
+        raise ValueError("the study manifest names no frozen profile (profile_sha256 is empty)")
+    return m, hashlib.sha256(data).hexdigest()
+
+
 def pilot(args, out) -> int:
     from app.core.pilot_analysis import compare, rows_from_package  # noqa: PLC0415
     from app.core.recording_package import read_package  # noqa: PLC0415
-    source, rows, fictional, starts, frozen = [], [], False, {}, {}
+    source, rows, starts, frozen = [], [], {}, {}
     if args.rows:
         doc = json.loads(Path(args.rows).read_text())
-        rows, fictional = doc["rows"], bool(doc.get("fictional"))
+        rows = [{**r, "fictional": r.get("fictional", bool(doc.get("fictional")))} for r in doc["rows"]]
         source.append({"rows": Path(args.rows).name, "sha256": hashlib.sha256(Path(args.rows).read_bytes()).hexdigest()})
     for pth in args.packages or []:
         data = Path(pth).read_bytes()
@@ -745,90 +764,121 @@ def pilot(args, out) -> int:
             return 1
         rr = rows_from_package(pkg)
         rows += rr
-        fictional = fictional or any(r["fictional"] for r in rr)
         for r in rr:
             starts[(r["participant"], r["session"])] = pkg.recording["started_at"]
         sess = next((e for e in pkg.study if e.kind == "session" and e.profile), None)
         if sess:
             frozen[sess.profile["sha256"]] = {"version": sess.profile["version"], "fictional": sess.profile["fictional"], "text": sess.profile["text"]}
         source.append({"package": Path(pth).name, "sha256": hashlib.sha256(data).hexdigest(), "recording_id": pkg.recording["id"]})
-    pin = json.loads(Path(args.pin).read_text()) if args.pin else None
-    held = {"status": "no pin: nothing is reported as held out"}
-    if pin:
-        shas = {r.get("profile_sha256") for r in rows if r.get("profile_sha256")}
-        if shas and shas != {pin["profile_sha256"]}:
-            out(f"refused: the rows were scored with profile(s) {sorted(s[:12] for s in shas)}, the pin names {pin['profile_sha256'][:12]}")
+    fict = {bool(r.get("fictional")) for r in rows}
+    if len(fict) > 1:
+        out("refused: the inputs mix FICTIONAL and real sessions; report them separately")
+        return 1
+    shas = {r.get("profile_sha256") for r in rows if r.get("profile_sha256")}
+    if len(shas) > 1:
+        out(f"refused: the inputs were scored with different frozen profiles ({', '.join(sorted(x[:12] for x in shas))}); one report per protocol")
+        return 1
+    manifest, manifest_sha, policy, methods = None, None, "confirmed_sequence", None
+    if args.manifest:
+        try:
+            manifest, manifest_sha = load_manifest(args.manifest)
+        except (OSError, ValueError) as exc:
+            out(f"refused: {exc}")
             return 1
-        key = "participant" if pin["split_by"] == "participant" else "session"
-        pinned_at = datetime.fromisoformat(pin["pinned_at"])
-        test = [r for r in rows if r[key] in pin["held_out"]]
-        late = [r for r in test if (r["participant"], r["session"]) not in starts or datetime.fromisoformat(starts[(r["participant"], r["session"])].replace("Z", "+00:00")) < pinned_at]
-        participants = sorted({r["participant"] for r in rows})
+        if shas and shas != {manifest["profile_sha256"]}:
+            out(f"refused: the rows were scored with profile {next(iter(shas))[:12]}, the study manifest declares {manifest['profile_sha256'][:12]}")
+            return 1
+        if fict and bool(manifest["fictional"]) != next(iter(fict)):
+            out("refused: the study manifest and the inputs disagree about being FICTIONAL")
+            return 1
+        policy = manifest["timing"]["policy"]
+        methods = manifest["timing"].get("reference_methods") or None
+    pin = json.loads(Path(args.pin).read_text()) if args.pin else None
+    if pin and shas and shas != {pin["profile_sha256"]}:
+        out(f"refused: the rows were scored with profile(s) {sorted(x[:12] for x in shas)}, the pin names {pin['profile_sha256'][:12]}")
+        return 1
+    decl = manifest or pin
+    held = {"status": "nothing declared held out: no held-out claim"}
+    if decl and (decl.get("held_out") or (decl.get("analysis") or {}).get("held_out")):
+        held_list = decl.get("held_out") or decl["analysis"]["held_out"]
+        key = "participant" if (decl.get("split_by") or (decl.get("analysis") or {}).get("split_by")) == "participant" else "session"
+        declared_at = datetime.fromisoformat(decl.get("pinned_at") or decl["declared_at"])
+        test = [r for r in rows if r[key] in held_list]
+        late = [r for r in test if (r["participant"], r["session"]) not in starts or datetime.fromisoformat(starts[(r["participant"], r["session"])].replace("Z", "+00:00")) < declared_at]
         if not test:
             held = {"status": "no held-out rows in this data"}
         elif late:
-            held = {"status": "NOT HELD OUT: some of these rows were recorded before the pin (or their recording time is unknown), so they could have influenced the choices"}
+            held = {"status": "NOT HELD OUT: some of these rows were recorded before the declaration (or their recording time is unknown), so they could have influenced the choices"}
         else:
-            held = {"status": f"held out by {key} ({', '.join(pin['held_out'])}), recorded after the pin", "comparison": compare(test)}
-        held["limits"] = (f"{len(participants)} participants in total: a held-out {key} is one or two people, so any held-out figure describes those few rounds only "
-                          "and is not evidence for other players.")
-        rows = [r for r in rows if r[key] not in pin["held_out"]] if test else rows
-    res = compare(rows)
-    res.update(source=source, fictional=fictional, pin=pin, held_out=held, generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-               frozen_profiles=frozen, analysis_choices={"outcome": res["units"], "eligibility": "prospective predictions in rounds not marked invalid",
-                                                          "statistic": "Pearson r on rows where all three candidates and the outcome exist", "targets": ["combined r >= 0.5",
-                                                          "combined r above both single-source r"], "small_sample_flag_below": 5, "tuned_on_outcomes": False})
+            held = {"status": f"held out by {key} ({', '.join(held_list)}), recorded after the declaration", "comparison": compare(test, policy, methods)}
+        held["limits"] = (f"{len({r['participant'] for r in rows})} participants in total: a held-out {key} is one or two people, so any held-out figure describes those "
+                          "few rounds only and is not evidence for other players.")
+        rows = [r for r in rows if r[key] not in held_list] if test else rows
+    res = compare(rows, policy, methods)
+    res.update(source=source, fictional=bool(fict and next(iter(fict))), pin=pin, study_manifest=manifest, study_manifest_sha256=manifest_sha, held_out=held,
+               generated_at=datetime.now().astimezone().isoformat(timespec="seconds"), frozen_profiles=frozen,
+               analysis_choices={"outcome": res["outcome"], "policy": policy, "reference_methods": methods or "all timed methods",
+                                 "statistic": "Pearson r on the policy-eligible rows where all three candidates and the outcome exist",
+                                 "targets": ["combined r >= 0.5", "combined r above both single-source r"], "small_sample_flag_below": 5, "tuned_on_outcomes": False})
     if args.out.exists():
         out(f"{args.out} exists; not overwritten")
         return 2
     args.out.mkdir(parents=True)
     (args.out / "results.json").write_text(json.dumps(res, indent=2, default=str))
     (args.out / "report.md").write_text(pilot_report(res))
-    out(f"wrote {args.out / 'report.md'} and results.json" + (" · FICTIONAL" if fictional else ""))
+    out(f"wrote {args.out / 'report.md'} and results.json" + (" · FICTIONAL" if res["fictional"] else ""))
     return 0
 
 
 def pilot_report(r: dict) -> str:
     def rr(x):
         return (x.get("why") or "undefined") if x["r"] is None else f"{x['r']:+.3f}"
+    verdict = lambda v: "MET" if v is True else ("NOT MET" if v is False else "UNDEFINED")  # noqa: E731
     L = ["# Fatigue pilot: paired report", ""]
     if r["fictional"]:
-        L += ["**FICTIONAL data: made-up readings and made-up sprint times. This exercises the analysis; it shows nothing about real players.**", ""]
-    L += ["Saved pre-sprint scores (as available at each cutoff) against percent slowdown of the independently timed 20 m sprint "
-          "(against the participant's best valid time in that session, a retrospective reference for the outcome only). "
-          f"Units: {r['units']}.", "",
-          f"Matched rows (all three scores and an outcome): **{r['matched_rows']}** from {r['participants']} participants and {r['sessions']} participant-sessions. "
-          "Rounds of one person are repeated observations, not independent participants.", "", "## Coverage per candidate", "",
-          "| Candidate | Rows | Usable | Missing reasons |", "|---|---|---|---|"]
+        L += ["**FICTIONAL data: made-up readings and made-up sprint times. This exercises the analysis; it shows nothing about real players or fatigue.**", ""]
+    L += [f"Outcome: {r['outcome']}.", "",
+          f"Timing policy: **{r['policy']}** ({'declared in study manifest ' + r['study_manifest_sha256'][:12] if r.get('study_manifest_sha256') else 'default: no study manifest given'}). "
+          f"Reference attempts: {r['reference_methods']}, rounds not marked invalid.", "",
+          f"Primary rows (policy-eligible, all three scores and the outcome): **{r['matched_rows']}** from {r['participants']} participants and {r['sessions']} "
+          "participant-sessions. Rounds of one person are repeated observations, not independent participants.", "",
+          "## Timing evidence of the saved predictions", "", "| Category / basis | Rounds |", "|---|---|"]
+    L += [f"| {k} | {v} |" for k, v in sorted(r["timing_evidence_counts"].items())]
+    L += ["", "## Best valid reference per participant and session", "", "| Participant/session | Round | Time (s) | Method | Result entry | Corrected from |", "|---|---|---|---|---|---|"]
+    L += [f"| {k} | {v['round']} | {v['time_s']} | {v.get('method')} | {v.get('result_id')} | {', '.join(map(str, v['corrected_from'])) or '-'} |" for k, v in r["best_references"].items()]
+    L += ["", "## Coverage per candidate", "", "| Candidate | Rows | Usable | Excluded | Reasons |", "|---|---|---|---|---|"]
     for c, v in r["coverage"].items():
-        L.append(f"| {c} | {v['rows']} | {v['usable']} | " + "; ".join(f"{k} ({n})" for k, n in v["missing_reasons"].items()) + " |")
-    p = r["pooled"]
-    t = r["targets"]
-    verdict = lambda v: "MET" if v is True else ("NOT MET" if v is False else "UNDEFINED")  # noqa: E731
-    L += ["", "## Pooled matched rows", "", "| Candidate | r | n | flag |", "|---|---|---|---|"]
+        L.append(f"| {c} | {v['rows']} | {v['usable']} | {v['excluded']} | " + "; ".join(f"{k} ({n})" for k, n in v["excluded_reasons"].items()) + " |")
+    p, t = r["pooled"], r["targets"]
+    L += ["", "## Primary comparison (pooled; repeated rounds from few people)", "", "| Candidate | r | n | flag |", "|---|---|---|---|"]
     for c in ("vest_only", "camera_only", "combined"):
         L.append(f"| {c} | {rr(p[c])} | {p[c]['n']} | {p[c].get('flag') or p[c].get('why') or ''} |")
     L += ["", f"Combined minus vest-only: {p['combined_minus_vest_only']}; combined minus camera-only: {p['combined_minus_camera_only']}.", "",
-          f"**Engineering targets** (not proof of effectiveness): combined r >= 0.5: **{verdict(t['combined_r_at_least_0.5'])}**; "
+          f"**Engineering targets** (goals, not proof of effectiveness): combined r >= 0.5: **{verdict(t['combined_r_at_least_0.5'])}**; "
           f"combined above both single-source: **{verdict(t['combined_above_both_single_source'])}**.", "",
-          f"Round order: r(round, slowdown) = {rr(p['round_order']['round_vs_slowdown'])}; " +
+          f"Round order: r(round, time increase) = {rr(p['round_order']['round_vs_time_increase'])}; " +
           ", ".join(f"r(round, {c}) = {rr(p['round_order'][f'round_vs_{c}'])}" for c in ("vest_only", "camera_only", "combined")) +
-          ". If everything rises with the round number, a score can correlate with slowdown simply because both grow with time.", "",
+          ". If everything rises with the round number, a score can correlate with the outcome simply because both grow with time.", "",
           "## By participant", "", "| Participant | rows | vest-only r | camera-only r | combined r | combined wins? | flags |", "|---|---|---|---|---|---|---|"]
     for k, b in r["by_participant"].items():
-        wins = (None if None in (b["combined"]["r"], b["vest_only"]["r"], b["camera_only"]["r"]) else b["combined"]["r"] > max(b["vest_only"]["r"], b["camera_only"]["r"]))
+        wins = None if None in (b["combined"]["r"], b["vest_only"]["r"], b["camera_only"]["r"]) else b["combined"]["r"] > max(b["vest_only"]["r"], b["camera_only"]["r"])
         L.append(f"| {k} | {b['rows']} | {rr(b['vest_only'])} | {rr(b['camera_only'])} | {rr(b['combined'])} | {'yes' if wins else 'NO' if wins is False else 'undefined'} | " +
                  "; ".join(sorted({x.get("flag") or x.get("why") for x in (b["vest_only"], b["camera_only"], b["combined"]) if x.get("flag") or x.get("why")})) + " |")
     L += ["", "## By participant and session", "", "| Participant/session | rows | vest-only r | camera-only r | combined r |", "|---|---|---|---|---|"]
-    for k, b in r["by_session"].items():
-        L.append(f"| {k} | {b['rows']} | {rr(b['vest_only'])} | {rr(b['camera_only'])} | {rr(b['combined'])} |")
-    L += ["", "## Rounds left out of every correlation", ""] + ([f"- {x['participant']} {x['session']} round {x['round']}: {x['reason']}" for x in r["ineligible"]] or ["- none"])
+    L += [f"| {k} | {b['rows']} | {rr(b['vest_only'])} | {rr(b['camera_only'])} | {rr(b['combined'])} |" for k, b in r["by_session"].items()]
+    e = r["exploratory_including_unverified_timing"]
+    L += ["", "## Exploratory: including rounds whose save-before-start order is unverified (never the primary result)", "",
+          f"{e['rows']} rows: " + ", ".join(f"{c} {rr(e[c])}" for c in ("vest_only", "camera_only", "combined")), "",
+          "## Rounds left out of the primary comparison", ""] + ([f"- {x['participant']} {x['session']} round {x['round']}: {x['reason']}" for x in r["ineligible"]] or ["- none"])
     L += ["", "## Held out", r["held_out"]["status"], r["held_out"].get("limits", ""), "",
-          "## Self-rating (exploratory, never a score input)", f"r(self-rating, slowdown) = {rr(r['self_rating_exploratory']['self_rating_vs_slowdown'])} on {r['self_rating_exploratory']['rows']} rows.", "",
-          "## Rows", "", "| Participant | Session | Round | vest-only | camera-only | combined | time (s) | slowdown % |", "|---|---|---|---|---|---|---|---|"]
+          "## Self-rating (exploratory, never a score input)", f"r(self-rating, time increase) = {rr(r['self_rating_exploratory']['self_rating_vs_time_increase'])} on {r['self_rating_exploratory']['rows']} rows.", "",
+          "## Rows (trace)", "", "| Participant | Session | Round | vest | camera | combined | time (s) | increase % | timing | prediction | result (history) |", "|---|---|---|---|---|---|---|---|---|---|---|"]
     for x in r["rows"]:
         s = x["scores"]
-        L.append(f"| {x['participant']} | {x['session']} | {x['round']} | {s['vest_only']} | {s['camera_only']} | {s['combined']} | {x.get('time_s') or x.get('outcome_missing')} | {x['slowdown_pct']} |")
+        hist = f"{x.get('result_id') or '-'}" + (f" (was {', '.join(str(h.get('time_s') or h.get('missing_reason')) for h in x.get('result_history', []))})" if x.get("result_history") else "")
+        L.append(f"| {x['participant']} | {x['session']} | {x['round']} | {s['vest_only']} | {s['camera_only']} | {s['combined']} | {x.get('time_s') or x.get('outcome_missing')} | "
+                 f"{x['time_increase_pct']} | {x['timing']['category']} / {x['timing']['basis']}{' (INVALID round)' if x.get('invalid') else ''} | {x.get('prediction_id') or '-'} | {hist} |")
+    L += ["", "Inputs: " + "; ".join(json.dumps(s) for s in r["source"]), f"Frozen profiles: {', '.join(k[:12] + ' ' + v['version'] for k, v in r['frozen_profiles'].items()) or 'from the rows'}"]
     return "\n".join(L) + "\n"
 
 
@@ -864,6 +914,7 @@ def main(argv=None, out=print) -> int:
     g.add_argument("--rows", type=Path)
     pp.add_argument("--out", type=Path, required=True)
     pp.add_argument("--pin", type=Path)
+    pp.add_argument("--manifest", type=Path, help="the study manifest declared before outcomes were collected (scripts/examples/pilot/study_manifest_template.json)")
     pn = sub.add_parser("pilot-pin", help="pin the pilot profile and analysis before collecting held-out data")
     pn.add_argument("--profile", type=Path, required=True)
     pn.add_argument("--analysis-split", choices=["participant", "session"], required=True)

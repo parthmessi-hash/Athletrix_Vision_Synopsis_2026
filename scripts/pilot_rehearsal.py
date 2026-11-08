@@ -62,7 +62,7 @@ def z(t: datetime) -> str:
 
 class Api:
     def __init__(self, base: str, client) -> None:
-        self.base, self.c = base.rstrip("/"), client
+        self.base, self.c = base.rstrip("/"), client   # base without /api/v1
         self.failed: dict[str, int] = {}
         self.sent: dict[str, int] = {}
         self.lat: dict[str, list] = {}
@@ -174,6 +174,7 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
                 start = now()
                 step, nxt, t_hr = 0.1, start, start
                 drop = (code, rnd) == dropout
+                cam_gap = (code, rnd) == ("P3", 2) and cycle == 0   # the camera loses this player for the last 15 s before the save
                 while (now() - start).total_seconds() < args.round_s:
                     target = nxt
                     w = (target - now()).total_seconds()
@@ -188,13 +189,24 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
                             api.call("physiological", "POST", "/samples/physiological", json={"athlete_id": aid, "timestamp": z(t), "source": "simulated", "device_id": VEST,
                                                                                                "heart_rate_bpm": round(sc.hr(rest_hr, hrmax, f, ph, False), 1)})
                     for who, ff in [(aid, f)] + [(c, 0.3) for c in CAMERA_ONLY]:
+                        if who == aid and cam_gap and ph > args.round_s - 15:
+                            continue
                         api.call("tracking", "POST", "/samples/tracking", json={"athlete_id": who, "timestamp": z(t), "x_position": 0.0, "y_position": 0.0,
                                                                               "speed_mps": round(sc.speed(ff, ph + (7 if who != aid else 0), False), 2), "acceleration_mps2": 0.0,
                                                                               "tracking_confidence": 0.9, "source": "camera", "segment_id": f"seg-{who}", "value_basis": "estimated"})
                     nxt = target + timedelta(seconds=step)
                 t0 = time.perf_counter()
-                mark = entry(kind="sprint_start", athlete_id=aid, round=rnd)
+                missed = (code, rnd) == ("P2", 1) and cycle == 0   # the operator missed "save score": the order cannot be verified
+                saved = None
+                if not missed:
+                    saved = entry(kind="score_save", athlete_id=aid, round=rnd)
                 pred_ms = 1000 * (time.perf_counter() - t0)
+                sleep(1.0)   # the operator reads the confirmation, then starts the sprint
+                ref = None
+                if (code, rnd) == ("P1", 2) and cycle == 0:   # a timing gate with a recorded clock check (FICTIONAL)
+                    ref = {"source": "timing_gate", "device_time": z(now() + timedelta(seconds=0.5) - timedelta(seconds=0.25)), "clock_offset_s": 0.25,
+                           "clock_uncertainty_s": 0.05, "mapping_reference": "FICTIONAL gate clock check"}
+                mark = entry(kind="sprint_start", athlete_id=aid, round=rnd, **({"confirms_prediction_id": saved["id"]} if saved else {}), **({"start_reference": ref} if ref else {}))
                 for i in range(int(args.sprint_s * 10)):
                     sleep(0.1)
                     t = now()
@@ -209,17 +221,35 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
                 else:
                     entry(kind="round_end", athlete_id=aid, round=rnd)
                 log["rounds"].append({"participant": code, "athlete_id": aid, "round": rnd, "hidden_fatigue": round(f, 3), "sprint_start_id": (mark or {}).get("id"),
+                                      "saved_prediction_id": (saved or {}).get("id"), "all_three_available": ((saved or {}).get("prediction") or {}).get("all_three_available"),
+                                      "save_missed": missed, "gate_start_reference": bool(ref), "camera_gap_before_save": cam_gap,
                                       "prediction_save_ms": round(pred_ms, 1), "dropout_before_sprint": drop, "base_time": base_time})
                 rounds_total += 1
-            # independent results and self-ratings, entered after the participant's rounds (a separate outcome model)
-            for r in [x for x in log["rounds"] if x["participant"] == code and "time_s" not in x]:
+            # independent results through the blind timing sheet (a separate outcome model; the timer never sees a score)
+            todo = [x for x in log["rounds"] if x["participant"] == code and "time_s" not in x]
+            import csv as _csv  # noqa: PLC0415
+            import sprint_timing  # noqa: PLC0415
+            sheet = Path(tempfile.mkdtemp(prefix="athletrix-timing-")) / "times.csv"
+            tl: list[str] = []
+            sprint_timing.main(["--engine", api.base, "--recording", rid, "sheet", "--out", str(sheet)], out=tl.append, client=api.c)
+            srows = list(_csv.DictReader(open(sheet)))
+            for r in todo:
+                row = next(x for x in srows if (x["participant_code"], x["round"]) == (code, str(r["round"])))
                 if (code, r["round"]) == ("P3", 1):
-                    entry(kind="sprint_result", athlete_id=aid, round=r["round"], missing_reason="equipment_failure", notes="FICTIONAL: gate battery")
+                    row.update(missing_reason="equipment_failure", notes="FICTIONAL: gate battery", timer="FICTIONAL timer")
+                    r["time_s"] = None
+                elif (code, r["round"]) == ("P1", 3):
+                    row.update(invalid_reason="FICTIONAL: false start", timer="FICTIONAL timer")
                     r["time_s"] = None
                 else:
                     t_s = sc.sprint_time(base_time, r["hidden_fatigue"])
-                    entry(kind="sprint_result", athlete_id=aid, round=r["round"], time_s=t_s, method="timing_gates", recorded_by="fictional timer")
+                    row.update(method="timing_gates", time_s=str(t_s), precision_s="0.01", timer="FICTIONAL timer")
                     r["time_s"] = t_s
+            with open(sheet, "w", newline="") as fh:
+                wr = _csv.DictWriter(fh, fieldnames=sprint_timing.COLUMNS); wr.writeheader(); [wr.writerow(x) for x in srows if any(x.get(k) for k in ("time_s", "missing_reason", "invalid_reason"))]
+            code_v = sprint_timing.main(["--engine", api.base, "--recording", rid, "apply", str(sheet), "--yes"], out=tl.append, client=api.c)
+            log.setdefault("timing_sheet", []).append({"participant": code, "exit": code_v, "summary": tl[-1] if tl else None})
+            for r in todo:
                 if r["round"] % 2 == 0:
                     entry(kind="self_rating", athlete_id=aid, round=r["round"], missing_reason="not_collected")
                 else:

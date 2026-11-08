@@ -1,0 +1,62 @@
+{
+  "format": "athletrix-study-manifest",
+  "format_version": 1,
+  "_instructions": "FICTIONAL example for rehearsals only. Not the team's protocol; not approved.",
+  "study_id": "fictional-rehearsal",
+  "fictional": true,
+  "declared_at": "2026-11-08T03:50:00+00:00",
+  "declared_by": "FICTIONAL operator",
+  "profile_sha256": "18f0fef87471bfddc954a033f2a11bb81c5985fbc0624eae62d07b2cbe3dff73",
+  "profile_file": "fictional_rehearsal_profile.json",
+  "baseline_procedure": {
+    "version": "fictional-1",
+    "description": "FICTIONAL: seated rest, 4 minutes, strap checked, accepted by the operator"
+  },
+  "timing": {
+    "policy": "confirmed_sequence",
+    "_policy_options": "independent_start_reference | confirmed_sequence",
+    "reference_methods": [
+      "timing_gates",
+      "video_frames"
+    ],
+    "_reference_methods_note": "methods allowed to supply the best valid time",
+    "methods_allowed": [
+      "timing_gates",
+      "video_frames"
+    ],
+    "start_reference": "none in the rehearsal",
+    "precision_s": 0.01
+  },
+  "camera": {
+    "calibration_sha256": null,
+    "clock_alignment": {
+      "basis": "operator_estimate",
+      "uncertainty_s": 0.04,
+      "alignment_sha256": null
+    }
+  },
+  "rounds": {
+    "valid_round_rule": "FICTIONAL: completed drill and a sprint started after a confirmed saved score",
+    "invalid_when": [
+      "false start",
+      "slip",
+      "interrupted drill"
+    ],
+    "minimum_wearable_coverage": 0.5,
+    "minimum_camera_tracked_share": 0.6
+  },
+  "analysis": {
+    "outcome": "percent increase in sprint time relative to the best valid time in the same session",
+    "statistic": "Pearson r on policy-eligible rounds with all three scores",
+    "targets": [
+      "combined r >= 0.5",
+      "combined r above both single-source r"
+    ],
+    "split_by": "participant",
+    "held_out": []
+  },
+  "approval": {
+    "status": "none (fictional rehearsal)",
+    "reference": ""
+  }
+}

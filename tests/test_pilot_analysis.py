@@ -23,23 +23,31 @@ def r(x):
 def test_fixture_matches_the_separately_computed_values():
     res = compare(FIX["rows"])
     assert {c: v["usable"] for c, v in res["coverage"].items()} == EXP["coverage_usable"] and res["matched_rows"] == EXP["matched_rows"]
+    assert all(v["rows"] == 12 and v["excluded"] == 12 - v["usable"] for v in res["coverage"].values()), "every excluded round is counted with a reason"
     assert {c: round(res["pooled"][c]["r"], 4) for c in ("vest_only", "camera_only", "combined")} == EXP["pooled_r"]
-    assert round(res["pooled"]["round_order"]["round_vs_slowdown"]["r"], 4) == EXP["round_vs_slowdown_r"]
+    assert round(res["pooled"]["round_order"]["round_vs_time_increase"]["r"], 4) == EXP["round_vs_slowdown_r"]
     for p, want in EXP["by_participant_r"].items():
         got = {c: r(res["by_participant"][p][c]) for c in want}
         assert got == {c: None if v is None else round(v, 3) for c, v in want.items()}, p
     assert res["by_participant"]["P2"]["vest_only"]["why"] == "undefined: constant input"
     assert {k: v for k, v in res["targets"].items() if k != "note"} == EXP["targets_pooled"]
-    assert round(res["self_rating_exploratory"]["self_rating_vs_slowdown"]["r"], 4) == EXP["self_rating_r"]
-    assert "camera stream" in json.dumps(res["coverage"]["combined"]["missing_reasons"])
+    assert round(res["self_rating_exploratory"]["self_rating_vs_time_increase"]["r"], 4) == EXP["self_rating_r"]
+    assert "camera stream" in json.dumps(res["coverage"]["combined"]["excluded_reasons"])
     got = [[x["participant"], x["round"], x["reason"]] for x in res["ineligible"]]
     assert [g[:2] for g in got] == [e[:2] for e in EXP["ineligible"]] and all(g[2].startswith(e[2]) for g, e in zip(got, EXP["ineligible"])), \
         "the retrospective-only and the invalid round are listed, never hidden, and change no figure (the invalid 2.90 s is not the best)"
-    assert res["units"].startswith("slowdown_pct = 100 x (time_s - best_s) / best_s")
+    assert res["outcome"].startswith("time_increase_pct = 100 x (time_s - best_s) / best_s: percent increase in sprint time") and "not percent loss of speed" in res["outcome"]
+    assert {k: {kk: v[kk] for kk in ("round", "time_s")} for k, v in res["best_references"].items()} == {k: {kk: v[kk] for kk in ("round", "time_s")} for k, v in EXP["best_references"].items()}
+    assert res["best_references"]["P2/day1"]["corrected_from"] == [3.1] and res["best_references"]["P2/day1"]["result_id"] == "fx-res-P2-1-corrected"
+    ex = res["exploratory_including_unverified_timing"]
+    assert {c: round(ex[c]["r"], 4) for c in ("vest_only", "camera_only", "combined")} | {"rows": ex["rows"]} == EXP["exploratory_r"], "the unverified round only enters the exploratory figure"
+    assert res["timing_evidence_counts"]["order_unverified / marker_only"] == 1 and res["timing_evidence_counts"]["retrospective / backdated_marker"] == 1
 
 
 def test_a_losing_combined_method_is_reported_as_not_met():
     res = compare([x for x in FIX["rows"] if x["participant"] == "P1"])
+    strict = compare(FIX["rows"], policy="independent_start_reference")
+    assert strict["matched_rows"] == 0 and strict["targets"]["combined_r_at_least_0.5"] is None, "without independent start references nothing meets the strict policy"
     assert {k: v for k, v in res["targets"].items() if k != "note"} == EXP["targets_P1_only"]
     assert res["pooled"]["combined_minus_vest_only"] < 0 and res["pooled"]["vest_only"]["flag"].startswith("small sample")
 
@@ -59,4 +67,29 @@ def test_report_and_held_out_guard(tmp_path):
     assert res["matched_rows"] == 4, "the declared held-out participant is kept out of the development figures"
     md = (tmp_path / "r" / "report.md").read_text()
     assert "FICTIONAL data" in md and "not proof of effectiveness" in md and "repeated observations" in md
-    assert "retrospective-only prediction" in md and "round marked invalid" in md and res["analysis_choices"]["tuned_on_outcomes"] is False
+    assert "timing evidence retrospective" in md and "round marked invalid" in md and res["analysis_choices"]["tuned_on_outcomes"] is False
+    assert "| P1/day1 | 1 | 3.0 | timing_gates | fx-res-P1-1 | - |" in md and "| fx-pred-P1-1 | fx-res-P1-1 |" in md, "rows trace to the prediction and result"
+    assert "percent increase in sprint time" in md and "percent loss of speed" not in md.replace("not percent loss of speed", "")
+    assert ev.main(["pilot", "--rows", str(ROOT / "scripts" / "examples" / "pilot" / "fictional_analysis_rows.json"), "--out", str(tmp_path / "all")], out=lines.append) == 0
+    md2 = (tmp_path / "all" / "report.md").read_text()
+    assert "| P2/day1 | 1 | 3.2 | timing_gates | fx-res-P2-1-corrected | 3.1 |" in md2 and "fx-res-P2-1-corrected (was 3.1)" in md2, "the correction is visible next to the reference it changed"
+
+
+def test_study_manifest_pins_the_policy_and_mixed_inputs_are_refused(tmp_path):
+    lines = []
+    man = ROOT / "scripts" / "examples" / "pilot" / "fictional_study_manifest.json"
+    rows = ROOT / "scripts" / "examples" / "pilot" / "fictional_analysis_rows.json"
+    assert ev.main(["pilot", "--rows", str(rows), "--manifest", str(man), "--out", str(tmp_path / "a")], out=lines.append) == 0
+    res = json.loads((tmp_path / "a" / "results.json").read_text())
+    assert res["policy"] == "confirmed_sequence" and len(res["study_manifest_sha256"]) == 64 and res["study_manifest"]["study_id"] == "fictional-rehearsal"
+    real = json.loads(man.read_text()); real["fictional"] = False
+    (tmp_path / "real.json").write_text(json.dumps(real))
+    assert ev.main(["pilot", "--rows", str(rows), "--manifest", str(tmp_path / "real.json"), "--out", str(tmp_path / "b")], out=lines.append) == 1 and "FICTIONAL" in lines[-1]
+    mixed = json.loads(rows.read_text()); mixed["rows"][0]["fictional"] = False
+    (tmp_path / "mixed.json").write_text(json.dumps(mixed))
+    assert ev.main(["pilot", "--rows", str(tmp_path / "mixed.json"), "--out", str(tmp_path / "c")], out=lines.append) == 1 and "mix FICTIONAL and real" in lines[-1]
+    two = json.loads(rows.read_text()); two["rows"][0]["profile_sha256"] = "a" * 64; two["rows"][1]["profile_sha256"] = "b" * 64
+    (tmp_path / "two.json").write_text(json.dumps(two))
+    assert ev.main(["pilot", "--rows", str(tmp_path / "two.json"), "--out", str(tmp_path / "d")], out=lines.append) == 1 and "different frozen profiles" in lines[-1]
+    blank = ROOT / "scripts" / "examples" / "pilot" / "study_manifest_template.json"
+    assert ev.main(["pilot", "--rows", str(rows), "--manifest", str(blank), "--out", str(tmp_path / "e")], out=lines.append) == 1 and "no frozen profile" in lines[-1]
