@@ -1,0 +1,154 @@
+{
+ "format": "athletrix-fatigue-profile",
+ "schema_version": 1,
+ "version": "experimental-matched-hr-speed-1",
+ "fictional": true,
+ "note": "EXPERIMENTAL candidate profile (2026-11-09): identical to fictional-development-1 except that the combined candidate uses hr_speed_matched (heart rate against the athlete's own reference at similar movement, lag-aware) instead of hr_per_speed (mean heart rate divided by mean speed). Not the team's rules; for comparison on fictional cases only; never for collecting validation data.",
+ "display": "0-100 per feature and candidate: 0 = at the athlete's own baseline or early-session reference (a real zero), 100 = at or beyond the profile's 'hundred_at' bound; null = unavailable with reasons (never shown as 0). Higher means more fatigue-like change relative to the athlete's own reference; it is an experimental estimate, not a measurement of fatigue.",
+ "baseline": {
+  "require_status": "accepted"
+ },
+ "streams": {
+  "staleness_s": 10,
+  "max_gap_s": 5,
+  "min_tracking_confidence": 0.5
+ },
+ "test_effort_exclusion": {
+  "pre_s": 5,
+  "post_s": 90,
+  "assumed_duration_if_no_end_s": 30
+ },
+ "reference": {
+  "camera_reference_s": 120,
+  "note": "camera features compare with the athlete's own first camera_reference_s of tracked play after their first round_start this session (test efforts excluded)"
+ },
+ "features": {
+  "hr_strain": {
+   "inputs": [
+    "wearable"
+   ],
+   "window_s": 120,
+   "min_samples": 30,
+   "zero_at_hrr": 0.5,
+   "hundred_at_hrr": 0.9
+  },
+  "time_above_threshold": {
+   "inputs": [
+    "wearable"
+   ],
+   "window_s": 300,
+   "threshold_fraction_of_hr_max": 0.85,
+   "min_coverage": 0.6,
+   "hundred_at_fraction": 0.5
+  },
+  "recovery": {
+   "inputs": [
+    "wearable"
+   ],
+   "lookback_s": 600,
+   "qualifying_fraction_of_hr_max": 0.85,
+   "recovery_s": 60,
+   "min_coverage": 0.7,
+   "end_average_s": 10,
+   "reference_drop_bpm": 30
+  },
+  "hr_per_speed": {
+   "inputs": [
+    "wearable",
+    "camera"
+   ],
+   "window_s": 120,
+   "min_speed_mps": 0.5,
+   "pair_tolerance_s": 0.5,
+   "min_pairs": 20,
+   "hundred_at_increase": 0.3
+  },
+  "output_change": {
+   "inputs": [
+    "camera"
+   ],
+   "window_s": 120,
+   "min_coverage": 0.6,
+   "hundred_at_drop": 0.4
+  },
+  "sprint_quality": {
+   "inputs": [
+    "camera"
+   ],
+   "window_s": 300,
+   "threshold_mps": 5.5,
+   "min_samples": 3,
+   "hundred_at_drop": 0.15
+  },
+  "hr_speed_matched": {
+   "inputs": [
+    "wearable",
+    "camera"
+   ],
+   "window_s": 120,
+   "context_s": 30,
+   "context_min_coverage": 0.6,
+   "band_edges_mps": [
+    0.5,
+    1.5,
+    2.5,
+    3.5,
+    5.0,
+    12.0
+   ],
+   "min_pairs_per_band": 5,
+   "min_matched_share": 0.6,
+   "hundred_at_reserve_fraction": 0.1,
+   "alignment_tolerance_s": 0.5
+  }
+ },
+ "candidates": {
+  "vest_only": {
+   "streams": [
+    "wearable"
+   ],
+   "weights": {
+    "hr_strain": 0.5,
+    "time_above_threshold": 0.25,
+    "recovery": 0.25
+   },
+   "required": [
+    "hr_strain"
+   ],
+   "min_weight_coverage": 0.5
+  },
+  "camera_only": {
+   "streams": [
+    "camera"
+   ],
+   "weights": {
+    "output_change": 0.6,
+    "sprint_quality": 0.4
+   },
+   "required": [
+    "output_change"
+   ],
+   "min_weight_coverage": 0.6
+  },
+  "combined": {
+   "streams": [
+    "wearable",
+    "camera"
+   ],
+   "weights": {
+    "hr_strain": 0.3,
+    "time_above_threshold": 0.1,
+    "recovery": 0.1,
+    "output_change": 0.2,
+    "hr_speed_matched": 0.3
+   },
+   "required": [
+    "hr_strain",
+    "hr_speed_matched",
+    "output_change"
+   ],
+   "min_weight_coverage": 0.7,
+   "requires_camera_alignment": true
+  }
+ }
+}

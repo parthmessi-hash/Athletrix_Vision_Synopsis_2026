@@ -246,7 +246,7 @@ def gather(rec: Recording, athlete_id: str, at: datetime, parsed: dict, knowledg
     return inp, {"athletes": snap, "context": [e.model_dump(mode="json") for e in context], "roster": [e.model_dump(mode="json") for e in roster]}
 
 
-@router.get("/recordings/{recording_id}/athletes/{athlete_id}/substitution-review")
+@router.get("/recordings/{recording_id}/athletes/{athlete_id}/substitution-review", deprecated=True)
 def get_substitution_review(recording_id: str, athlete_id: str, at: str | None = None,
                             knowledge: Literal["retrospective", "as_entered"] = "retrospective") -> dict:
     """The experimental keep / consider replacement / review later / insufficient evidence output at `at`. Retrospective
@@ -292,7 +292,7 @@ def compute(kind: str, rec: Recording, athlete_id: str, at: datetime, window_s: 
     return substitution_review(inp), snap
 
 
-@router.post("/recordings/{recording_id}/athletes/{athlete_id}/reviews", response_model=SavedReview, status_code=status.HTTP_201_CREATED)
+@router.post("/recordings/{recording_id}/athletes/{athlete_id}/reviews", deprecated=True, response_model=SavedReview, status_code=status.HTTP_201_CREATED)
 def save_review(recording_id: str, athlete_id: str, body: ReviewRequest) -> SavedReview:
     """Calculate a review with the configured profiles and store it with their exact content and the evidence used."""
     now = clock.utc_now()
@@ -308,14 +308,14 @@ def save_review(recording_id: str, athlete_id: str, body: ReviewRequest) -> Save
                                         label=body.label, inputs=inputs, result=result))
 
 
-@router.get("/recordings/{recording_id}/reviews", response_model=list[SavedReview])
+@router.get("/recordings/{recording_id}/reviews", deprecated=True, response_model=list[SavedReview])
 def list_reviews(recording_id: str, athlete_id: str | None = None) -> list[SavedReview]:
     with get_database().read():
         rec = require_recording(recording_id)
         return review_store.list(rec.id, athlete_id)
 
 
-@router.get("/recordings/{recording_id}/reviews/{review_id}/reproduce")
+@router.get("/recordings/{recording_id}/reviews/{review_id}/reproduce", deprecated=True)
 def reproduce_review(recording_id: str, review_id: str) -> dict:
     """Re-run a saved review from its stored configuration and evidence (never the current settings) and compare."""
     with get_database().read():
@@ -379,7 +379,7 @@ def latest_reading(d: AthleteData, t: datetime, knowledge: str) -> dict | None:
     return None
 
 
-@router.get("/recordings/{recording_id}/team-review")
+@router.get("/recordings/{recording_id}/team-review", deprecated=True)
 def team_review(recording_id: str, knowledge: Literal["retrospective", "as_entered"] = Query(..., description="Required: as_entered for live use, retrospective for later review (labelled)."),
                 at: str | None = None, budget_s: float = Query(10.0, gt=0, le=60)) -> dict:
     """Every roster athlete of the recording at ONE captured review time, with one set of profiles: roster state and role,
@@ -508,7 +508,7 @@ def recording_evidence(recording_id: str, knowledge: Literal["retrospective", "a
 
 # ---- coach responses and lineup changes -----------------------------------------------------------------------------------
 
-@router.post("/recordings/{recording_id}/responses", status_code=status.HTTP_201_CREATED,
+@router.post("/recordings/{recording_id}/responses", deprecated=True, status_code=status.HTTP_201_CREATED,
              responses={200: {"description": "The same client_token was already saved: the stored response, unchanged"}, 409: {"description": "Roster state or a stated constraint does not allow the lineup change"}})
 def add_response(recording_id: str, body: ResponseCreate, response: Response) -> CoachResponse:
     """Record a coach / operator response, or an actual lineup change (app/models/response.py). Idempotent per
@@ -592,7 +592,7 @@ def add_response(recording_id: str, body: ResponseCreate, response: Response) ->
     return r
 
 
-@router.get("/recordings/{recording_id}/responses", response_model=list[CoachResponse])
+@router.get("/recordings/{recording_id}/responses", deprecated=True, response_model=list[CoachResponse])
 def list_responses(recording_id: str, athlete_id: str | None = None) -> list[CoachResponse]:
     with get_database().read():
         rec = require_recording(recording_id)

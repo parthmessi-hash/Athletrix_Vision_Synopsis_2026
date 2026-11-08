@@ -18,7 +18,7 @@ from app.store.context import context_store
 router = APIRouter(prefix="/recordings", tags=["coach context"])
 
 
-@router.post("/{recording_id}/context", response_model=ContextEntry, status_code=status.HTTP_201_CREATED,
+@router.post("/{recording_id}/context", deprecated=True, response_model=ContextEntry, status_code=status.HTTP_201_CREATED,
              responses={404: {"description": "Unknown recording, or an athlete or partner not in its roster"}, 422: {"description": "Invalid entry or effective time outside the recording"}})
 def add_context(recording_id: str, body: ContextCreate) -> ContextEntry:
     """Store one context entry for an active or stopped recording.
@@ -43,7 +43,7 @@ def add_context(recording_id: str, body: ContextCreate) -> ContextEntry:
     return context_store.add(rec.id, body, now)
 
 
-@router.get("/{recording_id}/context", response_model=list[ContextEntry])
+@router.get("/{recording_id}/context", deprecated=True, response_model=list[ContextEntry])
 def list_context(recording_id: str, athlete_id: str | None = Query(None, description="Only this athlete's entries"),
                  team: bool = Query(False, description="Only team-level entries")) -> list[ContextEntry]:
     """Every context entry of the recording (or one athlete's, or the team's), by effective_from then creation time."""
@@ -54,7 +54,7 @@ def list_context(recording_id: str, athlete_id: str | None = Query(None, descrip
         return context_store.list(rec.id, athlete_id, team_only=team)
 
 
-@router.get("/{recording_id}/context/effective", response_model=EffectiveContext)
+@router.get("/{recording_id}/context/effective", deprecated=True, response_model=EffectiveContext)
 def effective_context(recording_id: str, at: AwareDatetime = Query(..., description="Instant, ISO 8601 with timezone (encode '+' as %2B)"),
                       athlete_id: str | None = Query(None)) -> EffectiveContext:
     """The team-level entry and (with athlete_id) the athlete's entry in force at `at`; null when none applies."""

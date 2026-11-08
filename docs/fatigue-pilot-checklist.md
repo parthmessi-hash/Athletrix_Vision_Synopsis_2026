@@ -427,13 +427,44 @@ run: confirmed track, identity loss (camera stale 7.3-11.5 s), wearable dropout 
    check (5d); when to use `field-rehearsal` vs recorded review and what to measure first; the science-fair evidence
    table (5e).
 
-## Checkpoint for the next session (2026-11-09, after the field-handoff batch)
+## Fatigue-only scope batch (2026-11-09)
 
-Done (do not repeat): performance batch, camera comparison, guided display tooling, camera bench tooling, session
-verification. Pushed heads: see git log (backend), frontend f2faf7f unchanged.
-Needs you at the laptop:
-1. `.venv/bin/python scripts/display_check.py --out display-1`, Chrome in front for 3 minutes (run sheet 5d).
-2. On mains power: `.venv/bin/python scripts/camera_settings_compare.py --out camera-work/settings-mains --best tiny-every2`.
-Needs a permitted setup: route B with a real camera position and tape measurements; then 2b with a permitted clip and an
-independent timing reference. Route C waits on approval, the manifest and study choices, and wearable access (Zephyr
-preferred; purchase, licence, hardware and live access unconfirmed).
+Scope change: Athletrix is an offline soccer fatigue estimation engine. Substitution recommendations, bench rankings,
+tactical evaluations and performance grades are dropped (PROJECT_STATUS.md, Scope).
+1. **Dashboard** (frontend): the Fatigue estimate card is the first engine card; the combined estimate is the headline
+   with wearable-only and camera-only labelled research; a plain-language explanation from the actual inputs (each
+   contributor with its measured value and weight, or why there is no combined estimate). Removed: Team review, Coach
+   context, Performance evidence and Experimental (substitution) review cards; the substitution readiness area; the
+   browser demo's Make Sub / Sub Out controls, rotation notes, Performance and Sub Analysis columns, grades, MVP and
+   post-game AI-call review; the public copy's substitution, rotation, grading and drill claims. The browser demo shows
+   a fictional load index and workload only. Harness 95/95 (new explanation test), video review 6/6; a demo match ran
+   in Chrome with no console errors and no substitution wording. Still in the demo: basketball and American-football
+   example teams (not soccer).
+2. **Engine**: legacy substitution, team-review, saved-review, response, performance and coach-context endpoints marked
+   deprecated in the API (behaviour unchanged so old recordings import and reproduce); the launcher's default session
+   is the fatigue workflow.
+3. **Method** (`docs/fatigue-method.md`): every feature's formula, units, personal reference, window and missing-data
+   rule; the %HRR versus %HRmax inconsistency and other differences from the draft flagged. Weakness found: hr_per_speed
+   (mean HR / mean speed) reads a slower drill as maximal (fictional 100). Candidate `hr_speed_matched` (lag-aware,
+   speed-band matched, "reference does not cover this kind of movement" instead of extrapolating) in the EXPERIMENTAL
+   profile `experimental_matched_profile.json` only: slower drill 100 -> 0 (or not enough data), same-movement +12 bpm
+   41 -> 91, hidden 20 s clock offset 20 -> 89 (no-offset 91); tradeoffs: more "not enough data", stop-start 12 -> 20,
+   and output_change still reads a slower drill as lower output. Frozen profiles untouched; reproduction unchanged.
+   Test-sprint readings never feed it (test).
+4. **Accuracy test**: same eligible rounds for all three methods (already); new "Result at a glance" (INCONCLUSIVE /
+   NEGATIVE / caution when an estimate follows round order), a per-round table of which methods could score and why
+   not, and a refusal for real data when the study manifest was declared after the first sprint result.
+5. **End-to-end fictional workflow** (accelerated): incoming readings -> rounds on readiness -> 9 saved pre-sprint
+   estimates -> blind timing sheet -> export -> session_verify COMPLETE, 9/9 reproduced -> report INCONCLUSIVE (4
+   rounds with all three estimates). Dropouts: P2 round 2 (strap) combined and wearable-only not available with the
+   stale-wearable reason, camera-only scored; P3 round 2 (camera) combined and camera-only not available.
+
+## Checkpoint for the next session (2026-11-09, after the fatigue-only scope batch)
+
+Done (do not repeat): field-handoff tools, scope cleanup, method document, experimental candidate and its fictional
+comparison, three-way report headline and freeze check, end-to-end fictional workflow.
+Needs you at the laptop: `.venv/bin/python scripts/display_check.py --out display-1` (run sheet 5d; the last attempt
+was INCOMPLETE). Needs the team: the decisions in docs/fatigue-method.md section 6 (heart-rate basis, features and
+weights including whether hr_speed_matched replaces hr_per_speed, baseline rules, data rules, analysis) frozen in a
+study manifest before any real outcome; the science-fair application wording in section 7. Next candidate weakness:
+output_change reads a deliberately slower drill as reduced output.

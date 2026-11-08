@@ -1,5 +1,9 @@
 # Fatigue pilot run sheet (field kit)
 
+**Scope (2026-11-09):** an offline fatigue estimation engine. The product output is the **combined** estimate for the
+vest wearer (Fatigue estimate card); wearable-only and camera-only are research comparisons. No substitution, ranking,
+tactical or performance-grade features. Method: `docs/fatigue-method.md`.
+
 One vest, one fixed camera, one offline laptop. Every command here was run in a FICTIONAL rehearsal (see
 `docs/fatigue-pilot-checklist.md`). Nothing here shows field accuracy or fatigue detection. The pilot gives no
 substitution or safety advice; the coach decides.
@@ -9,8 +13,13 @@ substitution or safety advice; the coach decides.
 **O** = operator (laptop), **T** = independent timer (never sees scores). Commands run in the backend folder.
 
 ### Route A: fictional demo, today (no hardware, no participant)
-1. O: `.venv/bin/python scripts/demo_launcher.py --session pilot --keep-output demo-output`, open the printed address,
-   click **Live Demo** (section 0 below).
+0. Fastest software check (no browser, about 2 minutes, simulated clock):
+   `.venv/bin/python scripts/pilot_rehearsal.py --mode accelerated --out demo-fast`, then
+   `.venv/bin/python scripts/session_verify.py --package demo-fast/pilot-package.zip --out demo-fast-verify --manifest scripts/examples/pilot/fictional_study_manifest.json --expect-rounds P1:3,P2:3,P3:3`
+   and open demo-fast-verify/report/report.md ("Result at a glance", "Which methods could score each round").
+1. O: `.venv/bin/python scripts/demo_launcher.py --keep-output demo-output` (the fatigue workflow is the default
+   session), open the printed address, click **Live Demo**; the **Fatigue estimate** card is the first engine card
+   (section 0 below).
 2. O: `.venv/bin/python scripts/session_verify.py --package demo-output/pilot-package.zip --out demo-verify`
 - Success: the launcher ends with "reproduced in a fresh database: True"; the verification prints VERDICT COMPLETE
   with 9 rounds, 7 eligible, and the deliberately missed save (P2 round 1) and invalid round (P1 round 3) listed as
@@ -272,7 +281,20 @@ session, interval times against an independent reference, and frames dropped on 
 | The camera software path works | YOLOX + ByteTrack + calibration on a GENERATED clip; gaps and uncertain identity never invent data | camera_settings_compare.py, video_pilot_check.py outputs | person tracking and accuracy with real people and a real camera |
 | Positions and interval speeds are accurate on a field | only on synthetic geometry | camera_field_check.py synthetic and bench-example | check-point errors, interval timing and peak speed on a permitted field with an independent reference |
 | The fatigue estimate tracks fatigue | NOT shown: all scores so far come from fictional data | — | the controlled pilot (route C) and its analysis |
-| It helps substitution decisions | NOT shown and not claimed; the pilot gives no substitution advice | — | out of scope of the pilot |
+| The combined estimate tracks sprint slowdown better than single-source estimates | NOT shown: fictional runs give INCONCLUSIVE (too few rounds) by design | evaluate.py pilot "Result at a glance"; session_verify.py | an approved pilot with frozen choices (docs/fatigue-method.md section 6) |
+| The experimental heart-rate-vs-movement candidate behaves better | on 8 fictional cases: a slower drill is no longer read as maximal, a same-movement rise is clearer, a hidden clock offset matters less; more "not enough data" | scripts/fatigue_method_compare.py; tests/test_fatigue_method_compare.py | anything about athletes |
+| Substitution decisions | DROPPED from scope (2026-11-09): not built, not claimed | — | — |
+
+## 5f. Method checks (fictional; no hardware)
+
+- How the score works and what is still open: `docs/fatigue-method.md`.
+- Current versus experimental heart-rate-vs-movement feature on fictional cases:
+  `.venv/bin/python scripts/fatigue_method_compare.py --out method-compare`
+- The experimental profile is `scripts/examples/pilot/experimental_matched_profile.json` (FICTIONAL, not the team's
+  rules). To see it in the workflow, start a rehearsal with it:
+  `.venv/bin/python scripts/pilot_rehearsal.py --mode accelerated --profile scripts/examples/pilot/experimental_matched_profile.json --out demo-experimental`
+  It runs and every saved estimate reproduces, but with the rehearsal's short rounds its 120 s windows never fill:
+  the combined estimate was "not available" in all 9 rounds (checked 2026-11-09). That is the honest answer, not a bug.
 
 ## 6. Still needed before the real pilot
 

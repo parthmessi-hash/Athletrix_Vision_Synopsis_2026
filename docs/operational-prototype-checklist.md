@@ -1,5 +1,8 @@
 # Operational prototype batch (started 2026-11-03): checklist
 
+> **Superseded (2026-11-09):** Athletrix is now a fatigue estimation engine only. Substitution recommendations, bench rankings, tactical evaluations and performance grades are dropped (see `PROJECT_STATUS.md`, Scope). This file is kept as history.
+
+
 Resume from this file and the code if a session is interrupted; do not restart completed milestones.
 Starting point: backend `e5adf26`, frontend `05c001a` (792 backend tests, 82 browser checks, demo 27 checks).
 

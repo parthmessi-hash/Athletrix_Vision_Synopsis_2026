@@ -1,5 +1,9 @@
 """One-command isolated demo of the local Athletrix prototype.
 
+DEFAULT (since 2026-11-09): --session pilot, the FICTIONAL fatigue workflow (the product path: wearable and camera
+readings -> the Fatigue estimate card -> a saved pre-sprint estimate -> independent timing -> export, reproduction and
+the three-way report). --session simple keeps the old sine-wave feed; --session match is legacy.
+
 Starts a throwaway copy of everything a demonstration needs, without touching the normal development setup:
 
   1. a fresh temporary SQLite database and its own backend (uvicorn app.main:app) on a free localhost port;
@@ -313,7 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frontend", type=Path, default=DEFAULT_FRONTEND, help=f"folder containing the Athletrix_Web index.html (default {DEFAULT_FRONTEND})")
     p.add_argument("--athletes", type=int, default=DEFAULT_ATHLETES, help=f"fictional athletes on the demo team (default {DEFAULT_ATHLETES})")
     p.add_argument("--duration", type=int, default=None, help=f"seconds of fictional data to generate (default {DEFAULT_DURATION_S}; with --session match: scenario seconds, default 360)")
-    p.add_argument("--session", choices=["simple", "match", "pilot"], default="simple", help="simple: the sine-wave feed (default); match: the paced fictional match session (scripts/live_session.py); pilot: the FICTIONAL fatigue-pilot rehearsal (scripts/pilot_rehearsal.py) at wall-clock time")
+    p.add_argument("--session", choices=["simple", "match", "pilot"], default="pilot", help="pilot: the FICTIONAL fatigue workflow with the dashboard (default); simple: the sine-wave feed; match: the paced fictional match session (legacy; its review features are no longer shown) (scripts/live_session.py)")
     p.add_argument("--rounds", type=int, default=3, help="--session pilot: rounds per participant (default 3)")
     p.add_argument("--keep-output", type=Path, help="--session pilot: copy the rehearsal summary, export and report to this new folder before cleaning up")
     p.add_argument("--speed", type=float, default=1.0, help="--session match: scenario seconds per wall second (default 1; timestamps stay real send times)")

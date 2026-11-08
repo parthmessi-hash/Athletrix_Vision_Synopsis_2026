@@ -1,5 +1,8 @@
 # Sideline rehearsal guide (2026-11-07)
 
+> **Superseded (2026-11-09):** Athletrix is now a fatigue estimation engine only. Substitution recommendations, bench rankings, tactical evaluations and performance grades are dropped (see `PROJECT_STATUS.md`, Scope). This file is kept as history.
+
+
 A rehearsal runs the whole local workflow with FICTIONAL athletes, readings, profiles, reviewers and coach decisions.
 It shows that the software behaves as described. It does not show that any score measures fatigue or performance, that
 a recommendation is right, or that the camera or a wearable works on a real pitch. The coach decides; nothing here is

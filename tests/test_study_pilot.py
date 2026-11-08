@@ -738,3 +738,52 @@ def test_end_of_session_stop_late_inputs_timing_after_stop_and_post_session_veri
     assert rep["all_reproduced"] and rep["predictions"] >= 2, rep
     assert (out_dir / "report" / "report.md").exists() and (out_dir / "export" / "day1.zip").read_bytes() == pkg_bytes
     assert lines[-1 - len(v["reasons"])].startswith("VERDICT: INCOMPLETE")
+
+
+def test_analysis_refuses_choices_declared_after_the_first_outcome_and_states_an_inconclusive_result(pilot, tmp_path):
+    """Real (non-fictional) data: a study manifest declared after the first sprint result was entered is refused (the
+    choices were not frozen before outcomes were seen); declared before, the report opens with a plain result line
+    (INCONCLUSIVE with too few rounds) and lists which methods could score each round."""
+    import hashlib as _h  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+    if str(ROOT / "scripts") not in _sys.path:
+        _sys.path.insert(0, str(ROOT / "scripts"))
+    import evaluate  # noqa: PLC0415
+    c, sim, base, st = pilot["c"], pilot["sim"], pilot["base"], pilot["st"]
+    c.post(f"{API}/recordings/{pilot['rid']}/stop")
+    st["now"] += timedelta(seconds=1)
+    declared_before = st["now"]
+    rid = c.post(f"{API}/recordings", json={"name": "real-format session (made-up readings)", "athlete_ids": ["x1", "x2"]}).json()["id"]
+    entry(c, rid, kind="session", client_token="freeze-sess-01", session_label="freeze", protocol="controlled_study", fictional=False,
+          clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.05}])
+    entry(c, rid, kind="wearer", client_token="freeze-wear-01", athlete_id="x1", participant_code="P1", device_id="strap-A", baseline_id=base["x1"], hr_max_bpm=200, hr_max_origin="test")
+    m0 = st["now"]
+    sim.run(m0 + timedelta(seconds=3), "x1", "strap-A", t0=m0)
+    entry(c, rid, kind="round_start", client_token="freeze-r1-start", athlete_id="x1", round=1)
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    sv = entry(c, rid, kind="score_save", client_token="freeze-r1-save", athlete_id="x1", round=1)
+    st["now"] += timedelta(seconds=1)
+    entry(c, rid, kind="sprint_start", client_token="freeze-r1-sprint", athlete_id="x1", round=1, confirms_prediction_id=sv["id"])
+    sim.run(st["now"] + timedelta(seconds=5), "x1", "strap-A", v=lambda s: 7.5, t0=m0)
+    entry(c, rid, kind="sprint_end", client_token="freeze-r1-end", athlete_id="x1", round=1)
+    entry(c, rid, kind="sprint_result", client_token="freeze-r1-result", athlete_id="x1", round=1, time_s=3.3, method="timing_gates")
+    entry(c, rid, kind="round_end", client_token="freeze-r1-rend", athlete_id="x1", round=1)
+    first_result = st["now"]
+    st["now"] += timedelta(seconds=5)
+    c.post(f"{API}/recordings/{rid}/stop")
+    pkg = tmp_path / "real.zip"
+    pkg.write_bytes(c.get(f"{API}/recordings/{rid}/package.zip").content)
+    sha = _h.sha256(Path(PROFILE).read_bytes()).hexdigest()
+    man = json.loads((ROOT / "scripts/examples/pilot/study_manifest_template.json").read_text())
+    man.update(study_id="freeze-test", fictional=False, profile_sha256=sha, declared_by="test")
+    said = {}
+    for when, expect in ((first_result + timedelta(seconds=1), 1), (declared_before, 0)):
+        man["declared_at"] = z(when).replace("Z", "+00:00")
+        (tmp_path / "m.json").write_text(json.dumps(man))
+        said[expect] = []
+        assert evaluate.main(["pilot", "--packages", str(pkg), "--manifest", str(tmp_path / "m.json"), "--out", str(tmp_path / f"rep-{expect}")],
+                             out=said[expect].append) == expect, said[expect]
+    assert any("must be frozen before any outcome is seen" in x for x in said[1])
+    md = (tmp_path / "rep-0" / "report.md").read_text()
+    assert "## Result at a glance" in md and "**INCONCLUSIVE**" in md and "## Which methods could score each round" in md
+    assert "| P1 | freeze | 1 | no: timing evidence" in md, "the round is listed with the reason it is not eligible (no independent start reference)"

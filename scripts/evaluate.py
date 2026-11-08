@@ -752,6 +752,7 @@ def pilot(args, out) -> int:
     from app.core.pilot_analysis import compare, rows_from_package  # noqa: PLC0415
     from app.core.recording_package import read_package  # noqa: PLC0415
     source, rows, starts, frozen = [], [], {}, {}
+    first_outcome = None   # the earliest independent result entered (engine receipt time), across the inputs
     if args.rows:
         doc = json.loads(Path(args.rows).read_text())
         rows = [{**r, "fictional": r.get("fictional", bool(doc.get("fictional")))} for r in doc["rows"]]
@@ -766,6 +767,9 @@ def pilot(args, out) -> int:
         rows += rr
         for r in rr:
             starts[(r["participant"], r["session"])] = pkg.recording["started_at"]
+        for e in pkg.study:
+            if e.kind == "sprint_result" and e.created_at is not None and (first_outcome is None or e.created_at < first_outcome):
+                first_outcome = e.created_at
         sess = next((e for e in pkg.study if e.kind == "session" and e.profile), None)
         if sess:
             frozen[sess.profile["sha256"]] = {"version": sess.profile["version"], "fictional": sess.profile["fictional"], "text": sess.profile["text"]}
@@ -793,6 +797,18 @@ def pilot(args, out) -> int:
             return 1
         policy = manifest["timing"]["policy"]
         methods = manifest["timing"].get("reference_methods") or None
+        if first_outcome is not None:
+            try:
+                declared = datetime.fromisoformat(str(manifest.get("declared_at")).replace("Z", "+00:00"))
+                if declared.tzinfo is None:
+                    raise ValueError("declared_at has no time zone")
+            except ValueError:
+                declared = None
+            frozen_ok = declared is not None and declared <= first_outcome
+            if not frozen_ok and not manifest["fictional"]:
+                out(f"refused: the study manifest's declared_at ({manifest.get('declared_at') or 'missing'}) is not before the first sprint result entered "
+                    f"({first_outcome.isoformat()}): features, weights, baseline rules and analysis must be frozen before any outcome is seen")
+                return 1
     pin = json.loads(Path(args.pin).read_text()) if args.pin else None
     if pin and shas and shas != {pin["profile_sha256"]}:
         out(f"refused: the rows were scored with profile(s) {sorted(x[:12] for x in shas)}, the pin names {pin['profile_sha256'][:12]}")
@@ -817,6 +833,9 @@ def pilot(args, out) -> int:
     res = compare(rows, policy, methods)
     res.update(source=source, fictional=bool(fict and next(iter(fict))), pin=pin, study_manifest=manifest, study_manifest_sha256=manifest_sha, held_out=held,
                generated_at=datetime.now().astimezone().isoformat(timespec="seconds"), frozen_profiles=frozen,
+               frozen_before_first_outcome=None if not (manifest and first_outcome) else
+               (datetime.fromisoformat(str(manifest.get("declared_at")).replace("Z", "+00:00")) <= first_outcome if manifest.get("declared_at") else False),
+               first_outcome_entered_at=first_outcome.isoformat() if first_outcome else None,
                analysis_choices={"outcome": res["outcome"], "policy": policy, "reference_methods": methods or "all timed methods",
                                  "statistic": "Pearson r on the policy-eligible rows where all three candidates and the outcome exist",
                                  "targets": ["combined r >= 0.5", "combined r above both single-source r"], "small_sample_flag_below": 5, "tuned_on_outcomes": False})
@@ -837,6 +856,26 @@ def pilot_report(r: dict) -> str:
     L = ["# Fatigue pilot: paired report", ""]
     if r["fictional"]:
         L += ["**FICTIONAL data: made-up readings and made-up sprint times. This exercises the analysis; it shows nothing about real players or fatigue.**", ""]
+    p0 = r["pooled"]
+    n = r["matched_rows"]
+    rc, rv, rk = (p0[c]["r"] for c in ("combined", "vest_only", "camera_only"))
+    ro = p0["round_order"]
+    L += ["## Result at a glance", ""]
+    if n < 5 or None in (rc, rv, rk):
+        L.append(f"**INCONCLUSIVE**: {n} round(s) have all three estimates and an outcome on the same eligible rounds; at least 5 are needed "
+                 "for any correlation, and a few rounds from few people cannot answer the question either way.")
+    else:
+        better = rc > rv and rc > rk
+        L.append(f"On the same {n} eligible rounds: combined r = {rc:+.3f}, wearable-only r = {rv:+.3f}, camera-only r = {rk:+.3f}. " +
+                 ("**The combined estimate tracked sprint slowdown better than both single-source estimates here.**" if better else
+                  "**NEGATIVE: the combined estimate did NOT track sprint slowdown better than both single-source estimates here.**"))
+        L.append(f"Study target combined r >= 0.5: **{'met' if rc >= 0.5 else 'not met'}** (a target, not proof).")
+        rcr = (ro.get("round_vs_combined") or {}).get("r")
+        if rcr is not None and abs(rcr) >= abs(rc):
+            L.append(f"Caution: the combined estimate follows round order (r = {rcr:+.3f}) at least as strongly as it follows the outcome; it may mostly track time passing.")
+    if r.get("frozen_before_first_outcome") is False:
+        L.append("**The study manifest was NOT declared before the first outcome was entered: these figures cannot test frozen choices.**")
+    L += ["", "Sprint slowdown is the practical outcome compared against; it is not a direct measurement of fatigue.", ""]
     L += [f"Outcome: {r['outcome']}.", "",
           f"Timing policy: **{r['policy']}** ({'declared in study manifest ' + r['study_manifest_sha256'][:12] if r.get('study_manifest_sha256') else 'default: no study manifest given'}). "
           f"Reference attempts: {r['reference_methods']}, rounds not marked invalid.", "",
@@ -876,6 +915,13 @@ def pilot_report(r: dict) -> str:
          ([f"- {x['participant']} {x['session']} round {x['round']}: {x['started_without_usable_data']}" for x in part] or ["- none"])
     L += ["", "Camera reference opened at: " + (", ".join(f"{x['participant']} {x['session']} round {x['round']}" for x in opened) or
                                                "not recorded (recordings before 2026-11-08 open it at each athlete's first round start)")]
+    L += ["", "## Which methods could score each round", "", "| Participant | Session | Round | eligible | combined | wearable-only | camera-only | outcome |", "|---|---|---|---|---|---|---|---|"]
+    inel = {(x["participant"], x["session"], x["round"]): x["reason"] for x in r["ineligible"]}
+    for x in r["rows"]:
+        cell = lambda c: "scored" if x["scores"][c] is not None else ("no: " + ((x.get("reasons") or {}).get(c) or ["no saved prediction"])[0][:60])  # noqa: E731
+        key = (x["participant"], x["session"], x["round"])
+        L.append(f"| {x['participant']} | {x['session']} | {x['round']} | {'yes' if key not in inel else 'no: ' + inel[key][:60]} | {cell('combined')} | {cell('vest_only')} | "
+                 f"{cell('camera_only')} | {x['time_increase_pct'] if x['time_increase_pct'] is not None else 'missing: ' + str(x.get('outcome_missing'))} |")
     L += ["", "## Held out", r["held_out"]["status"], r["held_out"].get("limits", ""), "",
           "## Self-rating (exploratory, never a score input)", f"r(self-rating, time increase) = {rr(r['self_rating_exploratory']['self_rating_vs_time_increase'])} on {r['self_rating_exploratory']['rows']} rows.", "",
           "## Rows (trace)", "", "| Participant | Session | Round | vest | camera | combined | time (s) | increase % | timing | prediction | result (history) |", "|---|---|---|---|---|---|---|---|---|---|---|"]

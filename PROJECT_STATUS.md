@@ -5,6 +5,24 @@ Sections 1-9 were checked against the code on 2026-10-25 and updated since; the
 status at a glance below was checked on 2026-10-29. Where something is a plan
 rather than working code it is marked **planned**.
 
+## Scope (2026-11-09; supersedes older docs and research-plan wording where they conflict)
+
+Athletrix is an **offline soccer fatigue estimation engine**: one wearable, one fixed sideline camera and one laptop.
+The product output is the **combined** experimental 0-100 estimate for the player wearing the vest, its trend, a
+plain-language explanation of what contributed, and the reason whenever there is not enough usable evidence.
+Wearable-only and camera-only estimates are research comparisons. Camera speed, distance and sprints are workload
+measurements, not grades of how anyone played. Other players can be tracked, but no combined estimate is shown for
+anyone without an assigned wearable.
+
+**Dropped:** substitution recommendations, bench rankings, tactical evaluations and player performance grades. They are
+no longer developed and no longer appear in the dashboard, the browser demo or the public copy. Their engine code and
+endpoints (substitution review, team review, coach context, performance evidence, saved reviews and responses) remain
+ONLY so that existing recordings and exports keep importing and reproducing; they are marked deprecated in the API and
+must not be extended. Sections below that describe them are history.
+
+Current work and the method: `docs/fatigue-method.md` (formulas, units, references, windows, missing-data rules, the
+experimental candidate), `docs/fatigue-pilot-run-sheet.md` (what to run) and `docs/fatigue-pilot-checklist.md` (status).
+
 ## 0. Product and status at a glance (2026-11-08)
 
 **Immediate goal: the science-fair fatigue pilot.** One wearable, one fixed sideline camera and one offline laptop

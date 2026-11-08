@@ -1,5 +1,8 @@
 # Proposed design note: individual performance review (NOT implemented)
 
+> **Superseded (2026-11-09):** Athletrix is now a fatigue estimation engine only. Substitution recommendations, bench rankings, tactical evaluations and performance grades are dropped (see `PROJECT_STATUS.md`, Scope). This file is kept as history.
+
+
 Status: a record of the team's current discussion (2026-10-29). **Nothing in this note is implemented.** No score,
 weighting, tactical judgment, pass-quality model, fatigue classifier or substitution logic exists in Athletrix, and
 none should be inferred from the camera adapter prototype.

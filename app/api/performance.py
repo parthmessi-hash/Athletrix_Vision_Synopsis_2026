@@ -19,7 +19,7 @@ from app.store.performance import performance_store
 router = APIRouter(prefix="/recordings", tags=["performance evidence"])
 
 
-@router.post("/{recording_id}/performance", response_model=PerformanceObservation, status_code=status.HTTP_201_CREATED,
+@router.post("/{recording_id}/performance", deprecated=True, response_model=PerformanceObservation, status_code=status.HTTP_201_CREATED,
              responses={404: {"description": "Unknown recording, athlete not in its roster, or unknown coach-context entry"}, 422: {"description": "Invalid observation"}})
 def add_observation(recording_id: str, body: PerformanceObservationCreate) -> PerformanceObservation:
     """Store one evidence observation (manual entry). The observation period must lie within the recording. Automatic
@@ -56,14 +56,14 @@ def add_observation(recording_id: str, body: PerformanceObservationCreate) -> Pe
     return performance_store.add(rec.id, body, now)
 
 
-@router.get("/{recording_id}/performance", response_model=list[PerformanceObservation])
+@router.get("/{recording_id}/performance", deprecated=True, response_model=list[PerformanceObservation])
 def list_observations(recording_id: str) -> list[PerformanceObservation]:
     with get_database().read():
         rec = require_recording(recording_id)
         return performance_store.list(rec.id)
 
 
-@router.delete("/{recording_id}/athletes/{athlete_id}/performance/{observation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{recording_id}/athletes/{athlete_id}/performance/{observation_id}", deprecated=True, status_code=status.HTTP_204_NO_CONTENT)
 def delete_observation(recording_id: str, athlete_id: str, observation_id: str) -> None:
     """Delete one observation entered by mistake. Not reversible. Observations in a correction chain are audit history and
     cannot be deleted: neither a superseded observation nor a correction (deleting a correction would silently revive the
@@ -97,7 +97,7 @@ def parse_at(value: str | None, name: str = "at"):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/{recording_id}/athletes/{athlete_id}/performance-review")
+@router.get("/{recording_id}/athletes/{athlete_id}/performance-review", deprecated=True)
 def performance_review(recording_id: str, athlete_id: str, at: str | None = None, window_s: float | None = Query(None, gt=0, le=6 * 3600),
                        knowledge: Literal["retrospective", "as_entered"] = "retrospective") -> dict:
     """Evidence per area and, only with a configured rubric and enough counted evidence in all four areas, a composite.

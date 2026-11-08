@@ -190,7 +190,7 @@ def mocked(monkeypatch, tmp_path):
 
 def test_main_starts_both_servers_registers_feeds_prints_the_url_and_cleans_up(mocked):
     lines = []
-    code = dl.main(["--frontend", str(mocked), "--athletes", "2", "--duration", "1", "--exit-after-demo"], out=lines.append)
+    code = dl.main(["--session", "simple", "--frontend", str(mocked), "--athletes", "2", "--duration", "1", "--exit-after-demo"], out=lines.append)
     assert code == 0
     b, s = FakeBackend.instances[0], FakeStatic.instances[0]
     assert b.started and s.started and b.cleaned and s.stopped
@@ -202,8 +202,8 @@ def test_main_starts_both_servers_registers_feeds_prints_the_url_and_cleans_up(m
 
 def test_main_missing_frontend_and_bad_arguments_start_nothing(mocked, tmp_path):
     lines = []
-    assert dl.main(["--frontend", str(tmp_path / "nowhere")], out=lines.append) == 2 and any("Frontend folder not found" in l for l in lines)
-    assert dl.main(["--frontend", str(mocked), "--athletes", "0"], out=lines.append) == 2
+    assert dl.main(["--session", "simple", "--frontend", str(tmp_path / "nowhere")], out=lines.append) == 2 and any("Frontend folder not found" in l for l in lines)
+    assert dl.main(["--session", "simple", "--frontend", str(mocked), "--athletes", "0"], out=lines.append) == 2
     assert FakeBackend.instances == [] and FakeStatic.instances == []
 
 
@@ -212,7 +212,7 @@ def test_main_refuses_an_occupied_port_before_starting_anything(mocked):
         held.bind(("127.0.0.1", 0)); held.listen(1)
         port = held.getsockname()[1]
         lines = []
-        assert dl.main(["--frontend", str(mocked), "--backend-port", str(port)], out=lines.append) == 1
+        assert dl.main(["--session", "simple", "--frontend", str(mocked), "--backend-port", str(port)], out=lines.append) == 1
     assert any("already in use" in l for l in lines) and FakeBackend.instances == []
 
 
@@ -223,7 +223,7 @@ def test_main_backend_start_failure_is_reported_and_cleaned_up(mocked, monkeypat
         raise RuntimeError("backend exited early with code 3")
     monkeypatch.setattr(FakeBackend, "start", failing)
     lines = []
-    assert dl.main(["--frontend", str(mocked), "--exit-after-demo"], out=lines.append) == 1
+    assert dl.main(["--session", "simple", "--frontend", str(mocked), "--exit-after-demo"], out=lines.append) == 1
     assert any("Startup failed: backend exited early with code 3" in l for l in lines)
     assert FakeBackend.instances[0].cleaned and FakeStatic.instances == [], "the frontend server was never started; the backend owner was cleaned up"
     monkeypatch.setattr(FakeBackend, "start", original)
@@ -235,7 +235,7 @@ def test_main_keyboard_interrupt_while_waiting_cleans_up(mocked):
     def interrupt():
         raise KeyboardInterrupt
     with pytest.raises(KeyboardInterrupt):
-        dl.main(["--frontend", str(mocked), "--duration", "1"], out=lines.append, wait_for_interrupt=interrupt)
+        dl.main(["--session", "simple", "--frontend", str(mocked), "--duration", "1"], out=lines.append, wait_for_interrupt=interrupt)
     assert FakeBackend.instances[0].cleaned and FakeStatic.instances[0].stopped
     assert any("Press Ctrl-C to stop" in l for l in lines)
 
@@ -250,9 +250,9 @@ def test_demo_temporary_folder_is_created_and_removed(mocked):
 
 def test_main_passes_explicit_caps_only_to_the_demo_backend(mocked):
     lines = []
-    assert dl.main(["--frontend", str(mocked), "--duration", "1", "--exit-after-demo", "--tracking-cap", "3000"], out=lines.append) == 0
+    assert dl.main(["--session", "simple", "--frontend", str(mocked), "--duration", "1", "--exit-after-demo", "--tracking-cap", "3000"], out=lines.append) == 0
     assert FakeBackend.instances[-1].retention_caps == {"tracking": 3000}
     assert any("Retention caps for this demo backend only" in l and "tracking 3000" in l for l in lines)
-    assert dl.main(["--frontend", str(mocked), "--duration", "1", "--exit-after-demo"], out=lambda s: None) == 0
+    assert dl.main(["--session", "simple", "--frontend", str(mocked), "--duration", "1", "--exit-after-demo"], out=lambda s: None) == 0
     assert FakeBackend.instances[-1].retention_caps == {}, "no option: the backend's own defaults"
-    assert dl.main(["--frontend", str(mocked), "--physiological-cap", "0"], out=lines.append) == 2
+    assert dl.main(["--session", "simple", "--frontend", str(mocked), "--physiological-cap", "0"], out=lines.append) == 2

@@ -35,6 +35,16 @@ FEATURES (each 0-100 or unavailable with a reason; a real 0 is a value)
   sprint_quality       camera: mean peak speed of detected sprints (app/core/sprints.py) in the recent window against
                        those of the reference window. No sprint in the recent window = no observed opportunity:
                        unavailable, never a measured drop.
+  hr_speed_matched     EXPERIMENTAL (wearable + camera; only in a profile that names it): heart rate compared with the
+                       athlete's own reference AT SIMILAR MOVEMENT. Each HR sample is paired with the athlete's mean
+                       camera speed over the preceding context_s (time-weighted over covered time, gaps and exclusions not
+                       bridged; needs context_min_coverage), so the heart rate's lag behind movement is respected. Pairs
+                       fall into speed bands (band_edges_mps, m/s); in every band with at least min_pairs_per_band pairs in
+                       BOTH the reference window and the recent window, excess = mean recent HR - mean reference HR (bpm).
+                       Feature = pair-weighted mean excess over those bands as a fraction of heart-rate reserve
+                       (HR max - rest); 0 at no excess (or less), 100 at hundred_at_reserve_fraction. Unavailable when the
+                       matched bands hold less than min_matched_share of the recent pairs: the reference does not cover
+                       this kind of movement, and nothing is extrapolated. Same clock-alignment rule as hr_per_speed.
 CANDIDATES: weighted mean of available feature scores (weights renormalised over available features) when every
 `required` feature is available, the candidate's streams are fresh (newest sample at most staleness_s old) and the
 available weights reach min_weight_coverage. Otherwise unavailable with every reason. The combined candidate is never
@@ -55,9 +65,10 @@ from app.core.sprints import SprintRule, detect
 FORMAT = "athletrix-fatigue-profile"
 RULES_VERSION = 2   # 1: before 2026-11-08 (gaps up to max_gap_s bridged across excluded intervals; incomplete sprints used)
 CANDIDATES = ("vest_only", "camera_only", "combined")
-FEATURES = ("hr_strain", "time_above_threshold", "recovery", "hr_per_speed", "output_change", "sprint_quality")
+FEATURES = ("hr_strain", "time_above_threshold", "recovery", "hr_per_speed", "output_change", "sprint_quality", "hr_speed_matched")
 FEATURE_INPUTS = {"hr_strain": {"wearable"}, "time_above_threshold": {"wearable"}, "recovery": {"wearable"}, "hr_per_speed": {"wearable", "camera"},
-                  "output_change": {"camera"}, "sprint_quality": {"camera"}}
+                  "output_change": {"camera"}, "sprint_quality": {"camera"}, "hr_speed_matched": {"wearable", "camera"}}
+EXPERIMENTAL_FEATURES = ("hr_speed_matched",)   # used only by a profile that names them; no frozen profile does
 DISPLAY = ("0-100: 0 = at the athlete's own reference (a real zero), 100 = at or beyond the profile's bound, null = unavailable "
            "(never 0). Experimental estimate relative to the athlete's own baseline; not a fatigue measurement.")
 LABEL = "Experimental fatigue estimate (pilot): relative to this athlete's own baseline; the coach decides; no substitution advice."
@@ -434,7 +445,74 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
                 inc = rn / rr - 1
                 out["hr_per_speed"] = {**base, "available": True, "measure": {"recent_bpm_per_mps": round(rn, 3), "reference_bpm_per_mps": round(rr, 3), "increase": round(inc, 4)},
                                        "value": round(_clip(100 * inc / f["hundred_at_increase"]), 2)}
+    if "hr_speed_matched" in F:
+        out["hr_speed_matched"] = _hr_speed_matched(inp, F["hr_speed_matched"], phys, track, cam_breaks, gap, vest_ok, ref_ok, r0, r1, rest, hrmax, recent_after_ref)
     return out
+
+
+def _hr_speed_matched(inp, f, phys, track, cam_breaks, gap, vest_ok, ref_ok, r0, r1, rest, hrmax, recent_after_ref) -> dict:
+    """EXPERIMENTAL: see the module docstring. Returns the feature dict (available with value, or unavailable with why)."""
+    T = inp.cutoff
+    base = {"inputs": ["wearable", "camera"], "reference_window": {"start": iso(r0), "end": iso(r1)}, "experimental": True}
+    al = inp.camera_alignment
+    t0, why = (None, vest_ok or ref_ok) if (vest_ok or ref_ok) else recent_after_ref(f["window_s"])
+    if not why and hrmax is None:
+        why = "no maximum heart rate (with its origin) in the wearer assignment"
+    if not why and hrmax <= rest:
+        why = "the maximum heart rate is not above the resting baseline"
+    if not why and (al is None or al.get("basis") not in ("capture_time_mapping", "operator_estimate")):
+        why = ("no stated camera clock alignment: heart rate and camera speed cannot be paired" if al is None else
+               f"the camera clock reference is {al.get('basis')}: not capture time, so heart rate and camera speed cannot be paired")
+    if not why and al.get("uncertainty_s") is not None and al["uncertainty_s"] > f["alignment_tolerance_s"]:
+        why = f"camera clock uncertainty {al['uncertainty_s']} s exceeds the tolerance {f['alignment_tolerance_s']} s"
+    if why:
+        return {**base, **_unavailable(why)}
+    edges = list(f["band_edges_mps"])
+    ctx = timedelta(seconds=f["context_s"])
+
+    def band(v):
+        i = bisect.bisect_right(edges, v) - 1
+        return None if i < 0 or i >= len(edges) - 1 else i
+
+    def pairs(a, b):
+        res, no_ctx = {}, 0
+        for h in _window(phys, a, b):
+            cov, dist = _covered(_window(track, h.timestamp - ctx, h.timestamp), gap, lambda s: s.speed_mps, cam_breaks)
+            if cov < f["context_min_coverage"] * f["context_s"]:
+                no_ctx += 1
+                continue
+            k = band(dist / cov)
+            if k is not None:
+                res.setdefault(k, []).append(h.heart_rate_bpm)
+        return res, no_ctx
+    ref, ref_skip = pairs(r0, r1)
+    rec, rec_skip = pairs(t0, T)
+    n_rec = sum(len(v) for v in rec.values())
+    bands = []
+    for k in sorted(set(ref) | set(rec)):
+        nr, nn = len(ref.get(k, [])), len(rec.get(k, []))
+        row = {"band_mps": [edges[k], edges[k + 1]], "reference_pairs": nr, "recent_pairs": nn}
+        if nr >= f["min_pairs_per_band"] and nn >= f["min_pairs_per_band"]:
+            row.update(reference_mean_hr=round(statistics.fmean(ref[k]), 2), recent_mean_hr=round(statistics.fmean(rec[k]), 2))
+            row["excess_bpm"] = round(row["recent_mean_hr"] - row["reference_mean_hr"], 2)
+        bands.append(row)
+    matched = [x for x in bands if "excess_bpm" in x]
+    share = sum(x["recent_pairs"] for x in matched) / n_rec if n_rec else 0.0
+    base.update(window={"start": iso(t0), "end": iso(T)}, bands=bands,
+                pairs={"recent": n_rec, "reference": sum(len(v) for v in ref.values()), "without_movement_context": ref_skip + rec_skip},
+                matched_share_of_recent=round(share, 3))
+    if n_rec < f["min_pairs_per_band"]:
+        return {**base, **_unavailable(f"too few recent heart-rate samples with a movement context ({n_rec}; needs {f['min_pairs_per_band']})")}
+    if share < f["min_matched_share"]:
+        uncovered = [x for x in bands if "excess_bpm" not in x and x["recent_pairs"]]
+        desc = ", ".join(f"{x['band_mps'][0]:g}-{x['band_mps'][1]:g} m/s ({x['recent_pairs']} recent, {x['reference_pairs']} reference)" for x in uncovered)
+        return {**base, **_unavailable(f"the reference does not cover this kind of movement: only {share:.0%} of recent samples fall in speed bands "
+                                       f"the reference also has (needs {f['min_matched_share']:.0%}); not matched: {desc}")}
+    excess = sum(x["excess_bpm"] * x["recent_pairs"] for x in matched) / sum(x["recent_pairs"] for x in matched)
+    frac = excess / (hrmax - rest)
+    return {**base, "available": True, "measure": {"excess_bpm": round(excess, 2), "excess_fraction_of_reserve": round(frac, 4)},
+            "reference": {"rest_hr_bpm": rest, "hr_max_bpm": hrmax},
+            "value": round(_clip(100 * frac / f["hundred_at_reserve_fraction"]), 2)}
 
 
 def freshness(sel: dict, T: datetime, prof: dict) -> dict:
