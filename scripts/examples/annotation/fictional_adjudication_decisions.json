@@ -1,0 +1,25 @@
+{
+  "_note": "FICTIONAL adjudication decisions for the example disagreements.",
+  "decisions": [
+    {
+      "moment": "m2",
+      "question": "decision",
+      "label": {
+        "assessment": "assessed",
+        "judgement": "acceptable",
+        "confidence": "medium"
+      },
+      "reason": "fictional adjudicator: reasonable choice, poorly weighted"
+    },
+    {
+      "moment": "m4",
+      "question": "tactical",
+      "label": {
+        "assessment": "assessed",
+        "judgement": "followed",
+        "confidence": "medium"
+      },
+      "reason": "fictional adjudicator: the stated exception applied"
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+{
+  "format": "athletrix-annotation-sheet",
+  "format_version": 1,
+  "fictional": true,
+  "recording_id": null,
+  "clip": {
+    "name": "fictional-clip.mp4",
+    "sha256": null,
+    "fps": 25,
+    "frame0_utc": null,
+    "frame0_basis": "operator estimate (fill in from scripts/time_align.py)"
+  },
+  "reviewer": "fictional reviewer B",
+  "instructions": "Judge each asked question for each moment from the clip only. Do not look at other reviewers' sheets or any Athletrix output first. Use unable_to_assess (with a reason) when you cannot see it and no_opportunity when nothing to judge happened. Confidence and rationale are yours.",
+  "moments": [
+    {
+      "id": "m1",
+      "athlete_id": "f01",
+      "role": "central midfielder",
+      "from_frame": 250,
+      "to_frame": 300,
+      "evidence_source": "human_review_of_camera",
+      "asks": [
+        "execution_pass",
+        "decision"
+      ],
+      "criterion": {
+        "decision": "chose the option that kept possession under pressure"
+      },
+      "active_instruction": null,
+      "identity": "confirmed",
+      "note": "completed square pass into a pressed teammate",
+      "labels": {
+        "execution_pass": {
+          "assessment": "assessed",
+          "attempts": 1,
+          "completions": 1,
+          "confidence": "high"
+        },
+        "decision": {
+          "assessment": "assessed",
+          "judgement": "poor",
+          "confidence": "high",
+          "rationale": "safer option open"
+        }
+      }
+    },
+    {
+      "id": "m2",
+      "athlete_id": "f01",
+      "role": "central midfielder",
+      "from_frame": 900,
+      "to_frame": 950,
+      "evidence_source": "human_review_of_camera",
+      "asks": [
+        "execution_pass",
+        "decision"
+      ],
+      "criterion": {
+        "decision": "chose the option that kept possession under pressure"
+      },
+      "active_instruction": null,
+      "identity": "confirmed",
+      "note": "forward pass intercepted",
+      "labels": {
+        "execution_pass": {
+          "assessment": "assessed",
+          "attempts": 1,
+          "completions": 0,
+          "confidence": "high"
+        },
+        "decision": {
+          "assessment": "assessed",
+          "judgement": "acceptable",
+          "confidence": "low",
+          "rationale": "risky but defensible"
+        }
+      }
+    },
+    {
+      "id": "m3",
+      "athlete_id": "f03",
+      "role": "right back",
+      "from_frame": 1500,
+      "to_frame": 1600,
+      "evidence_source": "human_review_of_camera",
+      "asks": [
+        "positioning"
+      ],
+      "criterion": {
+        "positioning": "as right back with the ball on the far side, tuck in level with the centre backs"
+      },
+      "active_instruction": null,
+      "identity": "confirmed",
+      "note": "ball on the far side",
+      "labels": {
+        "positioning": {
+          "assessment": "assessed",
+          "judgement": "poor",
+          "confidence": "medium",
+          "rationale": "left a gap inside"
+        }
+      }
+    },
+    {
+      "id": "m4",
+      "athlete_id": "f04",
+      "role": "winger",
+      "from_frame": 2100,
+      "to_frame": 2200,
+      "evidence_source": "human_review_of_camera",
+      "asks": [
+        "tactical"
+      ],
+      "criterion": {},
+      "active_instruction": {
+        "text": "press high after losing the ball",
+        "exception": "drop off when the team is outnumbered at the back"
+      },
+      "identity": "confirmed",
+      "note": "ball lost in the final third",
+      "labels": {
+        "tactical": {
+          "assessment": "assessed",
+          "judgement": "not_followed",
+          "confidence": "low",
+          "rationale": "did not press"
+        }
+      }
+    },
+    {
+      "id": "m5",
+      "athlete_id": "f02",
+      "role": "centre back",
+      "from_frame": 2700,
+      "to_frame": 2800,
+      "evidence_source": "human_review_of_camera",
+      "asks": [
+        "decision",
+        "positioning"
+      ],
+      "criterion": {
+        "decision": "cleared or recycled safely under pressure",
+        "positioning": "held the line with the other centre back"
+      },
+      "active_instruction": null,
+      "identity": "confirmed",
+      "note": "challenge near the touchline; partly off camera",
+      "labels": {
+        "decision": {
+          "assessment": "unable_to_assess",
+          "unable_reason": "off_camera",
+          "confidence": "high"
+        },
+        "positioning": {
+          "assessment": "unable_to_assess",
+          "unable_reason": "occluded",
+          "confidence": "medium",
+          "rationale": "hidden behind the attacker"
+        }
+      }
+    }
+  ],
+  "_note": "FICTIONAL reviewer B labels (made up for tests)."
+}

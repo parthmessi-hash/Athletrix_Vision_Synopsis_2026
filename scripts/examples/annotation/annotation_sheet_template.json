@@ -1,0 +1,38 @@
+{
+  "format": "athletrix-annotation-sheet",
+  "format_version": 1,
+  "fictional": false,
+  "recording_id": null,
+  "clip": {
+    "name": "",
+    "sha256": null,
+    "fps": null,
+    "frame0_utc": null,
+    "frame0_basis": "operator estimate (fill in from scripts/time_align.py)"
+  },
+  "reviewer": "",
+  "instructions": "Judge each asked question for each moment from the clip only. Do not look at other reviewers' sheets or any Athletrix output first. Use unable_to_assess (with a reason) when you cannot see it and no_opportunity when nothing to judge happened. Confidence and rationale are yours.",
+  "moments": [
+    {
+      "id": "",
+      "athlete_id": "",
+      "role": "",
+      "from_frame": null,
+      "to_frame": null,
+      "evidence_source": "human_review_of_camera",
+      "asks": [],
+      "criterion": {
+        "decision": "",
+        "positioning": ""
+      },
+      "active_instruction": {
+        "text": "",
+        "exception": ""
+      },
+      "identity": null,
+      "note": "",
+      "labels": {}
+    }
+  ],
+  "_instructions": "Blank template. One entry per moment; asks lists the questions to judge; criterion holds the stated expectation per question; active_instruction {text, exception} for tactical questions. Labels stay empty in the sheet given to reviewers."
+}

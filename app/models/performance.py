@@ -102,6 +102,9 @@ class PerformanceObservationCreate(AthletrixModel):
     event_times: list[AwareDatetime] = Field(default_factory=list, max_length=50)
     note: str | None = Field(None, min_length=1, max_length=500)
     identity: Literal["confirmed", "uncertain"] | None = Field(None, exclude_if=_unset, description="Whether the annotator was sure which player this is; uncertain = listed, never scored.")
+    confidence: Literal["high", "medium", "low"] | None = Field(None, exclude_if=_unset, description="The reviewer's stated confidence in this judgement (not used in any score).")
+    rationale: str | None = Field(None, min_length=1, max_length=500, exclude_if=_unset, description="Why the reviewer judged it so.")
+    instruction_exception: str | None = Field(None, min_length=1, max_length=200, exclude_if=_unset, description="tactical_observation: an exception the coach stated with the instruction, as it applied here.")
     supersedes: str | None = Field(None, min_length=1, max_length=64, exclude_if=_unset, description="Id of the observation this one corrects (same recording and athlete).")
     correction_reason: str | None = Field(None, min_length=1, max_length=300, exclude_if=_unset)
     distinct_from: list[str] = Field(default_factory=list, max_length=20, exclude_if=_unset, description="Overlapping observations this one does NOT double count (annotator's statement).")
@@ -135,7 +138,7 @@ class PerformanceObservationCreate(AthletrixModel):
                 raise ValueError("an assessed tactical observation needs an outcome and the instruction it judges")
         elif any(getattr(self, f) is not None for f in (*ALL_COUNTS, "outcome")):
             raise ValueError("counts and outcomes are recorded only for assessed observations")
-        if self.kind != "tactical_observation" and (self.outcome is not None or self.instruction is not None):
+        if self.kind != "tactical_observation" and (self.outcome is not None or self.instruction is not None or self.instruction_exception is not None):
             raise ValueError("outcome and instruction belong to tactical observations")
         if self.kind not in ("decision", "positioning") and self.criterion is not None:
             raise ValueError("criterion belongs to decision and positioning observations")
