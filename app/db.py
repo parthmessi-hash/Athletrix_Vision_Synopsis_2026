@@ -182,6 +182,18 @@ CREATE TABLE IF NOT EXISTS recording_responses (
     payload      TEXT NOT NULL,
     UNIQUE (recording_id, client_token)
 );
+CREATE TABLE IF NOT EXISTS recording_study (
+    id           TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    athlete_id   TEXT,
+    kind         TEXT NOT NULL,
+    client_token TEXT NOT NULL,
+    at_utc       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    UNIQUE (recording_id, client_token)
+);
+CREATE INDEX IF NOT EXISTS recording_study_by_recording ON recording_study (recording_id, at_utc);
 CREATE TABLE IF NOT EXISTS ingest_rejections (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     received_at TEXT NOT NULL,

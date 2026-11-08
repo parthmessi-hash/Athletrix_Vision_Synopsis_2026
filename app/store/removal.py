@@ -45,8 +45,8 @@ from app.store.recordings import TABLES as RECORDING_SAMPLE_TABLES
 
 ROLLING_SAMPLE_TABLES = ("physiological_samples", "tracking_samples")
 RECORDING_SCOPED = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster",
-                    "recording_reviews", "recording_responses", "recording_configurations", "recording_imports")
-PER_ATHLETE_RECORDING_TABLES = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster", "recording_reviews", "recording_responses")
+                    "recording_reviews", "recording_responses", "recording_study", "recording_configurations", "recording_imports")
+PER_ATHLETE_RECORDING_TABLES = ("recording_athletes", *RECORDING_SAMPLE_TABLES.values(), "recording_periods", "recording_context", "recording_performance", "recording_roster", "recording_reviews", "recording_responses", "recording_study")
 
 CANNOT_REMOVE = [
     "files exported earlier (JSON Lines, CSV, review JSON) and portable packages already copied anywhere, including other engines' databases that imported them",

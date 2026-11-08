@@ -1,4 +1,4 @@
-"""Package format 7: roster input plans and reviewer fields survive export and import; a version 6 package (no such
+"""Package format 7 (now 8): roster input plans and reviewer fields survive export and import; a version 6 package (no such
 fields) still reads, with inputs not stated rather than assumed."""
 
 import io
@@ -29,7 +29,7 @@ def test_v7_round_trip_and_v6_still_reads(client, monkeypatch, tmp_path):
     client.post(f"/api/v1/recordings/{rid}/stop")
     data = client.get(f"/api/v1/recordings/{rid}/package.zip").content
     pkg = read_package(data)
-    assert pkg.manifest["format_version"] == FORMAT_VERSION == 7
+    assert pkg.manifest["format_version"] == FORMAT_VERSION == 8
     assert pkg.roster[0].inputs.physiology == "not_used" and pkg.performance[0].instruction_exception == "drop off when outnumbered" and pkg.performance[0].confidence == "low"
     db = Database(tmp_path / "other.db")
     try:
@@ -47,6 +47,7 @@ def test_v7_round_trip_and_v6_still_reads(client, monkeypatch, tmp_path):
     files["roster.json"] = json.dumps(roster6).encode(); files["performance.json"] = json.dumps(perf6).encode()
     man = json.loads(files["manifest.json"])
     man["format_version"] = 6
+    files.pop("study.json"); man["members"].pop("study.json"); man["counts"].pop("study_entries")
     import hashlib
     for name in ("roster.json", "performance.json"):
         man["members"][name] = {"sha256": hashlib.sha256(files[name]).hexdigest(), "bytes": len(files[name])}

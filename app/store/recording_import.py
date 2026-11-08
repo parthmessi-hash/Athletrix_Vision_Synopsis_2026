@@ -146,6 +146,20 @@ def import_package(db: Database, pkg: Package, now: datetime, *, allow_duplicate
             response_store.insert(c, r.model_copy(update={"id": pid, "recording_id": new_id, "origin": "source_engine", "source_entry_id": r.source_entry_id or r.id,
                                                           "saved_review_id": review_map.get(r.saved_review_id) if r.saved_review_id else None, "recommendation": rec_ref,
                                                           "roster_entry_ids": [roster_map[i] for i in r.roster_entry_ids]}))
+        study_map: dict[str, str] = {}
+        from app.store.study import insert as study_insert  # noqa: PLC0415
+        from app.store.study import new_study_id  # noqa: PLC0415
+        for e in pkg.study:
+            sid = new_study_id(now, e.kind)
+            while sid in study_map.values() or c.execute("SELECT 1 FROM recording_study WHERE id = ?", (sid,)).fetchone():
+                sid = new_study_id(now, e.kind)
+            study_map[e.id] = sid
+        for e in pkg.study:   # stored exactly as at the source apart from ids and references
+            upd = {"id": study_map[e.id], "recording_id": new_id, "origin": "source_engine", "source_entry_id": e.source_entry_id or e.id,
+                   "supersedes": study_map[e.supersedes] if e.supersedes else None}
+            if e.kind == "prediction" and e.prediction and e.prediction.get("sprint_start_id"):
+                upd["prediction"] = {**e.prediction, "sprint_start_id": study_map[e.prediction["sprint_start_id"]]}
+            study_insert(c, e.model_copy(update=upd))
         if checkpoint:
             checkpoint("review")
         c.execute("INSERT INTO recording_imports (recording_id, source_recording_id, package_sha256, package_format, package_generated_at, imported_at, period_id_map) VALUES (?, ?, ?, ?, ?, ?, ?)",

@@ -516,11 +516,13 @@ def export_recording_package(recording_id: str) -> Response:
         roster = roster_store.list(rec.id)
         reviews = review_store.list(rec.id)
         responses = response_store.list(rec.id)
+        from app.store.study import study_store  # noqa: PLC0415
+        study = study_store.list(rec.id)
         with get_database().read() as c:
             configuration = recording_store.configuration_in(c, rec.id).snapshot
     recording_doc = {"id": rec.id, "name": rec.name, "status": rec.status, "started_at": rec.started_at.isoformat().replace("+00:00", "Z"), "stopped_at": rec.stopped_at.isoformat().replace("+00:00", "Z")}
     settings_doc = {"distance_max_gap_seconds": settings.distance_max_gap_seconds, "distance_min_confidence": settings.distance_min_confidence, "high_speed_threshold_mps": settings.high_speed_threshold_mps}
-    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts, context, performance, baselines, roster, reviews, responses)
+    body = build_package(recording_doc, rec.athletes, samples, periods, settings_doc, captured_at, configuration, receipts, context, performance, baselines, roster, reviews, responses, study)
     return Response(
         content=body, media_type="application/zip",
         headers={
