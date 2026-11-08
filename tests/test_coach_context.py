@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -156,7 +157,7 @@ def test_removal_takes_context_with_the_athlete_or_recording_and_drops_partner_m
         payloads = {r[0]: json.loads(r[1]) for r in con.execute("SELECT id, payload FROM recording_context WHERE athlete_id IS NOT NULL")}
         assert payloads[keep["id"]]["partnerships"] == {"status": "recorded", "items": [{"partner_athlete_id": "a3", "note": "covers for a3"}]}
         assert payloads[only["id"]]["partnerships"] == {"status": "unknown", "items": []}
-        assert "a1" not in json.dumps(list(payloads.values()))
+        assert not re.search(r"\ba1\b", json.dumps(list(payloads.values()))), "no mention of a1 remains (word match: random ids may contain the letters a1)"
         assert con.execute("SELECT COUNT(*) FROM recording_context WHERE athlete_id IS NULL").fetchone()[0] == 1, "team-level context stays"
     finally:
         con.close()

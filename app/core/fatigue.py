@@ -133,6 +133,7 @@ class ScoreInputs:
     exclusions: list[tuple] = field(default_factory=list)  # (start, end, reason)
     reference_start: datetime | None = None               # the athlete's first round_start of the session
     camera_alignment: dict | None = None                  # the session's camera clock reference, or None
+    reference_note: str | None = None                     # why there is no camera reference, when the study log says so
 
 
 def _received(r) -> datetime | None:
@@ -312,7 +313,7 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
     R = prof["reference"]["camera_reference_s"]
     ref_ok, r0, r1 = None, None, None
     if inp.reference_start is None:
-        ref_ok = "no round has started for this athlete: the camera reference window is not defined"
+        ref_ok = inp.reference_note or "no round has started for this athlete: the camera reference window is not defined"
     else:
         r0, r1 = inp.reference_start, inp.reference_start + timedelta(seconds=R)
         if r1 > T:

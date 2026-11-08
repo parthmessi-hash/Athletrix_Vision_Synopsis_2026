@@ -7,6 +7,7 @@ frozen text, never whatever is configured later. Nothing here gives substitution
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -103,14 +104,126 @@ def build_inputs(rec: Recording, entries: list[StudyEntry], prof: dict, athlete_
     for r, s in sorted(starts.items()):
         end = ends[r].at if r in ends else s.at + timedelta(seconds=ex["assumed_duration_if_no_end_s"])
         excl.append((s.at - timedelta(seconds=ex["pre_s"]), end + timedelta(seconds=ex["post_s"]), f"timed test sprint, round {r}" + ("" if r in ends else " (end not marked: assumed duration)")))
-    rs = sorted(e.at for e in known if e.kind == "round_start" and e.athlete_id == athlete_id)
+    rse = sorted((e for e in known if e.kind == "round_start" and e.athlete_id == athlete_id), key=lambda e: e.at)
+    opened = [e.at for e in rse if e.opens_camera_reference]
+    if opened:
+        rs = opened[:1]
+    elif any(e.opens_camera_reference is False for e in rse):
+        rs = []   # rounds started without usable data never open the reference; nothing is moved to make a result available
+    else:
+        rs = [e.at for e in rse]   # recordings from before 2026-11-08: the first round start, as before
     cam = next((c.model_dump(mode="json") for c in (sess.clock_references if sess else []) if c.stream == "camera"), None)
     if data is None:
         lookback = max(f.get("window_s", 0) for f in prof["features"].values())
         lookback = max(lookback, prof["features"].get("recovery", {}).get("lookback_s", 0))
         t0 = min([t - timedelta(seconds=lookback + 5)] + ([rs[0] - timedelta(seconds=5)] if rs else []))
         data = (recording_store.range_with_receipts(rec.id, athlete_id, "physiological", t0, t), recording_store.range_with_receipts(rec.id, athlete_id, "tracking", t0, t))
-    return ScoreInputs(athlete_id, t, knowledge, data[0], data[1], mine, excl, rs[0] if rs else None, cam)
+    return ScoreInputs(athlete_id, t, knowledge, data[0], data[1], mine, excl, rs[0] if rs else None, cam,
+                       reference_note=None if rs or not rse else "no round of this athlete has opened the camera reference yet (rounds started without usable data do not open it)")
+
+
+READY_LOOKBACK_S = 30.0
+
+
+def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: datetime) -> dict:
+    """What the wearer's data allows right now, and the operator's next action (see the module docstring of
+    app/models/study.py). States, in order of checking:
+      no_profile / unassigned     no study session, or the athlete is not the active wearer
+      no_stream                   nothing arriving for this athlete in the last 30 s
+      stale_or_unassigned         samples arrive but are stale, from another device, outside the assignment, tagged for the
+                                  previous wearer, or camera samples without confirmed identity
+      ready_to_start              both streams usable and no round open: start the next round
+      warming_up                  a round is open and the reference or windows are still building (seconds remaining)
+      ready_to_save               a round is open and the score can be saved now (with the estimates it will have)
+    Stream usability ignores test-effort exclusions; the score does not."""
+    fz = frozen_profile(entries)
+    if fz is None:
+        return {"state": "no_profile", "next": "open the study session with a configured fatigue profile (pilot_session.py session ...)"}
+    p, sha, _ = fz
+    cur = current(entries)
+    live = [w for w in wearer_intervals(cur) if w["start"] <= t and (w["end"] is None or t < w["end"])]
+    if not live or live[0]["entry"].athlete_id != athlete_id:
+        return {"state": "unassigned", "next": f"assign the vest to {athlete_id} (pilot_session.py wearer ...)",
+                "active_wearer": live[0]["entry"].athlete_id if live else None}
+    from app.core.fatigue import freshness, select  # noqa: PLC0415
+    inp = build_inputs(rec, entries, p, athlete_id, t, "as_entered")
+    t0 = t - timedelta(seconds=READY_LOOKBACK_S)
+    raw_p = [s for s, _ in inp.phys if t0 < s.timestamp <= t]
+    raw_t = [s for s, _ in inp.track if t0 < s.timestamp <= t]
+    # stream usability ignores the test-effort exclusions (readings during and just after a sprint arrive fine; the score
+    # simply leaves them out): judge arrival, device, assignment and confidence only
+    sel = select(dataclasses.replace(inp, exclusions=[]), p)
+    fr = freshness(sel, t, p)
+    w = live[0]["entry"]
+    streams = {}
+    for name, raw, ok in (("wearable", raw_p, fr["wearable"]["fresh"]), ("camera", raw_t, fr["camera"]["fresh"])):
+        if ok:
+            streams[name] = {"usable": True, "detail": f"fresh (newest {fr[name]['age_s']:.0f} s old)"}
+            continue
+        if not raw:
+            others = []
+            if name == "wearable":
+                for a in rec.athlete_ids:
+                    if a != athlete_id and any((s.device_id or "") == w.device_id for s, _ in recording_store.range_with_receipts(rec.id, a, "physiological", t0, t)):
+                        others.append(a)
+            streams[name] = {"usable": False, "detail": f"the assigned vest {w.device_id} is sending readings tagged for {', '.join(others)} (wrong wearer in the adapter)"} if others \
+                else {"usable": False, "detail": f"nothing arriving in the last {READY_LOOKBACK_S:g} s"}
+            continue
+        why = []
+        if name == "wearable":
+            devs = sorted({s.device_id or "none" for s in raw if s.device_id != w.device_id})
+            if devs:
+                why.append(f"from another device ({', '.join(devs)}; the assigned vest is {w.device_id})")
+            if sel["excluded"]["outside_own_wearer_assignment"]:
+                why.append("readings outside this wearer's assignment")
+        else:
+            low = sum(1 for s in raw if s.tracking_confidence < p["streams"].get("min_tracking_confidence", 0.5) or (s.value_basis or "") == "predicted")
+            if low:
+                why.append(f"{low} low-confidence or predicted camera samples (identity not confirmed)")
+        if fr[name].get("age_s") is not None and not why:
+            why.append(f"stale (newest usable sample {fr[name]['age_s']:.0f} s old)")
+        streams[name] = {"usable": False, "detail": "; ".join(why) or "not usable"}
+    rse = [e for e in cur if e.kind == "round_start" and e.athlete_id == athlete_id]
+    ended = {e.round for e in cur if e.kind == "round_end" and e.athlete_id == athlete_id}
+    open_rounds = sorted(e.round for e in rse if e.round not in ended)
+    during = (f" Round {open_rounds[-1]} is open: wait for the stream to recover, save anyway (the missing estimates and their "
+              "reasons are recorded), or end the round as invalid with a reason.") if open_rounds else ""
+    if not raw_p and not raw_t and "tagged for" not in streams["wearable"]["detail"]:
+        return {"state": "no_stream", "streams": streams, "open_round": open_rounds[-1] if open_rounds else None,
+                "next": ("no stream is arriving: check the vest and the camera feed" + (during if open_rounds else " before starting a round"))}
+    if not all(v["usable"] for v in streams.values()):
+        bad = [f"{k}: {v['detail']}" for k, v in streams.items() if not v["usable"]]
+        return {"state": "stale_or_unassigned", "streams": streams, "open_round": open_rounds[-1] if open_rounds else None,
+                "next": ("fix the input: " if open_rounds else "fix the input before starting: ") + "; ".join(bad) + "." + during}
+    nxt_round = max([e.round for e in rse if e.round is not None] or [0]) + 1
+    extra = {"open_round": open_rounds[-1] if open_rounds else None}
+    if not open_rounds:
+        will_open = not any(e.opens_camera_reference for e in rse) and not (rse and all(e.opens_camera_reference is None for e in rse))
+        overlap = max([(b - t).total_seconds() for a, b, _ in inp.exclusions if b > t] or [0.0])
+        return {"state": "ready_to_start", "streams": streams, **extra, "next_round": nxt_round, "start_opens_camera_reference": will_open,
+                **({"reference_overlaps_test_exclusion_s": round(overlap, 1)} if will_open and overlap > 0 else {}),
+                "next": f"both streams are usable: start round {nxt_round} now" + (
+                    f" (this start opens the camera reference period of {p['reference']['camera_reference_s']:g} s" +
+                    (f"; the last {overlap:.0f} s of the sprint exclusion would fall inside it, so waiting {overlap:.0f} s gives a fuller reference)"
+                     if overlap > 0 else ")") if will_open else "")}
+    opened = any(e.opens_camera_reference for e in rse) or (rse and all(e.opens_camera_reference is None for e in rse))
+    sc = score(inp, p, sha)
+    avail = {c: v["available"] for c, v in sc["candidates"].items()}
+    if not opened:
+        return {"state": "warming_up", "streams": streams, "estimates_available": avail, **extra,
+                "next": "this athlete's rounds were all started without usable data, so the camera reference is not open: camera and combined "
+                        "scores stay unavailable; end this round and start the next one with both streams usable"}
+    if inp.reference_start is not None:
+        remaining = (inp.reference_start + timedelta(seconds=p["reference"]["camera_reference_s"] + max(f.get("window_s", 0) for k, f in p["features"].items()
+                     if k in ("output_change", "hr_per_speed"))) - t).total_seconds()
+    else:
+        remaining = None
+    if not all(avail.values()) and remaining is not None and remaining > 0:
+        return {"state": "warming_up", "streams": streams, "estimates_available": avail, "seconds_until_windows_built": round(remaining, 1), **extra,
+                "next": f"windows still building (about {remaining:.0f} s): wait before saving a score for a controlled round"}
+    missing = {c: (v["reasons"] or ["unavailable"])[0] for c, v in sc["candidates"].items() if not v["available"]}
+    return {"state": "ready_to_save", "streams": streams, "estimates_available": avail, "unavailable_reasons": missing, **extra,
+            "next": "save the score now" + ("" if not missing else f" (not available: {', '.join(missing)})")}
 
 
 def check_time(rec: Recording, t: datetime) -> None:
@@ -206,7 +319,19 @@ def add_study_entry(recording_id: str, body: StudyEntryCreate, response: Respons
             raise HTTPException(status_code=409, detail="the stated start is before the score was saved: that is not a pre-sprint prediction (enter the round without confirmation)")
         if age > CONFIRM_MAX_AGE_S:
             raise HTTPException(status_code=409, detail=f"the saved score is {age:.0f} s old (limit {CONFIRM_MAX_AGE_S:g} s): save the score again")
-    e = StudyEntry(**body.model_dump(exclude={"at"}), at=t, id=new_study_id(now, body.kind), recording_id=rec.id, created_at=now, profile=profile)
+    opens, ready_doc = None, None
+    if body.kind == "round_start" and frozen_profile(entries) is not None:
+        with get_database().read():
+            ready_doc = readiness(rec, entries, body.athlete_id, now)
+        usable = ready_doc["state"] in ("warming_up", "ready_to_start", "ready_to_save")
+        if not usable and not body.partial_reason:
+            raise HTTPException(status_code=409, detail={"message": f"the streams are not usable ({ready_doc['state']}): {ready_doc['next']}. "
+                                                                    "To start anyway, give partial_reason (it goes into the report).", "readiness": ready_doc})
+        earlier_open = any(x.opens_camera_reference for x in current(entries) if x.kind == "round_start" and x.athlete_id == body.athlete_id)
+        opens = usable and not earlier_open and not body.partial_reason
+    e = StudyEntry(**body.model_dump(exclude={"at"}), at=t, id=new_study_id(now, body.kind), recording_id=rec.id, created_at=now, profile=profile,
+                   opens_camera_reference=opens if body.kind == "round_start" and ready_doc is not None else None,
+                   readiness_at_start=ready_doc if body.kind == "round_start" else None)
     pred = None
     if body.kind == "sprint_start" and not body.confirms_prediction_id:
         fz = frozen_profile(entries)
@@ -333,7 +458,7 @@ def pilot_view(recording_id: str, at: str | None = None, trend_step_s: int = Que
                                            "timing_label": lastp.prediction.get("timing_label"),
                                            "values": {c: v["value"] for c, v in ((lastp.prediction.get("result") or {}).get("candidates") or {}).items()}}
         return {**base, "wearer": {"athlete_id": w.athlete_id, "participant_code": w.participant_code, "device_id": w.device_id, "since": iso(live[0]["start"])},
-                "last_saved_prediction": last,
+                "last_saved_prediction": last, "readiness": readiness(rec, entries, w.athlete_id, t) if at is None and rec.stopped_at is None else None,
                 "estimate": now, "trend": trend, "newest_sample": newest,
                 "newest_receipt": max((r["received_at"] for r in recs), default=None)}
 
@@ -409,3 +534,12 @@ def timing_sheet(recording_id: str) -> dict:
     return {"recording_id": rec.id, "session": sess.session_label if sess else None, "fictional": bool(sess and sess.fictional),
             "rounds": sorted(rows.values(), key=lambda r: (r["participant_code"] or r["athlete_id"], r["round"])),
             "note": "Blind timing sheet: no scores, predictions or self-ratings are included."}
+
+
+@router.get("/recordings/{recording_id}/study/readiness")
+def study_readiness(recording_id: str, athlete_id: str) -> dict:
+    """Whether the athlete's streams allow a controlled round now, and the next action (no recommendation is made)."""
+    with get_database().read():
+        rec = require_recording(recording_id)
+        require_member(rec, athlete_id)
+        return {"recording_id": rec.id, "athlete_id": athlete_id, "at": iso(clock.utc_now()), **readiness(rec, study_store.list(rec.id), athlete_id, clock.utc_now())}

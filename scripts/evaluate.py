@@ -870,6 +870,12 @@ def pilot_report(r: dict) -> str:
     L += ["", "## Exploratory: including rounds whose save-before-start order is unverified (never the primary result)", "",
           f"{e['rows']} rows: " + ", ".join(f"{c} {rr(e[c])}" for c in ("vest_only", "camera_only", "combined")), "",
           "## Rounds left out of the primary comparison", ""] + ([f"- {x['participant']} {x['session']} round {x['round']}: {x['reason']}" for x in r["ineligible"]] or ["- none"])
+    part = [x for x in r["rows"] if x.get("started_without_usable_data")]
+    opened = [x for x in r["rows"] if x.get("opens_camera_reference")]
+    L += ["", "## Rounds started without usable data (operator's reason; the team's valid-round rule decides)", ""] + \
+         ([f"- {x['participant']} {x['session']} round {x['round']}: {x['started_without_usable_data']}" for x in part] or ["- none"])
+    L += ["", "Camera reference opened at: " + (", ".join(f"{x['participant']} {x['session']} round {x['round']}" for x in opened) or
+                                               "not recorded (recordings before 2026-11-08 open it at each athlete's first round start)")]
     L += ["", "## Held out", r["held_out"]["status"], r["held_out"].get("limits", ""), "",
           "## Self-rating (exploratory, never a score input)", f"r(self-rating, time increase) = {rr(r['self_rating_exploratory']['self_rating_vs_time_increase'])} on {r['self_rating_exploratory']['rows']} rows.", "",
           "## Rows (trace)", "", "| Participant | Session | Round | vest | camera | combined | time (s) | increase % | timing | prediction | result (history) |", "|---|---|---|---|---|---|---|---|---|---|---|"]

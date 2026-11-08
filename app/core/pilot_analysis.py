@@ -165,6 +165,7 @@ def rows_from_package(pkg) -> list[dict]:
                 history.append({"id": x.id, "time_s": x.time_s, "missing_reason": x.missing_reason, "corrected_by_reason": None})
         rate = next((e for e in cur if e.kind == "self_rating" and (e.athlete_id, e.round) == (aid, rnd)), None)
         end = next((e for e in cur if e.kind == "round_end" and (e.athlete_id, e.round) == (aid, rnd)), None)
+        rstart = next((e for e in cur if e.kind == "round_start" and (e.athlete_id, e.round) == (aid, rnd)), None)
         result = ((p.prediction or {}).get("result") or {}) if p else {}
         cands = result.get("candidates")
         ev = classify(p.model_dump(mode="json"), start.model_dump(mode="json") if start else None, res.model_dump(mode="json") if res else None) if p else \
@@ -178,5 +179,7 @@ def rows_from_package(pkg) -> list[dict]:
                     "profile_sha256": (result.get("profile") or {}).get("sha256"),
                     "result_id": res.id if res else None, "result_history": history, "method": res.method if res else None,
                     "time_s": res.time_s if res else None, "time_missing_reason": (res.missing_reason if res else "no result entered"),
-                    "self_rating": rate.value if rate else None, "fictional": bool(sess and sess.fictional)})
+                    "self_rating": rate.value if rate else None, "fictional": bool(sess and sess.fictional),
+                    "started_without_usable_data": (rstart.partial_reason or "yes") if rstart and rstart.opens_camera_reference is False and rstart.partial_reason else None,
+                    "opens_camera_reference": rstart.opens_camera_reference if rstart else None})
     return out

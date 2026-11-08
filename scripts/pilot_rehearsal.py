@@ -171,6 +171,21 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
                 if deadline and now() >= deadline:
                     break
                 f = sc.fatigue(code, rnd)
+                # the operator starts the round only when the card says both streams are usable (pilot_session.py ready)
+                for _wait in range(15):
+                    rd = api.call("readiness", "GET", f"/recordings/{rid}/study/readiness", params={"athlete_id": aid}) or {}
+                    if rd.get("state") in ("warming_up", "ready_to_start", "ready_to_save"):
+                        break
+                    for i in range(10):   # one more second of both streams while the operator waits
+                        t = now()
+                        if i == 0:
+                            api.call("physiological", "POST", "/samples/physiological", json={"athlete_id": aid, "timestamp": z(t), "source": "simulated", "device_id": VEST,
+                                                                                               "heart_rate_bpm": round(sc.hr(base_ids[aid][1], hrmax, f, 0, False), 1)})
+                        api.call("tracking", "POST", "/samples/tracking", json={"athlete_id": aid, "timestamp": z(t), "x_position": 0.0, "y_position": 0.0,
+                                                                              "speed_mps": round(sc.speed(f, 0, False), 2), "acceleration_mps2": 0.0, "tracking_confidence": 0.9,
+                                                                              "source": "camera", "segment_id": f"seg-{aid}", "value_basis": "estimated"})
+                        sleep(0.1)
+                log["events"].append(f"{z(now())} {code} round {rnd}: readiness {rd.get('state')} after {_wait} s of waiting" + ("" if rd.get("state") in ("warming_up", "ready_to_start", "ready_to_save") else f" ({rd.get('next')})"))
                 entry(kind="round_start", athlete_id=aid, round=rnd)
                 start = now()
                 step, nxt, t_hr = 0.1, start, start

@@ -88,6 +88,7 @@ def pilot(client, frozen):
         base[aid] = b["id"]
     frozen["now"] = T0 + timedelta(minutes=10)
     rid = client.post(f"{API}/recordings", json={"name": "FICTIONAL pilot day 1", "athlete_ids": ["x1", "x2"]}).json()["id"]
+    sim.run(frozen["now"] + timedelta(seconds=3), "x1", "strap-A")   # both streams arriving before the round starts
     m0 = frozen["now"]
     entry(client, rid, kind="session", client_token="sess-0001", session_label="day1", protocol="rehearsal", fictional=True, planned_rounds=2,
           clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.05, "note": "FICTIONAL"}])
@@ -153,10 +154,15 @@ def test_wearer_change_inherits_nothing_and_export_reproduces(pilot, tmp_path):
                                                      "baseline_id": base["x1"], "hr_max_bpm": 195, "hr_max_origin": "FICTIONAL"})
     assert r.status_code == 422 and "never uses another participant's baseline" in r.json()["detail"]
     entry(c, rid, kind="wearer", client_token="wear-x2-0001", athlete_id="x2", participant_code="P2", device_id="strap-A", baseline_id=base["x2"], hr_max_bpm=195, hr_max_origin="FICTIONAL")
-    entry(c, rid, kind="round_start", client_token="r1-start-x2", athlete_id="x2", round=1)
     t_change = st["now"]
-    # the adapter keeps tagging the strap with x1 for 20 s by mistake, then x2
+    # the adapter keeps tagging the strap with x1 for 20 s by mistake, then x2; the round cannot start quietly meanwhile
     sim.run(t_change + timedelta(seconds=20), "x1", "strap-A", hr=lambda s: 175, t0=m0)
+    r = c.post(f"{API}/recordings/{rid}/study", json={"kind": "round_start", "client_token": "r1-start-x2-early", "athlete_id": "x2", "round": 1})
+    assert r.status_code == 409 and r.json()["detail"]["readiness"]["state"] == "stale_or_unassigned"
+    assert "tagged for x1" in r.json()["detail"]["readiness"]["streams"]["wearable"]["detail"]
+    sim.run(t_change + timedelta(seconds=23), "x2", "strap-A", hr=lambda s: 150, t0=m0)
+    rs2 = entry(c, rid, kind="round_start", client_token="r1-start-x2", athlete_id="x2", round=1)
+    assert rs2["opens_camera_reference"] is True and rs2["readiness_at_start"]["state"] == "ready_to_start"
     sim.run(t_change + timedelta(seconds=320), "x2", "strap-A", hr=lambda s: 150, t0=m0)
     x1 = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1"}).json()
     assert x1["candidates"]["vest_only"]["available"] is False and "not the active wearer" in x1["features"]["hr_strain"]["reason"]
@@ -410,3 +416,81 @@ def test_field_check_keeps_the_three_readiness_levels_apart(pilot, tmp_path):
     assert "READY TO RUN THE CONTROLLED PILOT: NO" in text and "SIMULATED: fine for a rehearsal, never a real device" in text
     assert "must be non-fictional, record an approval status and pin the profile" in text and "export folder writable" in text
     assert "active wearer: P1 on strap-A" in text and "camera clock alignment: operator_estimate" in text
+
+
+def test_round_readiness_early_start_dropout_identity_loss_and_recovery(pilot):
+    """A round never starts quietly without usable data: early start (refused, then a deliberate partial start whose reason
+    reaches the report and which never opens the camera reference), dropout during warm-up, camera identity loss, and
+    recovery to ready_to_save. The wearer change case is in test_wearer_change_inherits_nothing_and_export_reproduces."""
+    import pilot_session  # noqa: PLC0415
+    from app.core.pilot_analysis import rows_from_package  # noqa: PLC0415
+    c, sim, rid, st, base = pilot["c"], pilot["sim"], pilot["rid"], pilot["st"], pilot["base"]
+    rd = lambda aid: c.get(f"{API}/recordings/{rid}/study/readiness", params={"athlete_id": aid}).json()  # noqa: E731
+    assert rd("x1")["state"] == "warming_up" and rd("x1")["open_round"] == 1 and rd("x1")["seconds_until_windows_built"] > 200
+    assert rd("x2")["state"] == "unassigned"
+    entry(c, rid, kind="round_end", client_token="r1-end-x1-ready", athlete_id="x1", round=1)
+    st["now"] += timedelta(seconds=40)   # nothing arrives
+    entry(c, rid, kind="wearer", client_token="wear-x2-ready", athlete_id="x2", participant_code="P2", device_id="strap-A", baseline_id=base["x2"], hr_max_bpm=195, hr_max_origin="FICTIONAL")
+    assert rd("x2")["state"] == "no_stream" and "before starting" in rd("x2")["next"]
+    lines = []
+    cli = lambda *a: pilot_session.main(["--engine", "http://testserver", "--recording", rid, *a], out=lines.append, client=c)  # noqa: E731
+    assert cli("ready", "x2") == 1 and any(x.startswith("  NEXT: no stream is arriving") for x in lines)
+    # early start: refused, nothing stored
+    lines.clear()
+    assert cli("round-start", "x2", "--round", "1") == 2 and "Refused: the round was NOT started." in lines and any("--partial" in x for x in lines)
+    assert not [e for e in c.get(f"{API}/recordings/{rid}/study").json()["entries"] if e["kind"] == "round_start" and e["athlete_id"] == "x2"]
+    # a deliberate partial start: stored with its reason; the camera reference stays closed and is never moved to it
+    lines.clear()
+    assert cli("round-start", "x2", "--round", "1", "--partial", "FICTIONAL: strap being refitted, recording anyway") == 0
+    assert any("not opened by this start (partial: FICTIONAL: strap being refitted" in x for x in lines)
+    sim.run(st["now"] + timedelta(seconds=150), "x2", "strap-A")
+    r = rd("x2")
+    assert r["state"] == "warming_up" and "camera reference is not open" in r["next"] and r["estimates_available"]["camera_only"] is False
+    sv = entry(c, rid, kind="score_save", client_token="r1-save-x2-partial", athlete_id="x2", round=1)
+    cam = sv["prediction"]["result"]["candidates"]["camera_only"]
+    assert cam["available"] is False and "opened the camera reference" in str(sv["prediction"]["result"]) and sv["prediction"]["result"]["candidates"]["vest_only"]["available"]
+    entry(c, rid, kind="sprint_start", client_token="r1-sprint-x2-partial", athlete_id="x2", round=1, confirms_prediction_id=sv["id"])
+    sim.run(st["now"] + timedelta(seconds=4), "x2", "strap-A", v=lambda s: 7.5)
+    entry(c, rid, kind="sprint_end", client_token="r1-sprint-end-x2-partial", athlete_id="x2", round=1)
+    entry(c, rid, kind="round_end", client_token="r1-end-x2-partial", athlete_id="x2", round=1)
+    # streams usable again (sprint readings arrive fine even though the score leaves them out): the next start opens the reference
+    r = rd("x2")
+    assert r["state"] == "ready_to_start" and r["next_round"] == 2 and r["start_opens_camera_reference"] is True
+    assert r["reference_overlaps_test_exclusion_s"] > 80 and "gives a fuller reference" in r["next"]
+    sim.run(st["now"] + timedelta(seconds=r["reference_overlaps_test_exclusion_s"] + 1), "x2", "strap-A")
+    assert "reference_overlaps_test_exclusion_s" not in rd("x2")
+    r2 = entry(c, rid, kind="round_start", client_token="r2-start-x2", athlete_id="x2", round=2)
+    assert r2["opens_camera_reference"] is True and r2["partial_reason"] is None
+    # dropout during warm-up: the camera keeps arriving, the strap stops
+    t_drop = st["now"]
+    while st["now"] < t_drop + timedelta(seconds=15):
+        st["now"] += timedelta(seconds=0.2)
+        c.post(f"{API}/samples/tracking", json=tr_body("x2", st["now"], 3.0))
+    r = rd("x2")
+    assert r["state"] == "stale_or_unassigned" and not r["streams"]["wearable"]["usable"] and r["streams"]["camera"]["usable"]
+    assert "stale" in r["streams"]["wearable"]["detail"] and "Round 2 is open" in r["next"]
+    # camera identity loss: only predicted, low-confidence positions for 15 s
+    t_loss = st["now"]
+    while st["now"] < t_loss + timedelta(seconds=15):
+        st["now"] += timedelta(seconds=0.2)
+        if round((st["now"] - t_loss).total_seconds() * 5) % 5 == 0:
+            c.post(f"{API}/samples/physiological", json=hr_body("x2", st["now"], 140, "strap-A"))
+        c.post(f"{API}/samples/tracking", json={**tr_body("x2", st["now"], 3.0), "tracking_confidence": 0.2, "value_basis": "predicted"})
+    r = rd("x2")
+    assert r["state"] == "stale_or_unassigned" and r["streams"]["wearable"]["usable"] and "identity not confirmed" in r["streams"]["camera"]["detail"]
+    # recovery: both streams back; the windows finish building from the round-2 start, then ready_to_save
+    sim.run(st["now"] + timedelta(seconds=20), "x2", "strap-A")
+    assert rd("x2")["state"] == "warming_up"
+    sim.run(r2["at"] and datetime.fromisoformat(r2["at"].replace("Z", "+00:00")) + timedelta(seconds=250), "x2", "strap-A")
+    r = rd("x2")
+    assert r["state"] == "ready_to_save" and all(r["estimates_available"].values()), r.get("unavailable_reasons")
+    sv2 = entry(c, rid, kind="score_save", client_token="r2-save-x2", athlete_id="x2", round=2)
+    assert sv2["prediction"]["all_three_available"]
+    entry(c, rid, kind="sprint_start", client_token="r2-sprint-x2", athlete_id="x2", round=2, confirms_prediction_id=sv2["id"])
+    view = c.get(f"{API}/recordings/{rid}/study/pilot").json()
+    assert view["readiness"]["open_round"] == 2
+    st["now"] += timedelta(seconds=5)
+    c.post(f"{API}/recordings/{rid}/stop")
+    rows = {(r["participant"], r["round"]): r for r in rows_from_package(read_package(c.get(f"{API}/recordings/{rid}/package.zip").content))}
+    assert rows[("P2", 1)]["started_without_usable_data"] == "FICTIONAL: strap being refitted, recording anyway" and rows[("P2", 1)]["opens_camera_reference"] is False
+    assert rows[("P2", 2)]["started_without_usable_data"] is None and rows[("P2", 2)]["opens_camera_reference"] is True

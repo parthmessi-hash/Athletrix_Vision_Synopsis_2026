@@ -7,7 +7,11 @@ KINDS (operator entries unless noted)
                  the participant's OWN baseline and the maximum heart rate the profile may use, with its origin. The next
                  wearer entry (or an `end` wearer entry) closes it. Readings outside a participant's own assignment, or
                  from another device, are never used for that participant.
-  round_start / round_end    drill round boundaries (any number of rounds); round_end with invalid=true (and the
+  round_start / round_end    drill round boundaries (any number of rounds). A round_start is refused while the wearer's
+                 streams are not usable (no stream, stale, wrong device, outside the assignment, low confidence) unless
+                 partial_reason states why it starts anyway. The first round started with both streams usable OPENS the
+                 camera reference (recorded on the entry); a partial start never does, and the reference is never moved.
+                 round_end with invalid=true (and the
                  reason in notes) leaves the round out of the evaluation
   sprint_start / sprint_end  a planned timed test sprint of a round. Marking sprint_start makes the engine save a
                  PREDICTION (kind "prediction", written by the engine only) with the scores as available at that cutoff, in
@@ -94,6 +98,7 @@ class StudyEntryCreate(AthletrixModel):
     recorded_by: str | None = Field(None, min_length=1, max_length=80)
     notes: str | None = Field(None, max_length=500)
     confirms_prediction_id: str | None = Field(None, min_length=1, max_length=64, description="sprint_start: the saved score (score_save) this start confirms.")
+    partial_reason: str | None = Field(None, min_length=1, max_length=300, description="round_start: start deliberately although the streams are not usable now (the reason goes into the report).")
     start_reference: StartReference | None = Field(None, description="sprint_start or sprint_result: an independently recorded start.")
     precision_s: float | None = Field(None, gt=0, lt=5, description="sprint_result: the stated precision of the timing method.")
     timing_uncertainty_s: float | None = Field(None, ge=0, lt=5, description="sprint_result: uncertainty of this time (e.g. from video timestamps).")
@@ -128,6 +133,8 @@ class StudyEntryCreate(AthletrixModel):
         if k == "sprint_result" and self.start_pts_s is not None and self.finish_pts_s is not None and self.time_s is not None \
                 and abs((self.finish_pts_s - self.start_pts_s) - self.time_s) > 0.002:
             raise ValueError("time_s must equal finish_pts_s - start_pts_s")
+        if self.partial_reason and k != "round_start":
+            raise ValueError("partial_reason belongs to a round_start")
         if self.confirms_prediction_id and k != "sprint_start":
             raise ValueError("only a sprint_start confirms a saved score")
         if k == "score_save" and self.at is not None:
@@ -149,5 +156,8 @@ class StudyEntry(StudyEntryCreate):
     created_at: AwareDatetime
     profile: dict | None = Field(None, description="session: the frozen fatigue profile {text, sha256, version, fictional}; null = none configured.")
     prediction: dict | None = Field(None, description="prediction: the saved scores and evidence at the cutoff (engine-written).")
+    opens_camera_reference: bool | None = Field(None, description="round_start (engine-set): true when this round started with both streams usable and no earlier "
+                                                                  "round of this athlete had opened the camera reference; false otherwise; null on older recordings.")
+    readiness_at_start: dict | None = Field(None, description="round_start (engine-set): the readiness the engine saw when the round started.")
     origin: Literal["this_engine", "source_engine"] = "this_engine"
     source_entry_id: str | None = None

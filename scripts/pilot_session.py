@@ -8,7 +8,11 @@ USAGE (default engine http://127.0.0.1:8000, default recording: the active one; 
                      [--camera-alignment operator_estimate:0.04] [--calibration-sha256 HEX] [--planned-rounds N]
     pilot_session.py wearer ATHLETE --code P1 --device VEST_ID --baseline BASELINE_ID --hr-max 200 --hr-max-origin "measured test 2026-11-01"
     pilot_session.py wearer ATHLETE --end
-    pilot_session.py round-start ATHLETE --round N
+    pilot_session.py ready ATHLETE                       # what the streams allow now, and the next action
+    pilot_session.py round-start ATHLETE --round N [--partial "reason"]
+                                                         # refused while the streams are not usable; --partial starts it
+                                                         # anyway, records the reason for the report, and never opens the
+                                                         # camera reference
     pilot_session.py save-score ATHLETE --round N       # 1. saves the score now and prints its confirmation id
     pilot_session.py sprint-start ATHLETE --round N --confirm PREDICTION_ID [--gate-time ISO --gate-offset-s S --gate-uncertainty-s U]
                                                          # 2. only after the confirmation: start the timed sprint
@@ -18,7 +22,8 @@ USAGE (default engine http://127.0.0.1:8000, default recording: the active one; 
     pilot_session.py result ATHLETE --round N (--time 3.21 --method timing_gates | --missing equipment_failure) [--correct ENTRY_ID --why "reason"]
     pilot_session.py rating ATHLETE --round N (--value 6 | --missing not_collected) [--notes "..."]
     pilot_session.py rounds                              # the saved rounds: prediction, timing label, result
-Exit codes: 0 stored (or already stored), 2 refused (the reason is printed), 3 engine unreachable.
+Exit codes: 0 stored (or already stored; for ready: ready to start or save), 1 ready: not ready yet, 2 refused (the
+reason is printed), 3 engine unreachable.
 """
 
 from __future__ import annotations
@@ -36,6 +41,16 @@ def token(args, kind: str) -> str:
     return f"cli-{kind}-" + hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:24]
 
 
+def readiness_lines(d: dict) -> list[str]:
+    L = [f"  state: {d['state'].upper()}" + (f" · round {d['open_round']} open" if d.get("open_round") else "")]
+    for k, v in (d.get("streams") or {}).items():
+        L.append(f"  {k}: {'usable' if v['usable'] else 'NOT usable'} · {v['detail']}")
+    if d.get("estimates_available"):
+        L.append("  estimates now: " + " · ".join(f"{k} {'yes' if v else 'no'}" for k, v in d["estimates_available"].items()))
+    L.append(f"  NEXT: {d['next']}")
+    return L
+
+
 def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", default="http://127.0.0.1:8000")
@@ -49,6 +64,8 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
         p = sub.add_parser(name); p.add_argument("athlete"); p.add_argument("--round", type=int, required=True)
         if name == "round-end":
             p.add_argument("--invalid")
+        if name == "round-start":
+            p.add_argument("--partial", metavar="REASON")
         if name == "sprint-start":
             p.add_argument("--confirm"); p.add_argument("--gate-time"); p.add_argument("--gate-offset-s", type=float); p.add_argument("--gate-uncertainty-s", type=float)
     p = sub.add_parser("result"); p.add_argument("athlete"); p.add_argument("--round", type=int, required=True); p.add_argument("--time", type=float)
@@ -57,6 +74,7 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
     p = sub.add_parser("rating"); p.add_argument("athlete"); p.add_argument("--round", type=int, required=True); p.add_argument("--value", type=float)
     p.add_argument("--missing"); p.add_argument("--notes")
     sub.add_parser("rounds")
+    p = sub.add_parser("ready"); p.add_argument("athlete")
     args = ap.parse_args(argv)
     e = args.engine.rstrip("/") + "/api/v1"
     own = client is None
@@ -66,6 +84,14 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
         if not rid:
             out("No active recording: start one (scripts/sideline_session.py start PLAN.json) or pass --recording.")
             return 2
+        if args.cmd == "ready":
+            r = c.get(f"{e}/recordings/{rid}/study/readiness", params={"athlete_id": args.athlete})
+            if r.status_code != 200:
+                out(f"Refused (HTTP {r.status_code}): {r.text[:200]}")
+                return 2
+            for line in readiness_lines(r.json()):
+                out(line)
+            return 0 if r.json()["state"] in ("ready_to_start", "ready_to_save") else 1
         if args.cmd == "rounds":
             d = c.get(f"{e}/recordings/{rid}/study").json()
             out(f"Recording {rid} · session {(d['session'] or {}).get('session_label', 'none')} · wearers: " +
@@ -98,6 +124,8 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
                 body.update(confirms_prediction_id=args.confirm)
             if args.cmd == "sprint-start" and args.gate_time:
                 body.update(start_reference={"source": "timing_gate", "device_time": args.gate_time, "clock_offset_s": args.gate_offset_s, "clock_uncertainty_s": args.gate_uncertainty_s})
+            if args.cmd == "round-start" and args.partial:
+                body.update(partial_reason=args.partial)
             if args.cmd == "round-end" and args.invalid:
                 body.update(invalid=True, notes=args.invalid)
             if args.cmd == "result":
@@ -107,11 +135,20 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
             if args.cmd == "rating":
                 body.update(value=args.value, missing_reason=args.missing, notes=args.notes)
         r = c.post(f"{e}/recordings/{rid}/study", json={k2: v for k2, v in body.items() if v is not None})
+        if r.status_code == 409 and isinstance((r.json() or {}).get("detail"), dict) and "readiness" in r.json()["detail"]:
+            out("Refused: the round was NOT started.")
+            for line in readiness_lines(r.json()["detail"]["readiness"]):
+                out(line)
+            out(f'  To start anyway, re-run with --partial "reason" (the reason goes into the report; the camera reference is not opened).')
+            return 2
         if r.status_code not in (200, 201):
             out(f"Refused (HTTP {r.status_code}): {r.json().get('detail') if r.headers.get('content-type', '').startswith('application/json') else r.text[:200]}")
             return 2
         x = r.json()
         out(("Already stored: " if r.status_code == 200 else "Stored: ") + f"{x['kind']} {x['id']} at {x['at']}")
+        if args.cmd == "round-start":
+            out("  camera reference: " + {True: "OPENED by this round start", False: "not opened by this start" + (f" (partial: {x.get('partial_reason')})" if x.get("partial_reason") else ""),
+                                          None: "not recorded"}[x.get("opens_camera_reference")])
         if args.cmd == "save-score":
             p = x["prediction"]
             cands = (p.get("result") or {}).get("candidates") or {}
