@@ -541,3 +541,65 @@ def test_sprint_exclusion_keeps_streams_usable_but_out_of_the_score_and_a_lost_s
     rows = {r["round"]: r for r in rows_from_package(read_package(c.get(f"{API}/recordings/{rid}/package.zip").content)) if r["participant"] == "P1"}
     assert rows[2]["invalid"] and rows[2]["invalid_reason"] == "FICTIONAL: strap lost mid-round" and rows[2]["prediction_id"] == saved["id"]
     assert rows[2]["scores"]["vest_only"] is None and "wearable" in rows[2]["reasons"]["vest_only"][0]
+
+
+def test_fast_pilot_view_equals_the_full_calculation(pilot):
+    """The pilot view's speedups (one read per request, display-only trend inputs, binary searches) change no result:
+    every trend point equals GET /study/score at that time (full inputs, as entered); the current estimate equals it at
+    the poll time, input fingerprints included; readiness equals GET /study/readiness. Covered: test-sprint exclusions,
+    a reading for before a cutoff received after it, a corrected result, a wearer change, a camera identity gap, a
+    browser refresh (repeat poll), and time passing without new data (freshness must change)."""
+    import random as _r  # noqa: PLC0415
+
+    from app.core import fatigue  # noqa: PLC0415
+    c, sim, rid, m0, st, base = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"], pilot["base"]
+    # helpers: binary searches give the same answers as the plain scans
+    rng = _r.Random(7)
+    for _ in range(300):
+        iv = [(m0 + timedelta(seconds=a), m0 + timedelta(seconds=a + rng.choice([0, 1, 3, 7])), "x") for a in (rng.randint(0, 60) for _ in range(rng.randint(0, 6)))]
+        sts, ens = fatigue._merged(iv)
+        for k in range(0, 70):
+            t = m0 + timedelta(seconds=k * 0.5 + rng.choice([0, 0.25]))
+            assert fatigue._inside(t, sts, ens) == any(a <= t <= b for a, b, _ in iv)
+
+    def check(t_label):
+        v = c.get(f"{API}/recordings/{rid}/study/pilot", params={"trend_span_s": 300, "trend_step_s": 15}).json()
+        aid = v["wearer"]["athlete_id"]
+        full = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": aid, "at": v["at"]}).json()
+        assert v["estimate"] == full, t_label
+        assert v["estimate"]["inputs"]["wearable_sha256"] and v["estimate"]["inputs"]["camera_sha256"]
+        for pt in v["trend"]:
+            ref = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": aid, "at": pt["at"]}).json()
+            assert {k: pt[k] for k in ref["candidates"]} == {k: x["value"] for k, x in ref["candidates"].items()}, (t_label, pt["at"])
+        rd = c.get(f"{API}/recordings/{rid}/study/readiness", params={"athlete_id": aid}).json()
+        assert v["readiness"] == {k: x for k, x in rd.items() if k not in ("recording_id", "athlete_id", "at")}, t_label
+        again = c.get(f"{API}/recordings/{rid}/study/pilot", params={"trend_span_s": 300, "trend_step_s": 15}).json()
+        assert {k: x for k, x in again.items() if k != "captured_at"} == {k: x for k, x in v.items() if k != "captured_at"}, "a refresh gives the same view"
+        return v
+    sim.run(m0 + timedelta(seconds=280), "x1", "strap-A", hr=lambda s: 130 + 0.05 * s, t0=m0)
+    check("before any sprint")
+    entry(c, rid, kind="sprint_start", client_token="fastview-s1", athlete_id="x1", round=1)
+    sim.run(st["now"] + timedelta(seconds=5), "x1", "strap-A", hr=lambda s: 190, v=lambda s: 7.5, t0=m0)
+    entry(c, rid, kind="sprint_end", client_token="fastview-e1", athlete_id="x1", round=1)
+    r1 = entry(c, rid, kind="sprint_result", client_token="fastview-r1", athlete_id="x1", round=1, time_s=3.3, method="timing_gates")
+    entry(c, rid, kind="sprint_result", client_token="fastview-r1b", athlete_id="x1", round=1, time_s=3.25, method="timing_gates", supersedes=r1["id"], correction_reason="FICTIONAL")
+    sim.run(st["now"] + timedelta(seconds=60), "x1", "strap-A", t0=m0)
+    c.post(f"{API}/samples/physiological", json=hr_body("x1", st["now"] - timedelta(seconds=40), 199, "strap-A"))   # late arrival
+    # camera identity gap: 12 s of predicted, low-confidence positions
+    t_gap = st["now"]
+    while st["now"] < t_gap + timedelta(seconds=12):
+        st["now"] += timedelta(seconds=0.2)
+        if round((st["now"] - t_gap).total_seconds() * 5) % 5 == 0:
+            c.post(f"{API}/samples/physiological", json=hr_body("x1", st["now"], 150, "strap-A"))
+        c.post(f"{API}/samples/tracking", json={**tr_body("x1", st["now"], 3.0), "tracking_confidence": 0.2, "value_basis": "predicted"})
+    v1 = check("after a sprint, a correction, a late arrival and an identity gap")
+    # time passes with no new data: the same request must show the streams getting older
+    st["now"] += timedelta(seconds=20)
+    v2 = check("20 s later, no new data")
+    assert v2["estimate"]["streams"]["wearable"]["age_s"] > v1["estimate"]["streams"]["wearable"]["age_s"] + 19 and not v2["estimate"]["streams"]["wearable"]["fresh"]
+    # wearer change
+    entry(c, rid, kind="wearer", client_token="fastview-w2", athlete_id="x2", participant_code="P2", device_id="strap-A", baseline_id=base["x2"], hr_max_bpm=195, hr_max_origin="FICTIONAL")
+    sim.run(st["now"] + timedelta(seconds=40), "x2", "strap-A")
+    entry(c, rid, kind="round_start", client_token="fastview-x2-r1", athlete_id="x2", round=1)
+    sim.run(st["now"] + timedelta(seconds=200), "x2", "strap-A")
+    assert check("after a wearer change")["wearer"]["athlete_id"] == "x2"

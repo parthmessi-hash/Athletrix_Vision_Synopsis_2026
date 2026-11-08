@@ -43,6 +43,8 @@ turned into a one-source score.
 
 from __future__ import annotations
 
+import bisect
+import functools
 import hashlib
 import json
 import statistics
@@ -136,8 +138,30 @@ class ScoreInputs:
     reference_note: str | None = None                     # why there is no camera reference, when the study log says so
 
 
+@functools.lru_cache(maxsize=262144)
+def _parse_utc(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
 def _received(r) -> datetime | None:
-    return datetime.fromisoformat(r["received_at"].replace("Z", "+00:00")) if r and r.get("received_at") else None
+    return _parse_utc(r["received_at"]) if r and r.get("received_at") else None
+
+
+def _merged(intervals) -> tuple[list, list]:
+    """Closed intervals [a, b] merged into disjoint ones (starts, ends): membership in the union is unchanged."""
+    out: list[list] = []
+    for a, b in sorted((a, b) for a, b, *_ in intervals):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [x[0] for x in out], [x[1] for x in out]
+
+
+def _inside(t, starts: list, ends: list) -> bool:
+    """Same answer as any(a <= t <= b for the original intervals)."""
+    i = bisect.bisect_right(starts, t)
+    return i > 0 and t <= ends[i - 1]
 
 
 def _clip(x: float) -> float:
@@ -149,6 +173,7 @@ def select(inp: ScoreInputs, prof: dict) -> dict:
     excl = {"after_cutoff": 0, "received_after_cutoff": 0, "test_effort": 0, "outside_own_wearer_assignment": 0, "other_device": 0,
             "low_confidence_or_predicted": 0}
     no_receipt = 0
+    ex_starts, ex_ends = _merged(inp.exclusions)
 
     def visible(s, r):
         if s.timestamp > inp.cutoff:
@@ -158,7 +183,7 @@ def select(inp: ScoreInputs, prof: dict) -> dict:
         if inp.knowledge == "as_entered" and rec is not None and rec > inp.cutoff:
             excl["received_after_cutoff"] += 1
             return False
-        if any(a <= s.timestamp <= b for a, b, _ in inp.exclusions):
+        if _inside(s.timestamp, ex_starts, ex_ends):
             excl["test_effort"] += 1
             return False
         return True
@@ -195,7 +220,15 @@ def select(inp: ScoreInputs, prof: dict) -> dict:
 
 
 def _window(samples, t0, t1):
-    return [s for s in samples if t0 < s.timestamp <= t1]
+    """Samples with t0 < timestamp <= t1. `samples` must be sorted by timestamp (every caller passes select()'s sorted
+    lists); the result is the same as filtering the whole list."""
+    lo = bisect.bisect_right(samples, t0, key=_ts)
+    hi = bisect.bisect_right(samples, t1, key=_ts)
+    return samples[lo:hi]
+
+
+def _ts(s):
+    return s.timestamp
 
 
 def _covered(samples, max_gap, value=lambda s: 1.0, breaks=()):
@@ -431,7 +464,9 @@ def digest(samples: list) -> str:
     return h.hexdigest()
 
 
-def score(inp: ScoreInputs, prof: dict, sha: str) -> dict:
+def score(inp: ScoreInputs, prof: dict, sha: str, fingerprints: bool = True) -> dict:
+    """fingerprints=False is for display-only trend points: the input fingerprints are not calculated (null); every
+    saved, reproduced or current score keeps the default."""
     sel = select(inp, prof)
     feats = features(inp, prof, sel)
     fresh = freshness(sel, inp.cutoff, prof)
@@ -464,4 +499,5 @@ def score(inp: ScoreInputs, prof: dict, sha: str) -> dict:
                                          "without_receipt_metadata": sel["without_receipt_metadata"],
                                          "receipt_note": "samples without receipt metadata are assumed available at their own timestamps",
                                          "test_effort_exclusions": [{"start": iso(a), "end": iso(b), "reason": r} for a, b, r in inp.exclusions],
-                                         "wearable_sha256": digest(sel["phys"]), "camera_sha256": digest(sel["track"])}}
+                                         "wearable_sha256": digest(sel["phys"]) if fingerprints else None,
+                                         "camera_sha256": digest(sel["track"]) if fingerprints else None}}

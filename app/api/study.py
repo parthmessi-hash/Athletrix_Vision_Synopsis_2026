@@ -7,6 +7,7 @@ frozen text, never whatever is configured later. Nothing here gives substitution
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 from datetime import datetime, timedelta
 from typing import Literal
@@ -85,7 +86,7 @@ def baseline_snapshot(athlete_id: str, baseline_id: str | None, t: datetime, kno
 
 
 def build_inputs(rec: Recording, entries: list[StudyEntry], prof: dict, athlete_id: str, t: datetime, knowledge: str,
-                 data: tuple[list, list] | None = None, marks_known_by: datetime | None = None) -> ScoreInputs:
+                 data: tuple[list, list] | None = None, marks_known_by: datetime | None = None, pool: tuple[list, list] | None = None) -> ScoreInputs:
     """Test-effort exclusions use every sprint mark known when the score is calculated (marks_known_by; None = all):
     excluding more data can never leak an outcome. Everything else follows the knowledge mode at t."""
     known = current(entries, t if knowledge == "as_entered" else None)
@@ -117,16 +118,44 @@ def build_inputs(rec: Recording, entries: list[StudyEntry], prof: dict, athlete_
         lookback = max(f.get("window_s", 0) for f in prof["features"].values())
         lookback = max(lookback, prof["features"].get("recovery", {}).get("lookback_s", 0))
         t0 = min([t - timedelta(seconds=lookback + 5)] + ([rs[0] - timedelta(seconds=5)] if rs else []))
-        data = (recording_store.range_with_receipts(rec.id, athlete_id, "physiological", t0, t), recording_store.range_with_receipts(rec.id, athlete_id, "tracking", t0, t))
+        if pool is not None and pool[2] <= t0 and pool[3] == t:
+            # rows already read for this request (same athlete, same end): exactly the store's bounds t0 < timestamp <= t
+            data = tuple([x for x in rows if t0 < x[0].timestamp <= t] for rows in pool[:2])
+        else:
+            data = (recording_store.range_with_receipts(rec.id, athlete_id, "physiological", t0, t), recording_store.range_with_receipts(rec.id, athlete_id, "tracking", t0, t))
     return ScoreInputs(athlete_id, t, knowledge, data[0], data[1], mine, excl, rs[0] if rs else None, cam,
                        reference_note=None if rs or not rse else "no round of this athlete has opened the camera reference yet (rounds started without usable data do not open it)")
+
+
+def trend_inputs(inp: ScoreInputs, prof: dict) -> ScoreInputs:
+    """DISPLAY-ONLY trend points: the same inputs, keeping only the samples the score's VALUES can depend on: the camera
+    reference window and the recent lookback (the longest feature window or recovery lookback, and the staleness
+    limit). Selection counts and input fingerprints of such a point describe only this subset, so the trend shows values
+    only; saved, reproduced and current scores always use build_inputs' full range (see scripts/pilot_view_benchmark.py
+    and tests/test_pilot_view_speed.py for the equivalence checks)."""
+    look = max([f.get("window_s", 0) for f in prof["features"].values()] + [prof["features"].get("recovery", {}).get("lookback_s", 0),
+               prof["streams"]["staleness_s"]]) + 5
+    keep = [(inp.cutoff - timedelta(seconds=look), inp.cutoff)]
+    if inp.reference_start is not None:
+        keep.append((inp.reference_start - timedelta(seconds=5), inp.reference_start + timedelta(seconds=prof["reference"]["camera_reference_s"] + 5)))
+
+    keep.sort()
+
+    def trim(rows):
+        rows = sorted(rows, key=lambda x: x[0].timestamp)   # already in time order from the store; sorting is a no-op then
+        ts = [x[0].timestamp for x in rows]
+        idx: set[int] = set()
+        for a, b in keep:
+            idx.update(range(bisect.bisect_left(ts, a), bisect.bisect_right(ts, b)))
+        return [rows[i] for i in sorted(idx)]
+    return dataclasses.replace(inp, phys=trim(inp.phys), track=trim(inp.track))
 
 
 READY_LOOKBACK_S = 30.0
 NAMES = {"vest_only": "vest only", "camera_only": "camera only", "combined": "combined"}
 
 
-def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: datetime) -> dict:
+def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: datetime, inp: ScoreInputs | None = None, sc: dict | None = None) -> dict:
     """What the wearer's data allows right now, and the operator's next action (see the module docstring of
     app/models/study.py). States, in order of checking:
       no_profile / unassigned     no study session, or the athlete is not the active wearer
@@ -147,7 +176,8 @@ def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: dat
         return {"state": "unassigned", "next": f"assign the vest to {athlete_id} (pilot_session.py wearer ...)",
                 "active_wearer": live[0]["entry"].athlete_id if live else None}
     from app.core.fatigue import freshness, select  # noqa: PLC0415
-    inp = build_inputs(rec, entries, p, athlete_id, t, "as_entered")
+    if inp is None or inp.cutoff != t or inp.athlete_id != athlete_id or inp.knowledge != "as_entered":
+        inp, sc = build_inputs(rec, entries, p, athlete_id, t, "as_entered"), None
     t0 = t - timedelta(seconds=READY_LOOKBACK_S)
     raw_p = [s for s, _ in inp.phys if t0 < s.timestamp <= t]
     raw_t = [s for s, _ in inp.track if t0 < s.timestamp <= t]
@@ -209,7 +239,7 @@ def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: dat
                     (f"; the last {overlap:.0f} s of the sprint exclusion would fall inside it, so waiting {overlap:.0f} s gives a fuller reference)"
                      if overlap > 0 else ")") if will_open else "")}
     opened = any(e.opens_camera_reference for e in rse) or (rse and all(e.opens_camera_reference is None for e in rse))
-    sc = score(inp, p, sha)
+    sc = sc if sc is not None else score(inp, p, sha)
     avail = {c: v["available"] for c, v in sc["candidates"].items()}
     if not opened:
         return {"state": "warming_up", "streams": streams, "estimates_available": avail, **extra,
@@ -433,21 +463,33 @@ def pilot_view(recording_id: str, at: str | None = None, trend_step_s: int = Que
         if not live:
             return {**base, "wearer": None, "estimate": None, "trend": [], "reason": "no active wearer at this time"}
         w = live[0]["entry"]
-        now = _score_at(rec, entries, w.athlete_id, t, "as_entered")
-        trend = []
-        if trend_span_s and frozen_profile(entries):
-            p = frozen_profile(entries)[0]
-            first = max(live[0]["start"], t - timedelta(seconds=trend_span_s))
+        fz = frozen_profile(entries)
+        pool, cur_inp = None, None
+        if fz is not None:
+            # one read of this athlete's rows per request, shared by the current estimate (cut to exactly its own
+            # range inside build_inputs), the trend points and readiness
+            p, sha, _ = fz
+            first = max(live[0]["start"], t - timedelta(seconds=trend_span_s)) if trend_span_s else t
             lookback = max(max(f.get("window_s", 0) for f in p["features"].values()), p["features"].get("recovery", {}).get("lookback_s", 0))
             rs = [e.at for e in known if e.kind == "round_start" and e.athlete_id == w.athlete_id]
-            t0 = min([first - timedelta(seconds=lookback + 5)] + ([min(rs) - timedelta(seconds=5)] if rs else []))
-            data = (recording_store.range_with_receipts(rec.id, w.athlete_id, "physiological", t0, t), recording_store.range_with_receipts(rec.id, w.athlete_id, "tracking", t0, t))
+            t0 = min([min(first, t) - timedelta(seconds=lookback + 5)] + ([min(rs) - timedelta(seconds=5)] if rs else []))
+            pool = (recording_store.range_with_receipts(rec.id, w.athlete_id, "physiological", t0, t),
+                    recording_store.range_with_receipts(rec.id, w.athlete_id, "tracking", t0, t), t0, t)
+            cur_inp = build_inputs(rec, entries, p, w.athlete_id, t, "as_entered", pool=pool)
+            now = score(cur_inp, p, sha)
+        else:
+            now = _score_at(rec, entries, w.athlete_id, t, "as_entered")
+        trend = []
+        if trend_span_s and fz is not None:
+            first = max(live[0]["start"], t - timedelta(seconds=trend_span_s))
+            data = pool[:2]
             k = 0
             while True:
                 tp = t - timedelta(seconds=k * trend_step_s)
                 if tp < first:
                     break
-                r = score(build_inputs(rec, entries, p, w.athlete_id, tp, "as_entered", data), p, frozen_profile(entries)[1])
+                tin = build_inputs(rec, entries, p, w.athlete_id, tp, "as_entered", data)
+                r = score(trend_inputs(tin, p), p, sha, fingerprints=False)
                 trend.append({"at": iso(tp), **{c: r["candidates"][c]["value"] for c in r["candidates"]}})
                 k += 1
             trend.reverse()
@@ -460,7 +502,7 @@ def pilot_view(recording_id: str, at: str | None = None, trend_step_s: int = Que
                                            "timing_label": lastp.prediction.get("timing_label"),
                                            "values": {c: v["value"] for c, v in ((lastp.prediction.get("result") or {}).get("candidates") or {}).items()}}
         return {**base, "wearer": {"athlete_id": w.athlete_id, "participant_code": w.participant_code, "device_id": w.device_id, "since": iso(live[0]["start"])},
-                "last_saved_prediction": last, "readiness": readiness(rec, entries, w.athlete_id, t) if at is None and rec.stopped_at is None else None,
+                "last_saved_prediction": last, "readiness": readiness(rec, entries, w.athlete_id, t, cur_inp, now if cur_inp is not None else None) if at is None and rec.stopped_at is None else None,
                 "estimate": now, "trend": trend, "newest_sample": newest,
                 "newest_receipt": max((r["received_at"] for r in recs), default=None)}
 
