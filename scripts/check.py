@@ -14,6 +14,7 @@ OPTIONAL (--all; skipped with the reason when a dependency is missing)
     camera pipeline         scripts/verify_camera_pipeline.py (needs OpenCV; starts its own isolated engine)
     operational workflow    scripts/verify_operational_workflow.py (starts isolated engines on free loopback ports)
     session workflow        scripts/verify_session_workflow.py (session plan, preflight, start/resume/stop, startup failure)
+    fatigue pilot           scripts/pilot_rehearsal.py --mode accelerated (fictional; in-process, simulated clock)
 The frontend checks are browser pages in the Athletrix_Web repository (tests/timeline_confidence.test.html and
 tests/video_review.test.html); this script cannot run them without a browser and says so.
 Exit code 0 when every check that ran passed; skipped checks never count as passed.
@@ -58,6 +59,7 @@ def main(argv=None, out=print) -> int:
             ("optional", "camera pipeline through an isolated engine", args.all and vision, None if vision else "OpenCV not installed"),
             ("optional", "operational workflow (isolated engines)", args.all, None),
             ("optional", "session workflow (isolated engines)", args.all, None),
+            ("optional", "fatigue pilot rehearsal (accelerated, fictional)", args.all, None),
             ("frontend", "browser test pages (Athletrix_Web)", False, "needs a browser: open tests/timeline_confidence.test.html and tests/video_review.test.html from a loopback server")]
     if args.list:
         for kind, name, _, why in plan:
@@ -80,6 +82,9 @@ def main(argv=None, out=print) -> int:
             results.append((name, run([PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_person_video.py", "-k", "real"], out)))
         elif name.startswith("camera pipeline"):
             results.append((name, run([PY, "scripts/verify_camera_pipeline.py"], out)))
+        elif name.startswith("fatigue pilot"):
+            with tempfile.TemporaryDirectory() as tmp:
+                results.append((name, run([PY, "scripts/pilot_rehearsal.py", "--mode", "accelerated", "--out", str(Path(tmp) / "pilot")], out)))
         elif name.startswith("operational"):
             results.append((name, run([PY, "scripts/verify_operational_workflow.py"], out)))
         else:

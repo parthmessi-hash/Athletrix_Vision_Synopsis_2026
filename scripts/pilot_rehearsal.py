@@ -1,10 +1,11 @@
 """An isolated FICTIONAL rehearsal of the science-fair fatigue pilot, end to end.
 
-baseline rest recording -> study session with a frozen profile -> one vest, participants in turn (each with their OWN
-baseline) -> drill rounds with 1 Hz heart rate and 10 Hz camera speed -> a pre-sprint score saved at every timed sprint
+baseline rest recording -> study session with a frozen profile -> one vest, three participants in turn (each with their
+OWN baseline) -> an engine restart after the first participant -> a round marked invalid -> drill rounds with 1 Hz heart rate and 10 Hz camera speed -> a pre-sprint score saved at every timed sprint
 -> independent sprint times entered afterwards -> a wearer change -> a dropout before one sprint and recovery -> camera-only
 observations of two other players (never combined scores) -> stop -> export (package format 8) -> import into a second
-isolated database -> reproduce every saved prediction -> the paired report (scripts/evaluate.py pilot).
+isolated database -> reproduce every saved prediction -> local removal of one participant on a copy (the exported package
+keeps them) -> the paired report (scripts/evaluate.py pilot).
 
 MODES (never confused in the output)
   --mode accelerated  in-process engine with a simulated clock: minutes of scenario in seconds of wall time. A software
@@ -113,7 +114,7 @@ class Scenario:
         return round(base * (1 + 0.06 * f + self.outcome.gauss(0, 0.008)), 3)
 
 
-def run(args, api: Api, now, sleep, out) -> dict:
+def run(args, api: Api, now, sleep, out, restart=None) -> dict:
     sc = Scenario()
     prof_text = Path(args.profile).read_text()
     log = {"rounds": [], "events": []}
@@ -203,7 +204,10 @@ def run(args, api: Api, now, sleep, out) -> dict:
                     api.call("tracking", "POST", "/samples/tracking", json={"athlete_id": aid, "timestamp": z(t), "x_position": 0.0, "y_position": 0.0, "speed_mps": round(sc.speed(f, 0, True), 2),
                                                                           "acceleration_mps2": 0.0, "tracking_confidence": 0.9, "source": "camera", "segment_id": f"seg-{aid}", "value_basis": "estimated"})
                 entry(kind="sprint_end", athlete_id=aid, round=rnd)
-                entry(kind="round_end", athlete_id=aid, round=rnd)
+                if (code, rnd) == ("P1", 3):
+                    entry(kind="round_end", athlete_id=aid, round=rnd, invalid=True, notes="FICTIONAL: false start, the sprint is not valid")
+                else:
+                    entry(kind="round_end", athlete_id=aid, round=rnd)
                 log["rounds"].append({"participant": code, "athlete_id": aid, "round": rnd, "hidden_fatigue": round(f, 3), "sprint_start_id": (mark or {}).get("id"),
                                       "prediction_save_ms": round(pred_ms, 1), "dropout_before_sprint": drop, "base_time": base_time})
                 rounds_total += 1
@@ -221,6 +225,12 @@ def run(args, api: Api, now, sleep, out) -> dict:
                 else:
                     entry(kind="self_rating", athlete_id=aid, round=r["round"], value=round(min(10, 3 + 5 * r["hidden_fatigue"] + sc.outcome.gauss(0, 0.5)), 1), scale="FICTIONAL 0-10")
             sleep(args.rest_s)
+            if restart is not None and code == "P1" and cycle == 0:
+                t_r = time.perf_counter()
+                restart()
+                log["events"].append(f"{z(now())} engine restarted")
+                log["restart"] = {"after": "P1's rounds", "seconds": round(time.perf_counter() - t_r, 2),
+                                  "recording_still_active": (api.call("setup", "GET", "/recordings/active") or {}).get("recording", {}).get("id") == rid}
         cycle += 1
         if not deadline or now() >= deadline:
             break
@@ -259,6 +269,21 @@ def finish(args, api: Api, log: dict, out) -> dict:
         f"print(json.dumps([c.get('/api/v1/recordings/{new}/study/predictions/'+e['id']+'/reproduce').json()['status'] for e in es if e['kind']=='prediction']))")],
         cwd=ROOT, capture_output=True, text=True, env={**os.environ, "FATIGUE_PROFILE_PATH": ""})
     statuses = json.loads(rep.stdout.strip().splitlines()[-1]) if rep.returncode == 0 else [f"error: {rep.stderr[-300:]}"]
+    import shutil  # noqa: PLC0415
+    import sqlite3  # noqa: PLC0415
+    copy = db_path.parent / "removal.db"
+    shutil.copy(db_path, copy)
+    spec_ld = __import__("importlib.util").util.spec_from_file_location("local_data_pilot", ROOT / "scripts" / "local_data.py")
+    ld = __import__("importlib.util").util.module_from_spec(spec_ld); spec_ld.loader.exec_module(ld)
+    rl = []
+    rcode = ld.main(["remove-athlete", PARTICIPANTS[0][1], "--database", str(copy), "--execute", "--confirm", PARTICIPANTS[0][1]], out=rl.append)
+    con = sqlite3.connect(copy)
+    left = con.execute("SELECT COUNT(*) FROM recording_study WHERE athlete_id = ?", (PARTICIPANTS[0][1],)).fetchone()[0]
+    others = con.execute("SELECT COUNT(*) FROM recording_study WHERE athlete_id != ? OR athlete_id IS NULL", (PARTICIPANTS[0][1],)).fetchone()[0]
+    con.close()
+    removal = {"athlete": PARTICIPANTS[0][0], "exit": rcode, "study_entries_left_for_them": left, "other_study_entries_kept": others,
+               "exported_package_still_holds_them": sum(1 for e in pkg.study if e.athlete_id == PARTICIPANTS[0][1]),
+               "note": "local removal deletes this engine's copy only; packages already exported (and their copies) are not touched"}
     lines = []
     import importlib.util  # noqa: PLC0415
     spec = importlib.util.spec_from_file_location("evaluate_pilot_reh", ROOT / "scripts" / "evaluate.py")
@@ -266,6 +291,7 @@ def finish(args, api: Api, log: dict, out) -> dict:
     code = ev.main(["pilot", "--packages", str(pkg_path), "--out", str(args.out / "report")], out=lines.append)
     res = json.loads((args.out / "report" / "results.json").read_text()) if code == 0 else {}
     return {"package": {"file": pkg_path.name, "format_version": pkg.manifest["format_version"], "study_entries": len(pkg.study), "predictions": sum(1 for e in pkg.study if e.kind == "prediction")},
+            "removal_on_a_copy": removal,
             "reproduction_on_second_database": {"statuses": statuses, "all_reproduced": bool(statuses) and all(s == "reproduced" for s in statuses)},
             "report": {"exit": code, "matched_rows": res.get("matched_rows"), "coverage": {c: v["usable"] for c, v in res.get("coverage", {}).items()},
                        "pooled_r": {c: res["pooled"][c]["r"] for c in ("vest_only", "camera_only", "combined")} if res else None, "targets": res.get("targets")}}
@@ -276,7 +302,7 @@ def main(argv=None, out=print) -> int:
     ap.add_argument("--mode", choices=["accelerated", "wall"], required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--profile", type=Path, default=PROFILE)
-    ap.add_argument("--rounds", type=int, default=2, help="rounds per participant per turn")
+    ap.add_argument("--rounds", type=int, default=3, help="rounds per participant per turn")
     ap.add_argument("--round-s", type=float, default=70.0)
     ap.add_argument("--sprint-s", type=float, default=4.0)
     ap.add_argument("--rest-s", type=float, default=5.0)
@@ -322,7 +348,15 @@ def main(argv=None, out=print) -> int:
 
             def sleep(s):
                 state["now"] += timedelta(seconds=s)
-            log = run(args, api, lambda: state["now"], sleep, out)
+            box = {"db": db}
+
+            def restart():
+                box["db"].close()
+                box["db"] = Database(tmp / "pilot.db")
+                set_database(box["db"])
+                api.c = TestClient(create_app())
+            log = run(args, api, lambda: state["now"], sleep, out, restart)
+            db = box["db"]
             fin = finish(args, api, log, out)
         finally:
             clock.utc_now, clock.receipt_now = saved
@@ -352,7 +386,10 @@ def main(argv=None, out=print) -> int:
         api = Api(eng.base_url, client)
         args.rest_id = rest_id
         try:
-            log = run(args, api, lambda: datetime.now(UTC), time.sleep, out)
+            def restart():
+                eng.proc.terminate(); eng.proc.wait(timeout=10); eng.proc = None
+                eng.start()
+            log = run(args, api, lambda: datetime.now(UTC), time.sleep, out, restart)
             fin = finish(args, api, log, out)
             summary["engine_memory_mb"] = {"samples": len(rss), "first": round(rss[0], 1) if rss else None, "max": round(max(rss), 1) if rss else None, "last": round(rss[-1], 1) if rss else None}
             summary["engine_alive_at_end"] = eng.proc.poll() is None
@@ -377,7 +414,9 @@ def main(argv=None, out=print) -> int:
                    wall_seconds=round(time.monotonic() - started, 1))
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
     out(json.dumps({k: summary[k] for k in ("mode", "label", "wall_seconds", "failed_requests", "reproduction_on_second_database", "report")}, indent=1, default=str))
-    ok = not api.failed and summary["reproduction_on_second_database"]["all_reproduced"] and fin["report"]["exit"] == 0
+    rem = fin["removal_on_a_copy"]
+    ok = (not {k: v for k, v in api.failed.items() if k != "pilot_view"} and summary["reproduction_on_second_database"]["all_reproduced"] and fin["report"]["exit"] == 0
+          and rem["exit"] == 0 and rem["study_entries_left_for_them"] == 0 and rem["other_study_entries_kept"] > 0)
     out("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
