@@ -86,7 +86,7 @@ def test_responses_travel_in_packages_with_remapped_references_and_go_with_remov
     client.post(url, json={"athlete_id": "p02", "kind": "acknowledged", "client_token": "tok-00020", "saved_review_id": rv["id"], "simulated": True})
     client.post(url, json=lineup("p02", "b01", "tok-00021"))
     pkg = read_package(client.get(f"/api/v1/recordings/{rid}/package.zip").content)
-    assert pkg.manifest["format_version"] == 6 and len(pkg.responses) == 2
+    assert pkg.manifest["format_version"] == 7 and len(pkg.responses) == 2
     dest = Database(tmp_path / "dest.db")
     new_id = import_package(dest, pkg, datetime(2026, 11, 3, tzinfo=UTC)).recording_id
     dest.close()

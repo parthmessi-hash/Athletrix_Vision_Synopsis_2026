@@ -1,8 +1,10 @@
 """End-to-end check of the operational prototype against REAL engine processes on isolated temporary databases.
 
 session setup -> paced FICTIONAL inputs -> live team review (as entered) -> engine killed and restarted mid-session ->
-late annotation and correction -> duplicate client action -> operator response and lineup change -> stop -> saved
-review -> export -> import into a second engine -> reproduce -> profile change -> removal of an athlete.
+the honest state after the outage and the p06 dropout -> a delayed sample -> late annotation and correction -> an
+identity correction -> duplicate client action -> operator response and lineup change -> stop -> saved review -> export
+-> import into a second engine -> reproduce, an altered and a removed sample detected -> profile change -> removal of an
+athlete.
 
 Every engine runs on a free loopback port with its own temporary database; the FICTIONAL live profiles are passed in
 the engine's own environment. Nothing touches development data, and only processes started here are stopped.
@@ -108,6 +110,13 @@ def main(argv=None, out=print) -> int:
               f"(performance available: {p06['performance']['available']}); history {'keep' in p06_hist and 'had keep before the dropout' or 'no keep in lookback'}")
         healthy = [a for a in ("p01", "p03", "p04", "p07") if by[a]["outcome"] in ("keep", "review_later")]
         check("players beside p06 with complete evidence are unaffected by its missing data", len(healthy) == 4, f"{[(a, by[a]['outcome']) for a in ('p01', 'p03', 'p04', 'p07')]}")
+        # honest state right after the outage: ages grew through it; nothing was filled in for the missing seconds
+        t_end = outage["end"] - timedelta(seconds=0.3)   # just before the restarted engine accepted its first sample
+        ev_out = client.get(f"{a.base_url}/api/v1/recordings/{rid}/evidence", params={"knowledge": "as_entered", "at": z(t_end)}).json()
+        ages = [r["evidence"]["sources"]["wearable"].get("age_s") for r in ev_out["athletes"] if r["athlete"]["id"] in ("p01", "p02", "p03")]
+        gap = (t_end - outage["start"]).total_seconds()
+        check("at the end of the outage the wearable readings are as old as the outage (no value invented for the missing seconds)",
+              all(x is not None and x >= gap - 1.1 for x in ages), f"ages {ages} s, {gap:.1f} s after the engine was killed (one reading per second)")
         live = [x["latest_reading"] for x in tr["athletes"] if x["reviewed"] and x["latest_reading"]]
         check("live readings keep observation time and receipt time apart (receipt recorded by this engine)",
               live and all(r["received_at"] and r["availability"] == "received_by_review_time" for r in live), f"{len(live)} readings")
@@ -131,6 +140,33 @@ def main(argv=None, out=print) -> int:
         check("the retrospective view uses the correction once and says it was entered later", fix["id"] in ids(retro) and first["id"] not in ids(retro) and retro["review_time"]["entered_after_review_time"] >= 1,
               retro["review_time"]["label"][:90])
         check("between entry and correction the as-entered view counts the original, not the later correction", first["id"] in ids(mid) and fix["id"] not in ids(mid))
+
+        # a delayed sample: observed 8 s before it is received; the live view of the time before its receipt does not use it
+        t_obs = datetime.now(UTC) - timedelta(seconds=8)
+        late = {"athlete_id": "b02", "timestamp": z(t_obs), "source": "simulated", "device_id": "fictional-handheld-b02", "heart_rate_bpm": 77.0, "signal_quality": 0.9}
+        before_receipt = datetime.now(UTC)
+        time.sleep(0.3)
+        client.post(f"{a.base_url}/api/v1/samples/physiological", json=late)
+        ev_b = lambda t: next(r for r in client.get(f"{a.base_url}/api/v1/recordings/{rid}/evidence", params={"knowledge": "as_entered", "at": z(t)}).json()["athletes"]  # noqa: E731
+                              if r["athlete"]["id"] == "b02")["evidence"]["sources"]["wearable"]
+        then, now_ = ev_b(before_receipt), ev_b(datetime.now(UTC))
+        check("a delayed sample is not used for a time before it arrived, and its delay is visible afterwards",
+              then.get("last_observed_at") != z(t_obs) and now_["last_observed_at"] == z(t_obs).replace("+00:00", "Z") and now_["receipt_delay_s"] >= 7.5,
+              f"before receipt: newest {then.get('last_observed_at')}; after: {now_.get('last_observed_at')} with delay {now_.get('receipt_delay_s')} s ({now_.get('status')})")
+        # an identity correction on manual evidence: entered uncertain, corrected to confirmed later
+        t_id = datetime.now(UTC)
+        uo = {"athlete_id": "b04", "role": "forward", "area": "execution", "kind": "turnover", "period_start": z(t_id - timedelta(seconds=40)), "period_end": z(t_id - timedelta(seconds=30)),
+              "assessment": "assessed", "possessions": 4, "turnovers": 1, "identity": "uncertain", "annotator": "verifier (fictional)"}
+        u1 = client.post(f"{a.base_url}/api/v1/recordings/{rid}/performance", json=uo).json()
+        time.sleep(1.2)
+        t_mid_id = datetime.now(UTC)
+        time.sleep(1.2)
+        u2 = client.post(f"{a.base_url}/api/v1/recordings/{rid}/performance", json={**uo, "identity": "confirmed", "supersedes": u1["id"], "correction_reason": "identity confirmed on review (fictional)"}).json()
+        rv = lambda t: client.get(f"{a.base_url}/api/v1/recordings/{rid}/athletes/b04/performance-review", params={"at": z(t), "knowledge": "as_entered"}).json()  # noqa: E731
+        r_mid, r_now = rv(t_mid_id), rv(datetime.now(UTC))
+        check("an identity correction: before it, the uncertain entry is listed but not counted; after it, the confirmed version counts once",
+              u1["id"] not in r_mid["counted_observation_ids"] and u2["id"] in r_now["counted_observation_ids"] and u1["id"] not in r_now["counted_observation_ids"],
+              f"counted before {len(r_mid['counted_observation_ids'])}, after {len(r_now['counted_observation_ids'])}")
 
         # duplicate client action, operator response, lineup state
         saved = client.post(f"{a.base_url}/api/v1/recordings/{rid}/athletes/p02/reviews", json={"kind": "substitution", "at": tr["at"], "knowledge": "as_entered", "label": "verifier"}).json()
@@ -159,6 +195,27 @@ def main(argv=None, out=print) -> int:
         reviews = client.get(f"{b.base_url}/api/v1/recordings/{rid2}/reviews").json()
         reps = [client.get(f"{b.base_url}/api/v1/recordings/{rid2}/reviews/{v['id']}/reproduce").json() for v in reviews]
         check("every saved review reproduces on a second engine after export and import", reps and all(r["status"] == "reproduced" for r in reps), f"{len(reps)} reviews, package format {pkg.manifest['format_version']}")
+        # an altered and a removed recorded sample are detected when reproducing on the second engine
+        sub = next(v for v in reviews if v["kind"] == "substitution")
+        con = sqlite3.connect(b.db_path)
+        try:
+            row = con.execute("SELECT ts_utc, payload FROM recording_physiological_samples WHERE recording_id = ? AND athlete_id = ? AND ts_utc <= ? ORDER BY ts_utc DESC LIMIT 1",
+                              (rid2, sub["athlete_id"], sub["at"].replace("Z", "+00:00"))).fetchone()
+            rep_status = lambda: client.get(f"{b.base_url}/api/v1/recordings/{rid2}/reviews/{sub['id']}/reproduce").json()["status"]  # noqa: E731
+            d = json.loads(row[1]); d["heart_rate_bpm"] = (d.get("heart_rate_bpm") or 100) + 3
+            con.execute("UPDATE recording_physiological_samples SET payload = ? WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (json.dumps(d), rid2, sub["athlete_id"], row[0])); con.commit()
+            altered = rep_status()
+            con.execute("UPDATE recording_physiological_samples SET payload = ? WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (row[1], rid2, sub["athlete_id"], row[0])); con.commit()
+            restored = rep_status()
+            full = con.execute("SELECT * FROM recording_physiological_samples WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (rid2, sub["athlete_id"], row[0])).fetchone()
+            con.execute("DELETE FROM recording_physiological_samples WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (rid2, sub["athlete_id"], row[0])); con.commit()
+            removed = rep_status()
+            cols = [c[1] for c in con.execute("PRAGMA table_info(recording_physiological_samples)")]
+            con.execute(f"INSERT INTO recording_physiological_samples ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", full); con.commit()
+        finally:
+            con.close()
+        check("an altered and a removed recorded sample are both detected by reproduction; the restored data reproduces again",
+              altered == "evidence_changed" and removed == "evidence_changed" and restored == "reproduced", f"altered {altered}, restored {restored}, removed {removed}")
         resp2 = client.get(f"{b.base_url}/api/v1/recordings/{rid2}/responses").json()
         rev_ids = {v["id"] for v in reviews}
         check("imported responses point at the imported saved reviews", resp2 and all(r["saved_review_id"] in rev_ids for r in resp2 if r["saved_review_id"]), f"{len(resp2)} responses")

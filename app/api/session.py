@@ -72,6 +72,8 @@ def preflight(plan: SessionPlan | None) -> dict:
         if sha and op.get("session_plan_sha256") == sha:
             started = active.id
             add("raw_recording", "ok", f"this plan's recording {active.id} is already active (starting again resumes it)")
+        elif plan is None:
+            add("raw_recording", "ok", f"recording {active.id} (\"{active.name}\") is active and recording now")
         else:
             add("raw_recording", "block", f"another recording is active ({active.id}, \"{active.name}\"); stop it first")
     else:

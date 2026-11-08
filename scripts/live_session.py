@@ -89,32 +89,32 @@ def physiological(pid: str, lv: float, base: dict, rng: random.Random, t: dateti
             "breathing_rate_bpm": round(br, 1), "hrv_rmssd_ms": round(rm, 1), "signal_quality": 0.92}
 
 
-def rest_bases(rng: random.Random) -> dict:
-    return {pid: {"hr": 58 + rng.random() * 8, "br": 13 + rng.random() * 2, "rm": 60 + rng.random() * 10} for pid, *_ , strap in PLAYERS if strap}
+def rest_bases(rng: random.Random, players: list | None = None) -> dict:
+    return {pid: {"hr": 58 + rng.random() * 8, "br": 13 + rng.random() * 2, "rm": 60 + rng.random() * 10} for pid, *_ , strap in (players or PLAYERS) if strap}
 
 
-def rest_package(end: datetime, bases: dict, rng: random.Random) -> bytes:
+def rest_package(end: datetime, bases: dict, rng: random.Random, players: list | None = None) -> bytes:
     """A stopped pre-match rest recording (current package format) ending at `end`, for the strap wearers."""
     from app.core.recording_package import build_package  # noqa: PLC0415
     from app.models import Athlete, PhysiologicalSample  # noqa: PLC0415
     start = end - timedelta(seconds=REST_S)
-    athletes = [Athlete(id=pid, name=name, jersey_number=n, sport="soccer", team_id=TEAM) for pid, name, n, *_, strap in PLAYERS if strap]
+    athletes = [Athlete(id=pid, name=name, jersey_number=n, sport="soccer", team_id=TEAM) for pid, name, n, *_, strap in (players or PLAYERS) if strap]
     samples = {a.id: {"physiological": [PhysiologicalSample.model_validate(physiological(a.id, 0.0, bases[a.id], rng, start + timedelta(seconds=s))) for s in range(REST_S)],
                       "tracking": []} for a in athletes}
     rec = {"id": "rec-fictional-pre-match-rest", "name": "FICTIONAL pre-match rest (made-up data)", "status": "stopped", "started_at": iso(start), "stopped_at": iso(end)}
     return build_package(rec, athletes, samples, [], {"note": "fictional pre-match rest"}, end)
 
 
-def prepare_database(db_path: Path, end: datetime, seed: str = "athletrix-live-physiology") -> tuple[str, dict]:
+def prepare_database(db_path: Path, end: datetime, seed: str = "athletrix-live-physiology", players: list | None = None) -> tuple[str, dict]:
     """Write the rest recording into the (not yet served) database; returns its id and the per-athlete rest levels."""
     from app.core.recording_package import read_package  # noqa: PLC0415
     from app.db import Database  # noqa: PLC0415
     from app.store.recording_import import import_package  # noqa: PLC0415
     rng = random.Random(seed)
-    bases = rest_bases(rng)
+    bases = rest_bases(rng, players)
     db = Database(db_path)
     try:
-        rid = import_package(db, read_package(rest_package(end, bases, rng)), end).recording_id
+        rid = import_package(db, read_package(rest_package(end, bases, rng, players)), end).recording_id
     finally:
         db.close()
     return rid, bases

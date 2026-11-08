@@ -1,6 +1,6 @@
 """Portable recording packages: a versioned ZIP that carries one stopped recording to another local engine.
 
-FORMAT (format "athletrix-recording-package", format_version 6; versions 1 to 5 are still read)
+FORMAT (format "athletrix-recording-package", format_version 7; versions 1 to 6 are still read)
   A ZIP archive (deflate) with exactly these members, all UTF-8:
     manifest.json   format, format_version, generated_at, the recording reference, member list with SHA-256 and byte
                     counts, record counts, and `settings_at_export` (the engine settings in force when the package was
@@ -36,6 +36,9 @@ FORMAT (format "athletrix-recording-package", format_version 6; versions 1 to 5 
                     the ids they had at the source engine, and nothing is recalculated with the importing engine's settings.
     responses.json  (version 6 only, may be empty) coach / operator responses and lineup changes (app/models/response.py),
                     imported with new ids and their saved-review and roster-entry references re-pointed.
+  Version 7 adds no member: roster entries may carry `inputs` (the session plan's expected sources and stated sampling
+  intervals) and performance observations may carry `confidence`, `rationale` and `instruction_exception`. Packages of
+  versions 1 to 6 never hold these fields, so they read exactly as before (inputs not stated, nothing assumed).
   The manifest's checksums and counts let an importer detect accidental corruption; they are not a signature, and a
   package proves nothing about the accuracy of the measurements it carries. It is not a database backup: no registry,
   rolling history, device status, other recordings, configuration files, credentials, paths or logs are included.
@@ -76,8 +79,8 @@ from app.models.review import SavedReview
 from app.models.roster import RosterEntry
 
 FORMAT = "athletrix-recording-package"
-FORMAT_VERSION = 6
-SUPPORTED_VERSIONS = (1, 2, 3, 4, 5, 6)
+FORMAT_VERSION = 7
+SUPPORTED_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
 MEMBERS = ("manifest.json", "recording.json", "samples.jsonl", "periods.json")      # every version
 DATA_MEMBERS = ("recording.json", "samples.jsonl", "periods.json")
 V2_MEMBERS = ("receipts.jsonl",)                                                   # version 2 adds these
