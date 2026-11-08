@@ -56,6 +56,13 @@ PY = sys.executable
 ATHLETES = {"red": "vx1", "blue": "vx2"}   # yellow, white, black are never assigned
 VEST = "fictional-video-check-vest"
 FIXED_ANCHOR = "2026-11-08T10:00:00Z"
+# Named camera settings (measured on this laptop with scripts/camera_settings_compare.py; see the run sheet)
+CAMERA_SETTINGS = {
+    "baseline": {"model": "yolox_s", "config": "scripts/examples/camera/video_tracking_config_example.json", "every_nth": 1,
+                 "label": "YOLOX-S 640, every frame (best position accuracy; about 10 frames/s here, so live playback drops frames)"},
+    "field-rehearsal": {"model": "yolox_tiny", "config": "scripts/examples/camera/video_tracking_config_tiny.json", "every_nth": 2,
+                        "label": "YOLOX-Tiny 416, every other frame (keeps up at 25 fps with headroom; coarser positions)"},
+}
 
 
 def z(t: datetime) -> str:
@@ -93,7 +100,7 @@ def profile_doc() -> dict:
     return p
 
 
-def operator(obs, sp, camera, reconfirm: bool):
+def operator(obs, sp, camera, reconfirm: bool, reconfirm_delay_s: float = 0.0):
     """Simulated operator (reads the synthetic truth): assign red and blue tracks at their first observation and, with
     reconfirm, again after each close encounter; everything else stays unassigned."""
     from camera_adapter.observations import Assignment  # noqa: PLC0415
@@ -118,7 +125,11 @@ def operator(obs, sp, camera, reconfirm: bool):
         by_track.setdefault(o.track_id, []).append(o)
     out = []
     for tid, seq in sorted(by_track.items(), key=lambda kv: int(kv[0].split("-")[1])):
-        starts = [seq[0]] + ([b for a, b in zip(seq, seq[1:]) if a.near_other_track and not b.near_other_track] if reconfirm else [])
+        ends = [b for a, b in zip(seq, seq[1:]) if a.near_other_track and not b.near_other_track] if reconfirm else []
+        if reconfirm_delay_s:   # the operator re-confirms only this long after each encounter ends (a longer identity gap)
+            ends = [next((o for o in seq if o.video_time_s >= e.video_time_s + reconfirm_delay_s), None) for e in ends]
+            ends = [e for e in ends if e is not None]
+        starts = [seq[0]] + ends
         rows = []
         for o in starts:
             n, d = nearest(o)
@@ -200,16 +211,29 @@ def load_samples(path: Path) -> list[dict]:
 def main(argv=None, out=print) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--model", type=Path, default=ROOT / "models" / "yolox_s.onnx")
+    ap.add_argument("--model", type=Path, help="override the setting's model file")
+    ap.add_argument("--setting", choices=sorted(CAMERA_SETTINGS), default="baseline",
+                    help="camera processing setting for path B (path A, recorded review, always uses the baseline): " +
+                         "; ".join(f"{k} = {v['label']}" for k, v in CAMERA_SETTINGS.items()))
     ap.add_argument("--queue-size", type=int, default=2)
     ap.add_argument("--engine-port", type=int, help="fixed port for the isolated engine (for a dashboard copy watching path B)")
     ap.add_argument("--cors-origin", action="append", default=[], help="dashboard origin allowed to read the isolated engine (repeatable)")
     ap.add_argument("--hold-s", type=float, default=0.0, help="keep the engine up this long after the score is saved, for a browser look")
+    ap.add_argument("--reconfirm-delay-s", type=float, default=0.0, help="path B: re-confirm a track only this long after an encounter ends")
+    ap.add_argument("--wearable-dropout", help="path B: video seconds A:B during which the FICTIONAL vest sends nothing")
     args = ap.parse_args(argv)
     if args.out.exists() and any(args.out.iterdir()):
         out(f"REFUSED: {args.out} is not empty")
         return 1
     args.out.mkdir(parents=True, exist_ok=True)
+    cs = CAMERA_SETTINGS[args.setting]
+    base_model = ROOT / "models" / "yolox_s.onnx"
+    paced_model = args.model or (ROOT / "models" / f"{cs['model']}.onnx")
+    args.model = args.model or base_model
+    if not paced_model.is_file():
+        out(f"MISSING MODEL: {paced_model} is not on this laptop. Copy it before going offline (scripts/fetch_person_model.py, run by a person); "
+            "this check never downloads anything.")
+        return 1
     if not args.model.is_file():
         out(f"MISSING MODEL: {args.model} is not on this laptop. Copy it before going offline (scripts/fetch_person_model.py, run by a person); "
             "this check never downloads anything.")
@@ -309,12 +333,14 @@ def main(argv=None, out=print) -> int:
 
     # ---- B. paced playback into an isolated pilot session ----
     out("B. paced playback: bounded processing at the file's own rate...")
-    if sh([PY, "scripts/camera_track_video.py", str(clip), "--model", str(args.model), "--paced-replay", "--queue-size", str(args.queue_size),
+    if sh([PY, "scripts/camera_track_video.py", str(clip), "--model", str(paced_model), "--config", cs["config"], "--every-nth", str(cs["every_nth"]),
+           "--paced-replay", "--queue-size", str(args.queue_size),
            "--out", str(d / "obs-paced.jsonl"), "--log", str(d / "track-paced.json")], steps):
         out("paced tracking failed: " + "; ".join(steps[-1]["output_tail"])); return 1
     obs_b = obsmod.load(d / "obs-paced.jsonl")
     tl_b = json.loads((d / "track-paced.json").read_text())
-    write_assignments(d / "assign-paced.json", operator(obs_b, sp, camera, reconfirm=True))
+    write_assignments(d / "assign-paced.json", operator(obs_b, sp, camera, reconfirm=True, reconfirm_delay_s=args.reconfirm_delay_s))
+    drop = tuple(float(x) for x in args.wearable_dropout.split(":")) if args.wearable_dropout else None
     import live_session  # noqa: PLC0415
     from validate_team_scale import IsolatedBackend  # noqa: PLC0415
     eng = IsolatedBackend(port=args.engine_port, extra_env={"FATIGUE_PROFILE_PATH": str(d / "profile.json")},
@@ -324,6 +350,7 @@ def main(argv=None, out=print) -> int:
     eng.start()
     c = httpx.Client(base_url=eng.base_url + "/api/v1", timeout=15.0)
     polls: list = []
+    timeline: list = []
     stop = threading.Event()
     try:
         for aid, n in (("vx1", 71), ("vx2", 72)):
@@ -349,6 +376,8 @@ def main(argv=None, out=print) -> int:
                 t = datetime.now(UTC)
                 vt = (t - send_start["anchor"]).total_seconds() if "anchor" in send_start else 0.0
                 tr = sp.truth("red", min(max(vt, 0.0), sp.DURATION_S))
+                if drop and "anchor" in send_start and drop[0] <= vt < drop[1]:
+                    continue   # deliberate wearable dropout
                 c.post("/samples/physiological", json={"athlete_id": "vx1", "timestamp": z(t), "source": "simulated", "device_id": VEST,
                                                        "heart_rate_bpm": round(rest_hr + 60 + 12 * (tr[3] if tr else 0), 1)})
 
@@ -359,6 +388,12 @@ def main(argv=None, out=print) -> int:
                     x = r.json()
                     polls.append({"at": x["at"], "state": x["state"], "camera": (x.get("streams") or {}).get("camera", {}).get("detail"),
                                   "wearable": (x.get("streams") or {}).get("wearable", {}).get("detail")})
+                v = c.get(f"/recordings/{rid}/study/pilot", params={"trend_span_s": 0})
+                if v.status_code == 200 and (v.json().get("estimate") or {}).get("streams"):
+                    e = v.json()["estimate"]
+                    timeline.append({"video_s": round((datetime.now(UTC) - send_start["anchor"]).total_seconds(), 1) if "anchor" in send_start else None,
+                                     "camera_fresh": e["streams"]["camera"]["fresh"], "wearable_fresh": e["streams"]["wearable"]["fresh"],
+                                     **{k: e["candidates"][k]["available"] for k in ("vest_only", "camera_only", "combined")}})
         threading.Thread(target=feeder, daemon=True).start()
         threading.Thread(target=poller, daemon=True).start()
         time.sleep(3.0)
@@ -423,7 +458,7 @@ def main(argv=None, out=print) -> int:
         pred = save.get("prediction") or {}
         cands = (pred.get("result") or {}).get("candidates") or {}
         report["B_paced"] = {
-            "model": tl_b.get("model"), "queue_size": args.queue_size,
+            "setting": {"name": args.setting, **{k: cs[k] for k in ("model", "config", "every_nth", "label")}}, "model": tl_b.get("model"), "queue_size": args.queue_size,
             "frames": bl.get("frames"), "source_fps": bl.get("source_fps"), "processing_fps": tl_b["speed"].get("frames_per_second"),
             "processing_lag_s": bl.get("processing_lag_s"), "kept_up": bl.get("kept_up"),
             "time_mapping": mapping, "send": send_lines[-4:], "send_exit": res.get("exit"),
@@ -432,7 +467,9 @@ def main(argv=None, out=print) -> int:
                                       "processing happened before sending, so this is not camera-to-engine latency",
             "early_round_start": report_b_early, "round_start": started.json() if started is not None else None,
             "readiness_transitions": states, "readiness_after_camera_stopped": {"state": after["state"], "next": after["next"]},
-            "pilot_view_at_end_of_clip": view_live, "pilot_view_4s_after_camera_stopped": view_after,
+            "pilot_view_at_end_of_clip": view_live, "reconfirm_delay_s": args.reconfirm_delay_s, "wearable_dropout_video_s": drop,
+            "view_timeline_changes": [x for i, x in enumerate(timeline) if i == 0 or {k: v for k, v in x.items() if k != "video_s"} != {k: v for k, v in timeline[i - 1].items() if k != "video_s"}],
+            "combined_available_while_a_stream_was_stale": sum(1 for x in timeline if x["combined"] and not (x["camera_fresh"] and x["wearable_fresh"])), "pilot_view_4s_after_camera_stopped": view_after,
             "saved_score": {"id": save.get("id"), "all_three_available": pred.get("all_three_available"),
                             "candidates": {k: (v["value"] if v["available"] else "not available: " + (v["reasons"] or ["?"])[0]) for k, v in cands.items()},
                             "hr_per_speed": ((pred.get("result") or {}).get("features") or {}).get("hr_per_speed", {}).get("reason") or "available",

@@ -15,7 +15,10 @@ WHAT IS MEASURED (and nothing more)
 USAGE
     python scripts/pilot_display_delay.py proxy --engine URL --port 3919 [--slow-every 10 --slow-s 2.5] [--sink display.json]
     python scripts/pilot_display_delay.py analyze --display LOG.json (--database ENGINE.db | --package EXPORT.zip) [--tail-s 5]
-LOG.json is the browser's window.__athletrixPilotDisplay ([display ms on engine clock, newest receipt ms, uncertainty ms]).
+LOG.json is the browser's window.__athletrixPilotDisplay ([display ms on engine clock, newest receipt ms, uncertainty ms]), or
+{"display": that list, "painted": [animation-frame heartbeat ms, ...]}: with the heartbeat, only samples received and
+displayed while the page was drawing frames count; the rest are reported as not observable (display asleep, window
+covered or hidden), never as a delay.
 """
 
 from __future__ import annotations
@@ -81,8 +84,22 @@ def proxy(args, out) -> int:
     return 0
 
 
-def analyze(display: list, receipts: list[float], tail_s: float = 5.0) -> dict:
-    """display: [[t_display_ms, newest_receipt_ms, unc_ms], ...]; receipts: receipt times in ms (engine clock)."""
+def painted_spans(beats: list[float], max_gap_ms: float = 1000.0) -> list[tuple[float, float]]:
+    """Spans during which the page drew frames: consecutive animation-frame heartbeats no more than max_gap_ms apart."""
+    spans: list[list[float]] = []
+    for b in sorted(beats):
+        if spans and b - spans[-1][1] <= max_gap_ms:
+            spans[-1][1] = b
+        else:
+            spans.append([b, b])
+    return [(a, b) for a, b in spans if b > a]
+
+
+def analyze(display: list, receipts: list[float], tail_s: float = 5.0, painted: list[float] | None = None) -> dict:
+    """display: [[t_display_ms, newest_receipt_ms, unc_ms], ...]; receipts: receipt times in ms (engine clock).
+    painted: optional animation-frame heartbeats (ms, the same laptop's clock). With it, a sample counts only when the
+    page was drawing frames throughout, from the sample's receipt to its display; samples received while the window was
+    not drawn (display asleep, covered or hidden) are NOT OBSERVABLE and are reported apart, never as a delay."""
     if not display:
         return {"updates": 0, "note": "no display updates were recorded"}
     display = sorted(display)
@@ -98,17 +115,34 @@ def analyze(display: list, receipts: list[float], tail_s: float = 5.0) -> dict:
     for d in display:
         cov = max(cov, d[1])
         best.append((d[0], cov))
+    spans = painted_spans(painted) if painted else None
+    not_observable = 0
+
+    def in_one_span(a, b):
+        return any(x <= a and b <= y for x, y in spans)
     for r in window:
         while j < len(best) and best[j][1] < r:
             j += 1
         if j >= len(best):
-            missing += 1
+            if spans is not None and not any(x <= r <= y for x, y in spans):
+                not_observable += 1
+            else:
+                missing += 1
+            continue
+        if spans is not None and not in_one_span(r, best[j][0]):
+            not_observable += 1
             continue
         delays.append((best[j][0] - r) / 1000)
     unc = max(d[2] for d in display) / 1000
     gaps = [(b[0] - a[0]) / 1000 for a, b in zip(display, display[1:])]
     s = sorted(delays)
-    return {"samples": len(window), "displayed": len(delays), "missing_updates": missing, "updates": len(display),
+    vis = None
+    if spans is not None:
+        lo, hi = first, last - 1000 * tail_s
+        vis = {"observation_window_s": round((hi - lo) / 1000, 1), "painted_s": round(sum(max(0.0, min(b, hi) - max(a, lo)) for a, b in spans) / 1000, 1),
+               "painted_spans": len(spans), "samples_not_observable": not_observable,
+               "rule": "a sample counts only if the page drew frames throughout from its receipt to its display (heartbeat gaps over 1 s break a span)"}
+    return {"samples": len(window), "displayed": len(delays), "missing_updates": missing, "updates": len(display), "visibility": vis,
             "delay_s": None if not s else {"median": round(statistics.median(s), 3), "p95": round(s[min(len(s) - 1, int(0.95 * len(s)))], 3), "max": round(s[-1], 3),
                                             "share_within_2s": round(sum(1 for x in s if x <= 2.0) / len(s), 4)},
             "clock_mapping_uncertainty_s": round(unc, 4), "longest_gap_between_updates_s": round(max(gaps), 3) if gaps else None,
@@ -127,6 +161,9 @@ def main(argv=None, out=print) -> int:
     if args.cmd == "proxy":
         return proxy(args, out)
     display = json.loads(args.display.read_text())
+    painted = None
+    if isinstance(display, dict):   # {"display": [...], "painted": [heartbeat ms, ...]} from a page with a paint heartbeat
+        display, painted = display["display"], display.get("painted")
     if args.package:
         import sys as _sys  # noqa: PLC0415
         _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -140,7 +177,7 @@ def main(argv=None, out=print) -> int:
         finally:
             con.close()
         rec = [datetime.fromisoformat(r[0].replace("Z", "+00:00")).timestamp() * 1000 for r in rows if r[0]]
-    res = analyze(display, rec, args.tail_s)
+    res = analyze(display, rec, args.tail_s, painted)
     out(json.dumps(res, indent=2))
     return 0
 
