@@ -78,4 +78,37 @@ Fictional only: no participant data, no real readings, no footage. Zephyr: not i
 | 3 | Independent sprint timing worksheet | done | `GET .../study/timing-sheet` (blind: no scores), `scripts/sprint_timing.py` sheet / validate / apply (preview: new, unchanged, correction, duplicate, ambiguous, invalid; video by PTS + uncertainty, local SHA-256, missing clip = missing), templates `scripts/examples/pilot/sprint_timing_template.csv` and `fictional_sprint_timing.csv`; test in tests/test_study_pilot.py |
 | 4 | Study manifest and traceable report | done | `scripts/examples/pilot/study_manifest_template.json` (blank) and `fictional_study_manifest.json`; `evaluate.py pilot --manifest`; outcome renamed `time_increase_pct` (percent increase in sprint time); reference attempts vs prediction eligibility; best-reference table with result ids and corrections; trace columns; exploratory unverified block; mixed fictional/real and mixed profiles refused; fixture extended (tests/test_pilot_analysis.py); rehearsal now uses save-then-start and the blind timing sheet |
 | 5 | One-laptop offline preflight | done (software); operator run pending in 6 | `sideline_session.py field-check` (three separate verdicts; fictional sessions and simulated labels never count as real), `demo_launcher.py --session pilot` (one command: isolated engine, dashboard copy, rehearsal, restart, export, fresh-database reproduction, report); dashboard's only remote asset is a Google Fonts stylesheet (offline: system fonts); missing model: camera_track_video.py exits 1 with the fetch command, never downloads |
-| 6 | Operator rehearsal and handoff | pending | |
+| 6 | Operator rehearsal and handoff | done (FICTIONAL) | see "Operator rehearsal 2026-11-08" below; `docs/fatigue-pilot-run-sheet.md` (printable, with timer instructions, decisions and the Zephyr minimum) |
+
+## Operator rehearsal 2026-11-08 04:04-04:24 UTC (FICTIONAL; one laptop; synthetic tracking, no video processing)
+
+- **Launch:** `demo_launcher.py --session pilot --frontend-port 3920 --keep-output DIR`, one command: isolated engine,
+  dashboard copy, scripted operator. Field check against it: fictional rehearsal ready = yes; record inputs = NO (no real
+  source); controlled pilot = NO (fictional profile and manifest, no calibration, no real streams).
+- **What the script did:** 3 wearers with their own baselines; save score, then confirmed start, every round; blind
+  timing sheet; P2 round 1 save missed (order_unverified / marker_only); P1 round 3 invalid; P2 strap dropout and
+  reconnect; P3 camera gap before a save; P1 round 2 gate start with a recorded mapping (saved_before_recorded_start);
+  engine restart after P1 (1.2 s; the recording stayed active); export, fresh-database reproduction 9/9; removal on a
+  copy (P1's entries gone, 46 others kept, the exported package still holds P1's 22). Report: 4 primary rows (small
+  sample), so the targets are inconclusive.
+- **Real browser, foreground tab:**
+  - during the restart the card showed "could not be read" and recovered with the new wearer;
+  - the dropout showed "Wearable newest 11-20 s old (STALE)" while the camera stayed fresh.
+- **Display delay** (engine receipt -> first frame after a visible update; browser clock mapped onto the engine clock,
+  ±0.037 s): 592 heart-rate samples, 592 displayed, 0 missing, median 0.625 s, p95 1.105 s, max 12.688 s, 98.1 % within
+  2 s. The maximum falls in the 12.9 s update gap of the deliberate engine restart.
+- **API timing, measured separately** (script polling once a second, 640 polls): pilot view p50 83 ms, p95 180 ms,
+  max 668 ms; 1 failed poll, during the restart. Ingest scheduling lateness p50 5 ms, p95 6.5 ms, max 0.70 s.
+- **Operator path by hand in the real browser** (same servers, a second recording):
+  - session, wearer and round by `pilot_session.py`;
+  - "1. Save score" clicked: "SAVED for P1 round 1 at 04:22:20.996Z … all three estimates available: yes · Combined 13 ·
+    Vest only 26 · Camera only 4";
+  - "2. Start timed sprint" clicked: marked 04:22:32.438Z, confirming the save;
+  - round 2 started without a save (CLI), so it is ORDER UNVERIFIED;
+  - blind timing sheet: round 1 by gate 3.18 s with the gate's own start time (04:22:33.600, offset −0.2 s ± 0.05 s),
+    round 2 by gate 3.27 s without a start reference;
+  - report with the FICTIONAL study manifest: round 1 is saved_before_recorded_start (gap 12.4 s), primary; round 2 is
+    order_unverified / marker_only, listed and left out of the primary comparison.
+  - A first attempt was started before any data arrived (the feeder had not started): the card said "no usable wearable
+    sample at the cutoff". That round was marked invalid and the setup repeated with data flowing. Lesson for the run
+    sheet: start the round only when both streams arrive.

@@ -315,6 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=int, default=None, help=f"seconds of fictional data to generate (default {DEFAULT_DURATION_S}; with --session match: scenario seconds, default 360)")
     p.add_argument("--session", choices=["simple", "match", "pilot"], default="simple", help="simple: the sine-wave feed (default); match: the paced fictional match session (scripts/live_session.py); pilot: the FICTIONAL fatigue-pilot rehearsal (scripts/pilot_rehearsal.py) at wall-clock time")
     p.add_argument("--rounds", type=int, default=3, help="--session pilot: rounds per participant (default 3)")
+    p.add_argument("--keep-output", type=Path, help="--session pilot: copy the rehearsal summary, export and report to this new folder before cleaning up")
     p.add_argument("--speed", type=float, default=1.0, help="--session match: scenario seconds per wall second (default 1; timestamps stay real send times)")
     p.add_argument("--device-status", action="store_true", help="also send clearly fictional device-status reports every 5 s")
     p.add_argument("--backend-port", type=int, default=None, help="backend port (default: a free port; an occupied port is an error)")
@@ -447,9 +448,18 @@ def run_pilot(args, out, wait_for_interrupt, demo_factory) -> int:
             demo.backend.start()
         log = pr.run(ns, api, lambda: datetime.now(UTC), time.sleep, out, restart)
         fin = pr.finish(ns, api, log, out)
+        summary = {"mode": "wall (launcher --session pilot)", "fictional": True, "log": {k: v for k, v in log.items() if k != "events"}, "events": log.get("events"), **fin,
+                   "failed_requests": api.failed, "requests": api.sent,
+                   "request_latency_ms": {k: {"p50": round(1000 * sorted(v)[len(v) // 2], 2), "p95": round(1000 * sorted(v)[int(0.95 * len(v))], 2), "max": round(1000 * max(v), 2)}
+                                          for k, v in api.lat.items() if v}}
+        import json as _json  # noqa: PLC0415
+        (out_dir / "summary.json").write_text(_json.dumps(summary, indent=2, default=str))
+        if args.keep_output:
+            shutil.copytree(out_dir, args.keep_output)
+            out(f"Copied the summary, export and report to {args.keep_output}")
         out(f"Done. Saved predictions reproduced in a fresh database: {fin['reproduction_on_second_database']['all_reproduced']}; "
-            f"report: {out_dir / 'report' / 'report.md'} (copy it out before stopping: the temporary folder is removed on exit)")
-        out(f"Failed requests: {api.failed or 'none'}")
+            f"report: {out_dir / 'report' / 'report.md'}" + ("" if args.keep_output else " (the temporary folder is removed on exit: use --keep-output)"))
+        out(f"Failed requests: {api.failed or 'none'}; pilot view API latency (script polling once a second): {summary['request_latency_ms'].get('pilot_view')}")
         if args.exit_after_demo:
             return 0 if fin["reproduction_on_second_database"]["all_reproduced"] else 1
         out("Servers stay up for exploring the dashboard. Press Ctrl-C to stop and clean up.")

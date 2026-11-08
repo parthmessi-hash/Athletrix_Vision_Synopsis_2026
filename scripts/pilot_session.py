@@ -76,7 +76,7 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
                 res = r.get("sprint_result") or {}
                 inv = (r.get("round_end") or {})
                 out(f"  {r['athlete_id']} round {r['round']}: " + (" · ".join(f"{k} {v['value'] if v['available'] else 'n/a'}" for k, v in cands.items()) or "no prediction") +
-                    (f" · {'prospective' if p.get('prospective', True) else 'RETROSPECTIVE'}" if p else "") +
+                    (f" · timing {r['timing_evidence']['category']} ({r['timing_evidence']['basis']})" if r.get("timing_evidence") else "") +
                     f" · time {res.get('time_s') or res.get('missing_reason') or 'not entered'}" + (" · INVALID" if inv.get("notes") and "invalid" in str(inv) else ""))
             return 0
         k = {"round-start": "round_start", "save-score": "score_save", "sprint-start": "sprint_start", "sprint-end": "sprint_end", "round-end": "round_end", "result": "sprint_result",

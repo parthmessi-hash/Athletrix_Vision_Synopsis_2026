@@ -14,7 +14,7 @@ WHAT IS MEASURED (and nothing more)
 
 USAGE
     python scripts/pilot_display_delay.py proxy --engine URL --port 3919 [--slow-every 10 --slow-s 2.5] [--sink display.json]
-    python scripts/pilot_display_delay.py analyze --display LOG.json --database ENGINE.db [--tail-s 5]
+    python scripts/pilot_display_delay.py analyze --display LOG.json (--database ENGINE.db | --package EXPORT.zip) [--tail-s 5]
 LOG.json is the browser's window.__athletrixPilotDisplay ([display ms on engine clock, newest receipt ms, uncertainty ms]).
 """
 
@@ -121,17 +121,25 @@ def main(argv=None, out=print) -> int:
     p = sub.add_parser("proxy"); p.add_argument("--engine", required=True); p.add_argument("--port", type=int, required=True)
     p.add_argument("--slow-every", type=int, default=0); p.add_argument("--slow-s", type=float, default=2.5); p.add_argument("--path-contains", default="/study/pilot")
     p.add_argument("--sink", help="write a POST to /__display_log (the browser's display log) to this local file")
-    a = sub.add_parser("analyze"); a.add_argument("--display", type=Path, required=True); a.add_argument("--database", type=Path, required=True); a.add_argument("--tail-s", type=float, default=5.0)
+    a = sub.add_parser("analyze"); a.add_argument("--display", type=Path, required=True); a.add_argument("--tail-s", type=float, default=5.0)
+    g = a.add_mutually_exclusive_group(required=True); g.add_argument("--database", type=Path); g.add_argument("--package", type=Path, help="receipts from an exported recording package instead")
     args = ap.parse_args(argv)
     if args.cmd == "proxy":
         return proxy(args, out)
     display = json.loads(args.display.read_text())
-    con = sqlite3.connect(f"file:{args.database}?mode=ro", uri=True)
-    try:
-        rows = con.execute("SELECT json_extract(receipt, '$.received_at') FROM recording_physiological_samples WHERE receipt IS NOT NULL").fetchall()
-    finally:
-        con.close()
-    rec = [datetime.fromisoformat(r[0].replace("Z", "+00:00")).timestamp() * 1000 for r in rows if r[0]]
+    if args.package:
+        import sys as _sys  # noqa: PLC0415
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from app.core.recording_package import read_package  # noqa: PLC0415
+        pkg = read_package(args.package.read_bytes())
+        rec = [datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000 for (a, st, _), v in pkg.receipts.items() if st == "physiological"]
+    else:
+        con = sqlite3.connect(f"file:{args.database}?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT json_extract(receipt, '$.received_at') FROM recording_physiological_samples WHERE receipt IS NOT NULL").fetchall()
+        finally:
+            con.close()
+        rec = [datetime.fromisoformat(r[0].replace("Z", "+00:00")).timestamp() * 1000 for r in rows if r[0]]
     res = analyze(display, rec, args.tail_s)
     out(json.dumps(res, indent=2))
     return 0

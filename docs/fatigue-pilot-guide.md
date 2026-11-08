@@ -30,7 +30,12 @@ fatigue.** The coach makes every substitution decision. The pilot view gives no 
     never turned into a one-source score.
   - Maximum heart rate is an explicit per-wearer input with its origin. It is not a safety limit.
   - Not used: sleep, soreness, HRV, jumps and tackles.
-- **No peeking.** Marking `sprint_start` makes the engine save a prediction from the data entered and received by that
+- **Save, then start.** The operator saves the score (`score_save`, engine-timed) and only then starts the sprint with a
+  confirmation of that saved prediction. Timing evidence per round: saved_before_recorded_start (needs an independent
+  start reference with a recorded clock mapping), order_unverified (with its basis), or retrospective. The study
+  manifest declares which counts as primary. The older behaviour (a prediction computed when the start marker arrives,
+  with a two-second grace period) is kept for old recordings and labelled order_unverified / marker_only, never verified.
+- **No peeking.** Marking `sprint_start` without a saved score makes the engine save a prediction from the data entered and received by that
   cutoff, using the session's frozen profile.
   - Every timed sprint is excluded from both streams, from 5 s before it until a set time after it, in all later rolling
     and reference windows.
@@ -63,6 +68,9 @@ fatigue.** The coach makes every substitution decision. The pilot view gives no 
   covers them; uncovered samples are counted as missing updates.
 
 ## 2. Commands
+
+The printable operator and timer instructions, with the save-then-start flow, the blind timing sheet, the field check
+and the timing labels, are in `docs/fatigue-pilot-run-sheet.md`. The commands below are the developer view.
 
 ```bash
 # the whole fictional pilot in-process with a simulated clock (about 20 s; a software check, not a timed run)
