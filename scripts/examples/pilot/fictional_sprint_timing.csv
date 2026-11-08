@@ -1,0 +1,5 @@
+participant_code,round,sprint_start_marker,method,time_s,precision_s,timing_uncertainty_s,video_file,video_sha256,start_pts_s,finish_pts_s,gate_start_device_time,gate_clock_offset_s,gate_clock_uncertainty_s,invalid_reason,missing_reason,timer,notes,correction_reason
+P1,1,2026-11-08T10:00:00Z,timing_gates,3.21,0.01,,,,,,2026-11-08T10:00:02.450Z,0.30,0.10,,,FICTIONAL timer,FICTIONAL example row,
+P1,2,2026-11-08T10:06:00Z,video_frames,3.2667,,0.02,P1-r2.mp4,,12.0334,15.3001,,,,,,FICTIONAL reviewer,FICTIONAL: PTS read with ffprobe; uncertainty = half the actual frame interval + judgement,
+P1,3,2026-11-08T10:12:00Z,,,,,,,,,,,,FICTIONAL: false start,,FICTIONAL timer,,
+P2,1,2026-11-08T10:20:00Z,,,,,,,,,,,,,equipment_failure,FICTIONAL timer,FICTIONAL: gate battery,

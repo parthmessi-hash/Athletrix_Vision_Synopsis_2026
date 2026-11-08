@@ -1,0 +1,1 @@
+participant_code,round,sprint_start_marker,method,time_s,precision_s,timing_uncertainty_s,video_file,video_sha256,start_pts_s,finish_pts_s,gate_start_device_time,gate_clock_offset_s,gate_clock_uncertainty_s,invalid_reason,missing_reason,timer,notes,correction_reason

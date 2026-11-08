@@ -4,6 +4,7 @@ retries, corrections with history, a wearer change that inherits nothing, the le
 and sprint readings, and a reading received after the cutoff, leave the saved prediction unchanged; excluded sprint
 readings never reach the next round), and export, import and reproduction."""
 
+import json
 import random
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -340,3 +341,55 @@ def test_delayed_sprint_readings_never_reach_later_rounds(pilot):
     after = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1", "at": z(t2), "knowledge": "retrospective"}).json()
     assert {k: v["value"] for k, v in after["candidates"].items()} == {k: v["value"] for k, v in before["candidates"].items()}
     assert after["inputs"]["excluded"]["test_effort"] == before["inputs"]["excluded"]["test_effort"] + 10, "the delayed sprint readings are recognised and excluded"
+
+
+def test_blind_timing_sheet_validate_apply_and_correct(pilot, tmp_path):
+    import csv
+    import sys as _s
+    _s.path.insert(0, str(ROOT / "scripts"))
+    import sprint_timing
+    c, sim, rid, m0, st = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"]
+    for rnd in (1, 2, 3):
+        sim.run(st["now"] + timedelta(seconds=100), "x1", "strap-A", t0=m0)
+        s = entry(c, rid, kind="score_save", client_token=f"save-r{rnd}-timing", athlete_id="x1", round=rnd)
+        st["now"] += timedelta(seconds=1)
+        entry(c, rid, kind="sprint_start", client_token=f"start-r{rnd}-timing", athlete_id="x1", round=rnd, confirms_prediction_id=s["id"])
+    run = lambda *a: (lambda lines: (sprint_timing.main(["--engine", "http://testserver", *a], out=lines.append, client=c), lines))([])  # noqa: E731
+    sheet = c.get(f"{API}/recordings/{rid}/study/timing-sheet").json()
+    data = json.dumps(sheet["rounds"])
+    assert "prediction" not in data and "vest_only" not in data and "combined" not in data, "blind: no scores in the timer's sheet"
+    assert run("sheet", "--out", str(tmp_path / "t.csv"))[0] == 0
+    rows = list(csv.DictReader(open(tmp_path / "t.csv")))
+    assert [(r["participant_code"], r["round"]) for r in rows] == [("P1", "1"), ("P1", "2"), ("P1", "3")]
+    clips = tmp_path / "clips"; clips.mkdir()
+    (clips / "r2.mp4").write_bytes(b"GENERATED PLACEHOLDER standing in for a local clip; only its checksum is used")
+    rows[0].update(method="timing_gates", time_s="3.21", precision_s="0.01", gate_start_device_time=z(st["now"] - timedelta(seconds=20)), gate_clock_offset_s="0.3", gate_clock_uncertainty_s="0.1", timer="fictional timer A")
+    rows[1].update(method="video_frames", video_file="r2.mp4", start_pts_s="12.0334", finish_pts_s="15.3001", timing_uncertainty_s="0.02", timer="fictional reviewer")
+    rows[2].update(invalid_reason="FICTIONAL: false start")
+    extra = [dict(rows[0]), {**{k: "" for k in rows[0]}, "participant_code": "P9", "round": "1", "method": "stopwatch", "time_s": "3.4"}]
+    def write(rs):
+        with open(tmp_path / "t.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=sprint_timing.COLUMNS); w.writeheader(); [w.writerow(r) for r in rs]
+    write(rows + extra)
+    code, lines = run("validate", str(tmp_path / "t.csv"), "--video-dir", str(clips))
+    assert code == 1 and sum("duplicate" in x for x in lines) == 2 and any("P9 round 1: ambiguous" in x for x in lines), lines
+    write(rows)
+    code, lines = run("validate", str(tmp_path / "t.csv"), "--video-dir", str(clips))
+    assert code == 0 and lines[-1].startswith("3 to apply, 0 need attention"), lines
+    assert run("apply", str(tmp_path / "t.csv"), "--yes", "--video-dir", str(clips))[0] == 0
+    res = {r["round"]: r["result"] for r in c.get(f"{API}/recordings/{rid}/study/timing-sheet").json()["rounds"]}
+    assert res[1]["time_s"] == 3.21 and res[2]["time_s"] == 3.2667 and len(res[2]["video_sha256"]) == 64 and res[3]["missing_reason"] == "invalid_attempt"
+    code, lines = run("apply", str(tmp_path / "t.csv"), "--yes", "--video-dir", str(clips))
+    assert code == 0 and lines[-1].startswith("stored 0 result(s)"), "re-applying the same sheet stores nothing"
+    rows[0]["time_s"] = "3.25"
+    write(rows)
+    code, lines = run("validate", str(tmp_path / "t.csv"), "--video-dir", str(clips))
+    assert code == 1 and any("needs" in x or "add correction_reason" in x for x in lines)
+    rows[0]["correction_reason"] = "FICTIONAL: gate display re-read"
+    (clips / "r2.mp4").unlink()   # the clip is gone: that row may not be re-timed
+    write(rows)
+    code, lines = run("apply", str(tmp_path / "t.csv"), "--yes", "--video-dir", str(clips))
+    res = {r["round"]: r["result"] for r in c.get(f"{API}/recordings/{rid}/study/timing-sheet").json()["rounds"]}
+    assert res[1]["time_s"] == 3.25 and res[1]["corrects"] is not None, "a traceable correction"
+    assert any("line 3" in x and "correction" in x and "add correction_reason" in x for x in lines), "the unreadable clip turns the row into a missing result, which differs and needs a reason"
+    assert res[2]["time_s"] == 3.2667, "the stored video time stays until a reasoned correction"

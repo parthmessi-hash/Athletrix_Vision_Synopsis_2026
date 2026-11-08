@@ -380,3 +380,32 @@ def reproduce_prediction(recording_id: str, prediction_id: str) -> dict:
             "prospective": pred.prediction.get("prospective"), "timing_label": pred.prediction.get("timing_label"),
             "note": "The saved prediction is never rewritten."}
 
+
+
+@router.get("/recordings/{recording_id}/study/timing-sheet")
+def timing_sheet(recording_id: str) -> dict:
+    """The round list for the independent timer: wearer code, round, the start and end markers and any result already
+    entered (with its entry id for corrections). It contains NO scores, predictions or self-ratings (blind by design)."""
+    with get_database().read():
+        rec = require_recording(recording_id)
+    entries = study_store.list(rec.id)
+    cur = current(entries)
+    code = {e.athlete_id: e.participant_code for e in entries if e.kind == "wearer" and e.participant_code}
+    sess = session_of(entries)
+    rows = {}
+    for e in cur:
+        if e.kind in ("sprint_start", "sprint_end", "sprint_result", "round_end") and e.round is not None:
+            r = rows.setdefault((e.athlete_id, e.round), {"athlete_id": e.athlete_id, "participant_code": code.get(e.athlete_id), "round": e.round})
+            if e.kind == "sprint_start":
+                r["sprint_start_marker"] = iso(e.at)
+            elif e.kind == "sprint_end":
+                r["sprint_end_marker"] = iso(e.at)
+            elif e.kind == "round_end" and e.invalid:
+                r["round_marked_invalid"] = e.notes
+            elif e.kind == "sprint_result":
+                r["result"] = {"id": e.id, "time_s": e.time_s, "method": e.method, "missing_reason": e.missing_reason, "precision_s": e.precision_s,
+                               "timing_uncertainty_s": e.timing_uncertainty_s, "video_sha256": e.video_sha256, "start_pts_s": e.start_pts_s, "finish_pts_s": e.finish_pts_s,
+                               "notes": e.notes, "corrects": e.supersedes}
+    return {"recording_id": rec.id, "session": sess.session_label if sess else None, "fictional": bool(sess and sess.fictional),
+            "rounds": sorted(rows.values(), key=lambda r: (r["participant_code"] or r["athlete_id"], r["round"])),
+            "note": "Blind timing sheet: no scores, predictions or self-ratings are included."}

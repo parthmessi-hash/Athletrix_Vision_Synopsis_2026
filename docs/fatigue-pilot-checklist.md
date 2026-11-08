@@ -75,7 +75,7 @@ Fictional only: no participant data, no real readings, no footage. Zephyr: not i
 |---|-----------|-------|-------|
 | 1 | Close out the pilot | done | 90-minute run recorded above; commit bd31333 |
 | 2 | Save score, then start sprint | done | `score_save` + `sprint_start --confirm` (app/api/study.py), `app/core/timing_evidence.py` (saved_before_recorded_start / order_unverified / retrospective; policy independent_start_reference or confirmed_sequence; legacy grace never promoted), RULES_VERSION in predictions, CLI `save-score`, dashboard Save / Start controls (harness 93/93), tests in tests/test_study_pilot.py |
-| 3 | Independent sprint timing worksheet | pending | |
+| 3 | Independent sprint timing worksheet | done | `GET .../study/timing-sheet` (blind: no scores), `scripts/sprint_timing.py` sheet / validate / apply (preview: new, unchanged, correction, duplicate, ambiguous, invalid; video by PTS + uncertainty, local SHA-256, missing clip = missing), templates `scripts/examples/pilot/sprint_timing_template.csv` and `fictional_sprint_timing.csv`; test in tests/test_study_pilot.py |
 | 4 | Study manifest and traceable report | pending | |
 | 5 | One-laptop offline preflight | pending | |
 | 6 | Operator rehearsal and handoff | pending | |
