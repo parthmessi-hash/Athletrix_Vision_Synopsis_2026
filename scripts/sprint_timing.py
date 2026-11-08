@@ -26,7 +26,8 @@ ROW STATUS IN THE PREVIEW
     new, unchanged (identical to what is stored), correction (differs from the stored result: needs correction_reason),
     duplicate (the same wearer and round twice in the sheet), ambiguous (unknown wearer or round, or no start marker),
     invalid (bad values). Only new and complete corrections are applied; everything else is listed and skipped.
-Exit codes: 0 nothing refused, 1 some rows need attention (listed), 2 invalid file, 3 engine unreachable.
+Exit codes: 0 nothing refused, 1 some rows need attention (listed), 2 invalid file or the recording is already stopped
+(apply the sheet before Stop; nothing is stored then), 3 engine unreachable.
 """
 
 from __future__ import annotations
@@ -186,6 +187,13 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
         if args.cmd == "validate":
             out(f"{len(todo)} to apply, {len(attention)} need attention, {sum(1 for it in items if it['status'] == 'unchanged')} unchanged (nothing was stored)")
             return 1 if attention else 0
+        rec = c.get(f"{e}/recordings/{rid}").json()
+        if rec.get("stopped_at") and todo:
+            out(f"REFUSED: recording {rid} was stopped at {rec['stopped_at']}; a stopped recording takes no new results "
+                "(the engine refuses entries after Stop, and this tool never reopens a recording or back-dates a result). "
+                f"{len(todo)} row(s) were NOT stored: keep this sheet with the export, and list them as missing in the session "
+                "verification (scripts/session_verify.py). Next time apply the sheet BEFORE pressing Stop.")
+            return 2
         stored = 0
         for it in todo:
             tok = "timing-" + hashlib.sha256(json.dumps([rid, it["body"]], sort_keys=True).encode()).hexdigest()[:32]

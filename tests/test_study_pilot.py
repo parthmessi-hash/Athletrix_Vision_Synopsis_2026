@@ -654,3 +654,87 @@ def test_display_trend_trimming_matches_the_full_score_for_other_window_lengths(
     assert compared >= 45
     avail = {k: sum(1 for pt in v["trend"] if pt[k] is not None) for k in ("vest_only", "camera_only", "combined")}
     assert sum(avail.values()) >= 10, ("the comparison must include available values", avail)
+
+
+def test_end_of_session_stop_late_inputs_timing_after_stop_and_post_session_verification(pilot, tmp_path, monkeypatch):
+    """The end of a session: a reading measured before Stop but arriving after it is NOT stored in the recording; a
+    timing sheet applied after Stop is refused as a whole (nothing stored, nothing back-dated); the post-session
+    verification (scripts/session_verify.py) reports the recording and frozen profile, every round with what it has,
+    flags the incomplete round and a short evidence tail, reproduces on a fresh copy, keeps the original export, and a
+    report failure after export keeps every earlier file and --resume finishes it."""
+    import hashlib as _h  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+    if str(ROOT / "scripts") not in _sys.path:
+        _sys.path.insert(0, str(ROOT / "scripts"))
+    import session_verify  # noqa: PLC0415
+    import sprint_timing  # noqa: PLC0415
+    c, sim, rid, m0, st = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"]
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    sv = entry(c, rid, kind="score_save", client_token="endsess-save-1", athlete_id="x1", round=1)
+    st["now"] += timedelta(seconds=1)   # the operator reads the confirmation (a start at the very same engine instant: see the checklist)
+    entry(c, rid, kind="sprint_start", client_token="endsess-sprint-1", athlete_id="x1", round=1, confirms_prediction_id=sv["id"])
+    sim.run(st["now"] + timedelta(seconds=5), "x1", "strap-A", v=lambda s: 7.5, t0=m0)
+    entry(c, rid, kind="sprint_end", client_token="endsess-end-1", athlete_id="x1", round=1)
+    entry(c, rid, kind="round_end", client_token="endsess-rend-1", athlete_id="x1", round=1)
+    entry(c, rid, kind="sprint_result", client_token="endsess-res-1", athlete_id="x1", round=1, time_s=3.3, method="timing_gates")
+    # round 2: the sprint is started, the result never arrives before Stop
+    entry(c, rid, kind="round_start", client_token="endsess-r2", athlete_id="x1", round=2)
+    sim.run(st["now"] + timedelta(seconds=40), "x1", "strap-A", t0=m0)
+    sv2 = entry(c, rid, kind="score_save", client_token="endsess-save-2", athlete_id="x1", round=2)
+    st["now"] += timedelta(seconds=1)
+    entry(c, rid, kind="sprint_start", client_token="endsess-sprint-2", athlete_id="x1", round=2, confirms_prediction_id=sv2["id"])
+    sim.run(st["now"] + timedelta(seconds=20), "x1", "strap-A", t0=m0)
+    last_stored = st["now"]
+    st["now"] += timedelta(seconds=15)          # nothing arrives for 15 s, then Stop
+    stop_at = st["now"]
+    c.post(f"{API}/recordings/{rid}/stop")
+    st["now"] += timedelta(seconds=1)
+    assert c.post(f"{API}/samples/physiological", json=hr_body("x1", stop_at - timedelta(seconds=0.5), 150, "strap-A")).status_code == 200
+    # the timer applies the sheet after Stop: refused, nothing stored
+    lines = []
+    sheet = tmp_path / "times.csv"
+    assert sprint_timing.main(["--engine", "http://testserver", "--recording", rid, "sheet", "--out", str(sheet)], out=lines.append, client=c) == 0
+    import csv as _csv  # noqa: PLC0415
+    rows = list(_csv.DictReader(open(sheet)))
+    for r in rows:
+        if r["round"] == "2":
+            r.update(method="timing_gates", time_s="3.4", timer="FICTIONAL timer")
+    with open(sheet, "w", newline="") as fh:
+        w = _csv.DictWriter(fh, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+    lines.clear()
+    assert sprint_timing.main(["--engine", "http://testserver", "--recording", rid, "apply", str(sheet), "--yes"], out=lines.append, client=c) == 2
+    assert any(x.startswith("REFUSED: recording") and "NOT stored" in x for x in lines)
+    pkg_bytes = c.get(f"{API}/recordings/{rid}/package.zip").content
+    pkg = read_package(pkg_bytes)
+    assert not any(e.kind == "sprint_result" and e.round == 2 for e in pkg.study)
+    phys = pkg.samples["x1"]["physiological"]
+    assert max(s.timestamp for s in phys) <= last_stored and not any(s.timestamp == stop_at - timedelta(seconds=0.5) for s in phys), "the late reading is not in the recording"
+    src = tmp_path / "day1.zip"
+    src.write_bytes(pkg_bytes)
+    # verification with a report failure after export, then resume
+    monkeypatch.setenv("ATHLETRIX_VERIFY_FAIL_REPORT", "1")
+    out_dir = tmp_path / "verify"
+    lines.clear()
+    assert session_verify.main(["--package", str(src), "--out", str(out_dir), "--expect-rounds", "P1:2", "--end-margin-s", "10"], out=lines.append) == 2
+    for s in ("saved", "summary", "evidence", "rounds", "reproduce"):
+        assert json.loads((out_dir / f"{s}.json").read_text())["status"] == "ok", s
+    assert json.loads((out_dir / "report.json").read_text())["status"] == "failed"
+    assert any("rerun the failed steps" in x for x in lines)
+    assert _h.sha256(src.read_bytes()).hexdigest() == json.loads((out_dir / "saved.json").read_text())["sha256"], "the original export is untouched"
+    monkeypatch.delenv("ATHLETRIX_VERIFY_FAIL_REPORT")
+    lines.clear()
+    assert session_verify.main(["--resume", str(out_dir)], out=lines.append) == 1, lines
+    v = json.loads((out_dir / "verdict.json").read_text())
+    assert v["verdict"] == "INCOMPLETE" and not v["failed_or_missing_steps"]
+    assert any("round 2: sprint started but no independent result" in r for r in v["reasons"]), v["reasons"]
+    assert any(r.startswith("P1 round 2:") and "round never ended" in r for r in v["reasons"]), v["reasons"]
+    assert any("physiological: last sample 15.0 s before Stop" in r for r in v["reasons"]), (v["reasons"], json.loads((out_dir / "evidence.json").read_text()))
+    summ = json.loads((out_dir / "summary.json").read_text())
+    assert summ["recording"]["id"] == rid and summ["session"]["profile"]["sha256"] and summ["session"]["fictional"]
+    rounds = {r["round"]: r for r in json.loads((out_dir / "rounds.json").read_text())["rounds"] if r["participant"] == "P1"}
+    assert rounds[1]["result"] == {"time_s": 3.3, "method": "timing_gates"} and not rounds[1]["incomplete"]
+    assert rounds[2]["prediction"] and rounds[2]["result"] is None
+    rep = json.loads((out_dir / "reproduce.json").read_text())
+    assert rep["all_reproduced"] and rep["predictions"] >= 2, rep
+    assert (out_dir / "report" / "report.md").exists() and (out_dir / "export" / "day1.zip").read_bytes() == pkg_bytes
+    assert lines[-1 - len(v["reasons"])].startswith("VERDICT: INCOMPLETE")

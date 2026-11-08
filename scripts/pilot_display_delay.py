@@ -55,10 +55,31 @@ def proxy(args, out) -> int:
             self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
             self.end_headers()
 
+        def _control(self, body: bytes | None):
+            """Guided display check (scripts/display_check.py): POST /__start records the page's start request; GET
+            /__status returns the run's phase, written by display_check.py."""
+            ctl = Path(args.control)
+            if self.command == "POST" and self.path == "/__start" and body is not None:
+                (ctl / "start.json").write_bytes(body)
+            payload = b"{}"
+            if self.path == "/__status" and (ctl / "status.json").exists():
+                payload = (ctl / "status.json").read_bytes()
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def _go(self):
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) if self.command in ("POST", "PUT") else None
             if args.sink and self.path == "/__display_log":
                 return self._sink(body)
+            if getattr(args, "control", None) and self.path in ("/__start", "/__status"):
+                return self._control(body)
             hdrs = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
             r = client.request(self.command, args.engine.rstrip("/") + self.path, headers=hdrs, content=body)
             if args.path_contains in self.path and self.command == "GET":
@@ -155,6 +176,7 @@ def main(argv=None, out=print) -> int:
     p = sub.add_parser("proxy"); p.add_argument("--engine", required=True); p.add_argument("--port", type=int, required=True)
     p.add_argument("--slow-every", type=int, default=0); p.add_argument("--slow-s", type=float, default=2.5); p.add_argument("--path-contains", default="/study/pilot")
     p.add_argument("--sink", help="write a POST to /__display_log (the browser's display log) to this local file")
+    p.add_argument("--control", help="folder for the guided display check's start and status files (scripts/display_check.py)")
     a = sub.add_parser("analyze"); a.add_argument("--display", type=Path, required=True); a.add_argument("--tail-s", type=float, default=5.0)
     g = a.add_mutually_exclusive_group(required=True); g.add_argument("--database", type=Path); g.add_argument("--package", type=Path, help="receipts from an exported recording package instead")
     args = ap.parse_args(argv)

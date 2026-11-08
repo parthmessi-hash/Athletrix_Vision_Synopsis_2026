@@ -4,6 +4,48 @@ One vest, one fixed camera, one offline laptop. Every command here was run in a 
 `docs/fatigue-pilot-checklist.md`). Nothing here shows field accuracy or fatigue detection. The pilot gives no
 substitution or safety advice; the coach decides.
 
+## Routes: pick one, follow it, stop where it says
+
+**O** = operator (laptop), **T** = independent timer (never sees scores). Commands run in the backend folder.
+
+### Route A: fictional demo, today (no hardware, no participant)
+1. O: `.venv/bin/python scripts/demo_launcher.py --session pilot --keep-output demo-output`, open the printed address,
+   click **Live Demo** (section 0 below).
+2. O: `.venv/bin/python scripts/session_verify.py --package demo-output/pilot-package.zip --out demo-verify`
+- Success: the launcher ends with "reproduced in a fresh database: True"; the verification prints VERDICT COMPLETE
+  with 9 rounds, 7 eligible, and the deliberately missed save (P2 round 1) and invalid round (P1 round 3) listed as
+  excluded with their reasons (checked 2026-11-09 on a launcher export).
+- Stop and investigate if: the card says "could not be read" for more than a few seconds (engine not running), or the
+  verification shows a prediction that does not reproduce.
+- Optional display check (you at the laptop, Chrome in front): `.venv/bin/python scripts/display_check.py --out display-1`
+  (section 5d). Only a COMPLETE result counts as a display measurement.
+
+### Route B: camera bench check (permitted camera position or permitted clip; no participant, no wearable)
+1. O: `.venv/bin/python scripts/camera_field_check.py template --out FIELD/`; fill in FIELD/points.json from the tape
+   (at least 4 fit points and 2 separate check points) and the camera settings as they are now (zoom, focus, mount).
+2. O: `.venv/bin/python scripts/camera_field_check.py fit --points FIELD/points.json --out FIELD/calibration.json`
+3. O: `.venv/bin/python scripts/camera_field_check.py bench --points FIELD/points.json --calibration FIELD/calibration.json --now-settings FIELD/now.json --max-check-error-m TOL --out FIELD/bench [--clip CLIP] [--model models/yolox_tiny.onnx --config scripts/examples/camera/video_tracking_config_tiny.json]`
+- Success: three separate answers: **source** PASS (the clip is readable at the calibrated resolution), **geometry**
+  PASS (every check point within the team's tolerance TOL, camera unchanged), **tracking** EXERCISED only if a clip
+  with people was given. A board or an empty field gives geometry only: "NOT EXERCISED" or "NO PERSON FOUND" for
+  tracking is expected and is not a failure of the geometry.
+- Stop and investigate if: geometry FAIL names a check point (re-measure that point or the fit points) or a changed
+  setting (recalibrate); source FAIL (wrong resolution or unreadable file).
+- To see what a failure looks like first: `.venv/bin/python scripts/camera_field_check.py bench-example --out bench-example`.
+- Then, with a permitted clip of the course: section 2b (tracking, assignment, interval timing).
+
+### Route C: controlled pilot (only when hardware, permission, manifest and study choices are in place)
+1. O: the checks of section 1 (field check: "controlled pilot" must say yes), the session, then each round as in
+   section 2; T: the timing sheet as in section 3.
+2. End of session in this order (section 3b): last samples in -> T applies the sheet -> O ends the round -> O stops.
+3. O: export, then `.venv/bin/python scripts/session_verify.py --package day1.zip --out day1-verify --manifest MANIFEST.json --expect-rounds P1:3,P2:3`
+- Success: VERDICT COMPLETE, or INCOMPLETE with every reason understood and written in the session notes.
+- Stop and investigate if: a round shows "sprint started but no independent result" (the timer's sheet was not applied
+  before Stop), the last samples end well before Stop, or a prediction does not reproduce.
+- Stopping point: route C needs the approved procedure and permissions, a permitted camera setup with a passed bench
+  check, an independent timing reference, the frozen profile and manifest, and a confirmed wearable (Zephyr access is
+  unconfirmed). Without them, stay on routes A and B.
+
 ## 0. Rehearse first (one command, fictional)
 
 ```bash
@@ -82,8 +124,8 @@ Only with a permitted camera position and a permitted clip. Every step below was
    kept for audit and never produces samples), then
    `python scripts/camera_to_samples.py export OBS.jsonl --calibration FIELD/report/calibration.json --config ADAPTER.json --assignments ASSIGN.json --anchor-utc ISO --out samples.jsonl --log adapter.json`
    (ADAPTER.json: start from `scripts/examples/camera/adapter_config_example.json` and set `"source": "camera"`; the
-   calibration file comes from running step 4 once, or from `scripts/camera_calibrate.py fit FIELD/points.json --out CAL.json`).
-4. **Check.** `python scripts/camera_field_check.py run --points FIELD/points.json --course FIELD/course.json --samples samples.jsonl --athlete ID --out FIELD/report --now-settings NOW.json`
+   calibration file is the one fitted in route B step 2: `camera_field_check.py fit --points FIELD/points.json --out FIELD/calibration.json`).
+4. **Check.** `python scripts/camera_field_check.py run --points FIELD/points.json --calibration FIELD/calibration.json --course FIELD/course.json --samples samples.jsonl --athlete ID --out FIELD/report --now-settings NOW.json`
    (NOW.json: the camera settings as they are at that moment). Read, in this order:
    - each **check point's error in metres** (the only independent accuracy figure, and only at those points);
    - the **usable field region** (outside the measured marks, positions are extrapolated and left out);
@@ -113,12 +155,34 @@ Only with a permitted camera position and a permitted clip. Every step below was
    add `correction_reason`; the original stays in the history. A clip that is missing or unreadable stays missing.
    Clips stay on this laptop; only their checksums are recorded.
 
+## 3b. Ending the session (order matters; verified in the code 2026-11-09)
+
+What the engine does at Stop:
+- A reading that arrives **after** Stop is accepted by the live view but **not stored in the recording**, even if it was
+  measured before Stop. So wait until the last expected samples have arrived (the card's freshness shows them).
+- A study entry (result, rating, note, round end) after Stop is **refused** unless dated inside the recording, and
+  `sprint_timing.py apply` refuses a stopped recording as a whole (nothing stored, nothing back-dated). A stopped
+  recording is never reopened.
+
+Order:
+1. O: after the last sprint, wait until the card shows both streams' newest samples after the sprint end.
+2. T: apply the timing sheet (`sprint_timing.py validate`, then `apply`); O confirms "stored N result(s)".
+3. O: `round-end` for the last round (or `--invalid "reason"`).
+4. O: Stop (`sideline_session.py stop` or the dashboard).
+5. O: export and verify (section 4). A result that arrives too late cannot be added: keep the timer's sheet with the
+   export and let the verification list the round as missing.
+
 ## 4. After the session
 
-1. `python scripts/sideline_session.py stop`, then export the package (dashboard, or `GET /api/v1/recordings/{id}/package.zip`).
-2. Report: `python scripts/evaluate.py pilot --packages day1.zip --manifest MANIFEST.json --out report-day1`.
-   Each row traces to its saved prediction, start marker, result and its corrections, invalidation and frozen profile.
-   Each participant-session's best reference names its round and result.
+1. O: export: `curl -o day1.zip http://127.0.0.1:8000/api/v1/recordings/REC_ID/package.zip` (or the dashboard). Keep the
+   export outside any launcher temporary folder.
+2. O: `.venv/bin/python scripts/session_verify.py --package day1.zip --out day1-verify --manifest MANIFEST.json --expect-rounds P1:3,P2:3`
+   It copies the export into day1-verify/export/ (checksum checked; the original is not touched) and saves, step by
+   step: which recording and frozen profile were exported; each participant's last sample against Stop; every round
+   with its prediction, independent result or missing/invalid reason, timing evidence and eligibility or exclusion
+   reason; reproduction of every saved prediction on a fresh copy; and the report (day1-verify/report/report.md).
+   VERDICT: COMPLETE, INCOMPLETE (each reason listed) or STEP FAILED (earlier files kept; rerun with
+   `session_verify.py --resume day1-verify`).
 3. Removal (`scripts/local_data.py remove-athlete ID --execute --confirm ID`) deletes this laptop's copy only. Packages
    already exported are not touched.
 
@@ -168,21 +232,20 @@ up to 3x in our measurements).
    clip. Then the integrated check with the chosen setting:
    `.venv/bin/python scripts/video_pilot_check.py --out camera-work/check --setting field-rehearsal`
    (`--setting baseline` keeps the current YOLOX-S, every-frame setting.)
-3. **Display delay** (foreground browser): start the timing proxy
-   `python scripts/pilot_display_delay.py proxy --engine http://127.0.0.1:PORT --port 3919 --sink display.json`,
-   serve a dashboard copy whose `ATHLETRIX_CONFIG.apiBase` is `http://127.0.0.1:3919`, keep the display awake for this
-   run only with `caffeinate -d -w RUN_PID`, keep the Chrome window in front and uncovered, and add a paint heartbeat in
-   the page console before the run:
-   `window.__beats=[];let l=0;(function f(){const n=Date.now();if(n-l>=250){__beats.push(n);l=n}requestAnimationFrame(f)})()`
-   At the end, post `{"display": window.__athletrixPilotDisplay, "painted": window.__beats}` to
-   `http://127.0.0.1:3919/__display_log`, then
-   `python scripts/pilot_display_delay.py analyze --display display.json --package EXPORT.zip`.
-   Only samples received and displayed while the page was drawing frames count; the rest are "not observable". A
-   covered Chrome window draws nothing even with the display awake: on 2026-11-08 only 61 s of a 31-minute run were
-   visible, and two shorter attempts had about 20 s and none, so no display measurement exists yet. Someone must keep
-   Chrome in front for the whole run. A short integrated version with paced video:
-   `.venv/bin/python scripts/video_pilot_check.py --out camera-work/visible --setting field-rehearsal --reconfirm-delay-s 6 --wearable-dropout 13:17 --engine-port 3932 --cors-origin http://127.0.0.1:3918 --hold-s 120 --keep-package`
-   with the proxy pointed at port 3932 and `analyze --display display.json --package camera-work/visible/pilot-package.zip`.
+3. **Display delay** (you at the laptop; about 5 minutes):
+   `.venv/bin/python scripts/display_check.py --out display-1`
+   Wait for "OPEN IN CHROME: http://127.0.0.1:PORT/index.html#demo", open it in Chrome, bring the window to the front
+   with nothing covering it, wait until the yellow banner says "Chrome is drawing", then click **START**. Leave the
+   window in front for the 3-minute recording (the banner turns green while recording, blue when done). The terminal
+   prints the result; display-1/ keeps report.md, trace.json, pilot-package.zip and api_latency.json either way.
+   - COMPLETE needs frames drawn for at least 90 % of the recording. Otherwise INCOMPLETE: the visible time is shown,
+     and samples received while the window was dark count as unobserved and stay in the "of all samples" figure.
+   - Longer run: `--duration-s 1800`. If the display might sleep, start it as
+     `caffeinate -d .venv/bin/python scripts/display_check.py --out display-30 --duration-s 1800` (keeps the display
+     awake only while the command runs; no setting is changed).
+   - API time is measured separately (api_latency.json) and is not part of the display figure.
+   - Status: tested with generated traces and a scripted browser; one real 60 s attempt on 2026-11-09 was INCOMPLETE
+     (Chrome drew for 19.8 of 60 s; 18 of 54 samples measured, all within 2 s). No COMPLETE display measurement exists yet.
 
 **Camera setting for a permitted field rehearsal: `field-rehearsal` (YOLOX-Tiny 416, every other frame).** On this
 laptop it was the only setting that kept up with a 25 fps feed with headroom (0 frames dropped, lag p95 0.04 s); the
@@ -190,6 +253,26 @@ cost is coarser positions on the generated clip (median about 7 cm instead of 1.
 heavier tail for the far figure) and a slightly longer identity gap at one encounter. For recorded review afterwards,
 keep `baseline` (YOLOX-S, every frame), which is the most precise but runs at about 10 frames/s. Neither figure says
 anything about accuracy on a real field: that needs the permitted setup of section 2b and an independent reference.
+
+When to use which: try `field-rehearsal` when samples must reach the dashboard during the session (live-style); use
+recorded review (`baseline`, every frame, after the session) when positions matter more than latency. Generated-clip
+evidence only: `field-rehearsal` processed 12.5 frames/s with no unplanned drops in that test; its position error was
+higher at distance (far figure p95 about 0.4 m). Before using it for study data, the team must measure with the real
+setup: check-point errors over the area used, tracked share of the course with real players, identity losses per
+session, interval times against an independent reference, and frames dropped on the sideline laptop itself.
+
+## 5e. Evidence for the science fair: what is shown and what is not
+
+| Claim | Shown in software (fictional or generated inputs) | Supporting artifact or test | Still unmeasured |
+|---|---|---|---|
+| A score is saved before each timed sprint and can be reproduced later | yes: 57/57 and 24/24 saved predictions reproduced on fresh copies; equivalence with the original code after the speed-up | checklist "90-minute run", "Performance batch"; tests/test_study_pilot.py | nothing further in software |
+| The sideline laptop can ingest a long session | 90.1-minute FICTIONAL ingest, 0 failed requests | checklist "90-minute wall-clock run" | real wearable and camera streams |
+| The dashboard stays responsive late in a session | late request about 430 ms (was about 3.6 s) on a long-history benchmark | checklist "Performance batch"; scripts/pilot_view_benchmark.py | display delay on screen: no COMPLETE measurement yet |
+| Rounds cannot start silently without data; sessions end with a verified record | readiness refusals, partial starts with reasons, post-session verification | tests/test_study_pilot.py; scripts/session_verify.py | an operator using it on a real session |
+| The camera software path works | YOLOX + ByteTrack + calibration on a GENERATED clip; gaps and uncertain identity never invent data | camera_settings_compare.py, video_pilot_check.py outputs | person tracking and accuracy with real people and a real camera |
+| Positions and interval speeds are accurate on a field | only on synthetic geometry | camera_field_check.py synthetic and bench-example | check-point errors, interval timing and peak speed on a permitted field with an independent reference |
+| The fatigue estimate tracks fatigue | NOT shown: all scores so far come from fictional data | — | the controlled pilot (route C) and its analysis |
+| It helps substitution decisions | NOT shown and not claimed; the pilot gives no substitution advice | — | out of scope of the pilot |
 
 ## 6. Still needed before the real pilot
 

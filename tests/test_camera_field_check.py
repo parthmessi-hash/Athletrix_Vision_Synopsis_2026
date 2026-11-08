@@ -55,3 +55,53 @@ def test_template_and_invalid_course(tmp_path):
     lines = []
     assert cfc.main(["run", "--points", str(tmp_path / "t" / "points.json"), "--course", str(tmp_path / "c.json"), "--samples", str(tmp_path / "s.jsonl"),
                      "--athlete", "x", "--out", str(tmp_path / "o")], out=lines.append) == 2 and lines[0].startswith("INVALID INPUT")
+
+
+def test_bench_sequence_template_fit_check_and_report_without_a_detector(tmp_path):
+    """The camera bench sequence in order, with NO detector model: template -> the operator fills in the measured
+    values -> fit (no report needed first) -> bench (geometry only) -> course check using that fitted calibration.
+    A wrong check point and a changed zoom fail; person tracking is reported as NOT EXERCISED, never as passed."""
+    from camera_adapter import synthetic_people as sp
+    from camera_adapter.evaluation import PEOPLE_CHECK_MARKS, PEOPLE_FIT_MARKS
+    lines = []
+    f = tmp_path / "FIELD"
+    assert cfc.main(["template", "--out", str(f)], out=lines.append) == 0
+    pts = json.loads((f / "points.json").read_text())
+    assert cfc.main(["fit", "--points", str(f / "points.json"), "--out", str(f / "cal.json")], out=lines.append) == 2 and "ENTER placeholders" in lines[-1]
+    cam = sp.Camera3()
+    mark = lambda x, y: {"label": f"mark ({x}, {y})", "image": [round(v) for v in cam.project(x, y)], "field": [x, y]}  # noqa: E731
+    settings = {"camera_id": "bench-cam", "zoom": "wide end", "focus": "manual 12 m", "mount": "tripod A"}
+    pts.update(camera_id="bench-cam", image={"width": sp.WIDTH, "height": sp.HEIGHT}, camera_settings=settings,
+               fit_points=[mark(*m) for m in PEOPLE_FIT_MARKS], check_points=[mark(*m) for m in PEOPLE_CHECK_MARKS])
+    (f / "points.json").write_text(json.dumps(pts))
+    (f / "now.json").write_text(json.dumps(settings))
+    assert cfc.main(["fit", "--points", str(f / "points.json"), "--out", str(f / "cal.json")], out=lines.append) == 0 and "check points mark (12, 7)" in lines[-1]
+    assert cfc.main(["bench", "--points", str(f / "points.json"), "--calibration", str(f / "cal.json"), "--now-settings", str(f / "now.json"),
+                     "--max-check-error-m", "0.25", "--out", str(f / "bench")], out=lines.append) == 0
+    b = json.loads((f / "bench" / "bench.json").read_text())
+    assert b["geometry"]["verdict"] == "PASS" and b["source"]["verdict"] == "NOT CHECKED" and b["tracking"]["verdict"] == "NOT EXERCISED"
+    assert "nothing about person detection or tracking was tested" in b["tracking"]["why"]
+    # no tolerance stated: reported, not passed
+    assert cfc.main(["bench", "--points", str(f / "points.json"), "--calibration", str(f / "cal.json"), "--out", str(f / "bench-nolimit")], out=lines.append) == 0
+    assert json.loads((f / "bench-nolimit" / "bench.json").read_text())["geometry"]["verdict"] == "REPORTED"
+    # the course check uses the fitted calibration; a calibration from other points is refused
+    samples(tmp_path / "s.jsonl")
+    (f / "course.json").write_text(json.dumps({"format": "athletrix-course", "format_version": 1, "axis": "x", "lane": {"y_min": 2.0, "y_max": 4.0},
+                                               "marks": [{"label": "6 m", "at": 6.0}, {"label": "12 m", "at": 12.0}], "max_gap_s": 0.35}))
+    assert cfc.main(["run", "--points", str(f / "points.json"), "--calibration", str(f / "cal.json"), "--course", str(f / "course.json"), "--samples", str(tmp_path / "s.jsonl"),
+                     "--athlete", "vx1", "--now-settings", str(f / "now.json"), "--out", str(f / "report")], out=lines.append) == 0
+    assert json.loads((f / "report" / "report.json").read_text())["intervals"][0]["average_speed_mps"] > 3
+    other = dict(pts, fit_points=pts["fit_points"][:-1] + [mark(24, 13)])
+    (f / "other.json").write_text(json.dumps(other))
+    assert cfc.main(["run", "--points", str(f / "other.json"), "--calibration", str(f / "cal.json"), "--course", str(f / "course.json"), "--samples", str(tmp_path / "s.jsonl"),
+                     "--athlete", "vx1", "--out", str(f / "report2")], out=lines.append) == 2 and "was not fitted from" in lines[-1]
+
+
+def test_bench_example_shows_a_failed_check(tmp_path):
+    lines = []
+    assert cfc.main(["bench-example", "--out", str(tmp_path / "ex")], out=lines.append) == 0, lines
+    ex = json.loads((tmp_path / "ex" / "examples.json").read_text())
+    assert ex["good"]["geometry"] == "PASS" and ex["wrong-check-point"]["geometry"] == "FAIL" and ex["zoom-changed"]["geometry"] == "FAIL"
+    assert all(v["tracking"] == "NOT EXERCISED" for v in ex.values())
+    md = (tmp_path / "ex" / "wrong-check-point" / "bench.md").read_text()
+    assert "INTENTIONALLY WRONG by 0.8 m): 0.79" in md and "3. Person detection and tracking: NOT EXERCISED" in md

@@ -392,13 +392,48 @@ were measurable. The display was awake; the Chrome window was covered. The softw
 run: confirmed track, identity loss (camera stale 7.3-11.5 s), wearable dropout (vest stale 15.6-17.2 s), recovery,
 0 frames dropped, no combined score while a stream was stale.
 
-## Checkpoint for the next session (2026-11-08, after the performance batch)
+## Field-handoff batch (2026-11-09)
 
-Committed and pushed: backend 3137f36, 185b46e, 4ef3f57 and the completion commit after them; frontend unchanged at
-f2faf7f. Do not repeat: the equivalence checks, the alternating benchmark, the camera comparison, the integrated check.
-Needs a person at the laptop:
-1. **Display delay.** Keep Chrome in front and uncovered for 30 minutes (run sheet 5d). Three attempts on 2026-11-08
-   were covered by other windows (61 s, 0 s and about 20 s visible).
-2. On mains power with nothing else open, rerun `scripts/camera_settings_compare.py` once to confirm `field-rehearsal`.
-Decisions: the rules-version-3 proposal (section 1) only if the current estimate's remaining growth matters. Field: run
-sheet sections 2b and 5d with a permitted camera and an independent timing reference.
+1. **Guided display check** (`scripts/display_check.py`): setup and recording are separate. The script prints one
+   address; the page's yellow banner enables START only while Chrome draws at least 30 frames per second; the
+   recording (default 3 minutes; `--duration-s 1800` for a long one) starts on the click. Paint heartbeat, display log,
+   engine export and API latency are saved even when visibility fails. COMPLETE needs frames drawn for at least 90 %
+   of the recording; samples received while the window was dark count as unobserved and stay in the "of all samples"
+   figure. The timing proxy gained start/status endpoints (`--control`). Tests: generated traces (complete, covered,
+   updates stopping while hidden, coalescing) and an end-to-end run with a scripted browser
+   (tests/test_display_check.py). Setup verified with the field-rehearsal processing (250 skipped, 0 dropped). One real
+   attempt (60 s, 2026-11-09 13:51 UTC): the banner and START gating worked in Chrome (55 frames/s at the click), then
+   the window was covered: INCOMPLETE, drawn 19.8 of 60 s, 18 of 54 samples measured (all within 2 s), 35 unobserved,
+   1 not shown although drawing; API p50 16 ms, p95 26 ms. **No COMPLETE display measurement yet: needs you at the
+   laptop.**
+2. **Camera bench check** (`scripts/camera_field_check.py`): `fit` (explicit, refuses ENTER placeholders) removes the
+   circular step; `run --calibration` uses the fitted file and refuses one fitted from other points; `bench` gives three
+   separate answers (source readable / geometry / person tracking exercised), works without OpenCV or the model for
+   geometry, and reports a board or empty field as "NOT EXERCISED" or "NO PERSON FOUND", never as a tracking pass;
+   `bench-example` shows a correct check, an intentionally wrong check point (0.79 m, FAIL) and a zoom change (FAIL).
+   Verified with an empty generated clip and YOLOX-Tiny ("EXERCISED, NO PERSON FOUND") and from a clean checkout.
+3. **End of session** (verified in the code): a reading that arrives after Stop is accepted by the live view but not
+   stored in the recording; study entries after Stop are refused unless dated inside the recording;
+   `sprint_timing.py apply` now refuses a stopped recording as a whole (exit 2, nothing stored or back-dated).
+   `scripts/session_verify.py` (export copy with checksum, summary, evidence tail against Stop, every round with its
+   prediction, result or reason and eligibility, fresh-copy reproduction, report, verdict; `--resume` after a failed
+   step). Tested: normal path (30-minute export: COMPLETE, 24/24 reproduced; launcher export: COMPLETE, 9/9), an
+   incomplete round, readings near Stop, a timing sheet applied after Stop, a report failure after export then resume.
+   Found while testing: a sprint start entered at the very same engine instant as its score save makes reproduction
+   count that sprint mark as known at the cutoff ("inputs_changed"); impossible with a running clock at microsecond
+   resolution and a person reading the confirmation, but recorded here; reproduction logic unchanged in this batch.
+4. **Run sheet**: three routes (A demo, B camera bench, C controlled pilot) with commands, success, stop reasons and
+   operator/timer roles; the end-of-session order (section 3b); session verification (section 4); the guided display
+   check (5d); when to use `field-rehearsal` vs recorded review and what to measure first; the science-fair evidence
+   table (5e).
+
+## Checkpoint for the next session (2026-11-09, after the field-handoff batch)
+
+Done (do not repeat): performance batch, camera comparison, guided display tooling, camera bench tooling, session
+verification. Pushed heads: see git log (backend), frontend f2faf7f unchanged.
+Needs you at the laptop:
+1. `.venv/bin/python scripts/display_check.py --out display-1`, Chrome in front for 3 minutes (run sheet 5d).
+2. On mains power: `.venv/bin/python scripts/camera_settings_compare.py --out camera-work/settings-mains --best tiny-every2`.
+Needs a permitted setup: route B with a real camera position and tape measurements; then 2b with a permitted clip and an
+independent timing reference. Route C waits on approval, the manifest and study choices, and wearable access (Zephyr
+preferred; purchase, licence, hardware and live access unconfirmed).

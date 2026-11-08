@@ -149,6 +149,177 @@ def intervals(samples: list[dict], athlete: str, course: dict, region) -> dict:
     return {"counts": counts, "intervals": rows, "course_tracked": share}
 
 
+def fit_points(pts: dict, out):
+    try:
+        return cal.fit(pts["image"]["width"], pts["image"]["height"], pts["fit_points"], pts.get("check_points"), camera_id=pts.get("camera_id", ""),
+                       camera_settings=pts.get("camera_settings"))
+    except (cal.CalibrationError, KeyError, TypeError) as exc:
+        out("CALIBRATION NOT FITTED: " + "; ".join(getattr(exc, "errors", [str(exc)])))
+        return None
+
+
+def fit_cmd(args, out) -> int:
+    """Step 2 of the bench check: fit the calibration from the measured points (no report needed first)."""
+    if args.out.exists():
+        out(f"REFUSED: {args.out} exists"); return 2
+    try:
+        pts = json.loads(args.points.read_text())
+    except (OSError, ValueError) as exc:
+        out(f"INVALID INPUT: {exc}"); return 2
+    if "ENTER" in json.dumps(pts):
+        out(f"REFUSED: {args.points} still contains ENTER placeholders: fill in every measured value first"); return 2
+    c = fit_points(pts, out)
+    if c is None:
+        return 2
+    c.save(args.out)
+    out(f"wrote {args.out}: fit residual RMS {c.fit_residual_m['rms']:.3f} m (not accuracy); check points " +
+        (", ".join(f"{p['label']} {p['error_m']:.3f} m" for p in c.check_errors_m["per_point"]) if c.check_errors_m else "NONE (accuracy unknown)"))
+    return 0
+
+
+def bench(args, out) -> int:
+    """A camera bench check with NO participant and NO wearable: three separate answers.
+      source     can the local clip be read, at the calibrated resolution (a camera is never opened by this tool)
+      geometry   do the separately measured check points agree with the calibration, and is the camera unchanged
+      tracking   was the person detector and tracker exercised at all; a board or an empty field cannot test it"""
+    d = args.out
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        pts = json.loads(args.points.read_text())
+    except (OSError, ValueError) as exc:
+        out(f"INVALID INPUT: {exc}"); return 2
+    if args.calibration:
+        c = cal.load(args.calibration)
+        cpath = args.calibration
+    else:
+        c = fit_points(pts, out)
+        if c is None:
+            return 2
+        cpath = d / "calibration.json"
+        c.save(cpath)
+    res: dict = {"label": args.label or "bench check", "calibration": str(cpath)}
+    # 1. source
+    if not args.clip:
+        res["source"] = {"verdict": "NOT CHECKED", "why": "no local clip given (this tool never opens a camera)"}
+    else:
+        try:
+            import cv2  # noqa: PLC0415
+            cap = cv2.VideoCapture(str(args.clip))
+            ok, _ = cap.read()
+            n, fps = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), cap.get(cv2.CAP_PROP_FPS)
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+        except ImportError:
+            ok, n, fps, w, h = None, None, None, None, None
+        if ok is None:
+            res["source"] = {"verdict": "NOT CHECKED", "why": "OpenCV is not installed (requirements-video.txt); geometry below does not need it"}
+        elif not ok:
+            res["source"] = {"verdict": "FAIL", "why": f"{args.clip} could not be decoded"}
+        else:
+            same = [w, h] == [c.width, c.height]
+            res["source"] = {"verdict": "PASS" if same else "FAIL", "frames": n, "fps": round(fps, 3), "resolution": [w, h],
+                             "why": None if same else f"clip is {w}x{h}, the calibration is {c.width}x{c.height}"}
+    # 2. geometry
+    now = json.loads(args.now_settings.read_text()) if args.now_settings else None
+    comp = compatibility(inspect_calibration(Path(cpath)), {"width": pts["image"]["width"], "height": pts["image"]["height"],
+                                                             "camera_id": (now or {}).get("camera_id"), "camera_settings": now})
+    blocks = [x["text"] for x in comp if x["level"] == "block"]
+    per = (c.check_errors_m or {}).get("per_point", [])
+    too_far = [p for p in per if args.max_check_error_m is not None and p["error_m"] > args.max_check_error_m]
+    if not per:
+        g = "FAIL"
+        why = ["no check points: geometry cannot be checked"]
+    elif blocks or too_far:
+        g = "FAIL"
+        why = blocks + [f"check point {p['label']}: {p['error_m']:.3f} m (limit {args.max_check_error_m:g} m): re-measure it or the marks used for fitting" for p in too_far]
+    elif args.max_check_error_m is None:
+        g, why = "REPORTED", ["no tolerance stated (--max-check-error-m): the team decides what error is acceptable"]
+    else:
+        g, why = "PASS", []
+    x0, y0, x1, y1 = c.field_bounds()
+    res["geometry"] = {"verdict": g, "why": why, "check_points_m": [{"label": p["label"], "error_m": round(p["error_m"], 3)} for p in per],
+                       "fit_residual_rms_m": round(c.fit_residual_m["rms"], 3), "usable_region_m": {"x": [x0, x1], "y": [y0, y1]},
+                       "compatibility_now": comp, "tolerance_m": args.max_check_error_m}
+    # 3. person detection and tracking
+    if not args.clip or not args.model:
+        res["tracking"] = {"verdict": "NOT EXERCISED", "why": "no clip and model given: nothing about person detection or tracking was tested"}
+    elif not Path(args.model).is_file():
+        res["tracking"] = {"verdict": "NOT EXERCISED", "why": f"model {args.model} is not on this laptop (it is never downloaded)"}
+    else:
+        import subprocess  # noqa: PLC0415
+        cmd = [sys.executable, str(ROOT / "scripts" / "camera_track_video.py"), str(args.clip), "--model", str(args.model), "--out", str(d / "obs.jsonl"),
+               "--log", str(d / "track.json")] + (["--config", str(args.config)] if args.config else []) + (["--max-frames", str(args.max_frames)] if args.max_frames else [])
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+        if r.returncode != 0:
+            res["tracking"] = {"verdict": "FAIL", "why": "tracking did not run: " + (r.stdout + r.stderr).strip().splitlines()[-1][:300]}
+        else:
+            log = json.loads((d / "track.json").read_text())
+            n_tracks = len(log.get("tracks") or {})
+            res["tracking"] = {"verdict": "EXERCISED" if n_tracks else "EXERCISED, NO PERSON FOUND", "tracks": n_tracks, "detections": log.get("detections"),
+                               "frames_per_second": (log.get("speed") or {}).get("frames_per_second"),
+                               "why": ("person tracks were produced; identities and positional accuracy are NOT checked here" if n_tracks else
+                                       "the detector ran but saw nobody: a board or an empty field says nothing about player tracking")}
+    (d / "bench.json").write_text(json.dumps(res, indent=1, default=str))
+    L = [f"# Camera bench check ({res['label']})", "", "Three separate answers; none of them is a person-tracking or field-accuracy result unless it says so.", ""]
+    for k, title in (("source", "1. Source readable"), ("geometry", "2. Calibration geometry"), ("tracking", "3. Person detection and tracking")):
+        x = res[k]
+        L.append(f"**{title}: {x['verdict']}**" + (f" - {'; '.join(x['why'])}" if isinstance(x.get("why"), list) and x["why"] else (f" - {x['why']}" if isinstance(x.get("why"), str) else "")))
+        if k == "geometry":
+            L += [f"- check point {p['label']}: {p['error_m']} m" for p in x["check_points_m"]] + [f"- {y['level'].upper()}: {y['text']}" for y in x["compatibility_now"]]
+        L.append("")
+    (d / "bench.md").write_text("\n".join(L))
+    for line in L:
+        out(line)
+    return 1 if "FAIL" in (res["source"]["verdict"], res["geometry"]["verdict"], res["tracking"]["verdict"]) else 0
+
+
+def bench_example(args, out) -> int:
+    """The bench check on SYNTHETIC geometry: a correct measurement, one intentionally wrong check point, and a zoom
+    change after calibration, so the operator sees what a failed check looks like. Optional: an EMPTY generated clip
+    (field colour only) to show that a detector that sees nobody tells nothing about player tracking."""
+    from camera_adapter import synthetic_people as sp  # noqa: PLC0415
+    from camera_adapter.evaluation import PEOPLE_CHECK_MARKS, PEOPLE_FIT_MARKS  # noqa: PLC0415
+    d = args.out
+    d.mkdir(parents=True, exist_ok=True)
+    cam = sp.Camera3()
+    mark = lambda x, y, dx=0.0: {"label": f"mark ({x}, {y})", "image": [round(v) for v in cam.project(x + dx, y)], "field": [x, y]}  # noqa: E731
+    settings = {"camera_id": "synthetic-people-camera", "zoom": "wide end", "focus": "manual 12 m", "mount": "tripod A, 4 m behind the near line"}
+    base = {"format": "athletrix-calibration-points", "format_version": 1, "camera_id": "synthetic-people-camera", "image": {"width": sp.WIDTH, "height": sp.HEIGHT},
+            "camera_settings": settings, "fit_points": [mark(*m) for m in PEOPLE_FIT_MARKS]}
+    (d / "points-good.json").write_text(json.dumps({**base, "check_points": [mark(*m) for m in PEOPLE_CHECK_MARKS]}, indent=1))
+    bad = [mark(*m) for m in PEOPLE_CHECK_MARKS]
+    bad[1] = mark(*PEOPLE_CHECK_MARKS[1], dx=0.8)   # the pixel was read 0.8 m off along x: an intentionally wrong check point
+    bad[1]["label"] += " (INTENTIONALLY WRONG by 0.8 m)"
+    (d / "points-wrong-check.json").write_text(json.dumps({**base, "check_points": bad}, indent=1))
+    (d / "now-same.json").write_text(json.dumps(settings))
+    (d / "now-zoomed.json").write_text(json.dumps({**settings, "zoom": "2x"}))
+    clip_args = []
+    if args.with_clip:
+        try:
+            import cv2  # noqa: PLC0415
+            import numpy as np  # noqa: PLC0415
+            wr = cv2.VideoWriter(str(d / "empty-field.avi"), cv2.VideoWriter_fourcc(*"MJPG"), 25.0, (sp.WIDTH, sp.HEIGHT))
+            for _ in range(50):
+                wr.write(np.full((sp.HEIGHT, sp.WIDTH, 3), (55, 115, 55), np.uint8))
+            wr.release()
+            clip_args = ["--clip", str(d / "empty-field.avi")] + (["--model", str(args.model), "--config", str(ROOT / "scripts/examples/camera/video_tracking_config_tiny.json")]
+                                                                  if args.model else [])
+        except ImportError:
+            out("OpenCV not installed: the clip part is skipped; geometry does not need it")
+    res = {}
+    for tag, pts, now in (("good", "points-good.json", "now-same.json"), ("wrong-check-point", "points-wrong-check.json", "now-same.json"),
+                          ("zoom-changed", "points-good.json", "now-zoomed.json")):
+        lines: list = []
+        code = main(["bench", "--points", str(d / pts), "--now-settings", str(d / now), "--max-check-error-m", str(args.max_check_error_m), "--out", str(d / tag),
+                     "--label", f"SYNTHETIC example: {tag}"] + clip_args, out=lines.append)
+        res[tag] = {"exit": code, **{k: json.loads((d / tag / "bench.json").read_text())[k]["verdict"] for k in ("source", "geometry", "tracking")}}
+        out(f"{tag}: exit {code} · source {res[tag]['source']} · geometry {res[tag]['geometry']} · tracking {res[tag]['tracking']}")
+    (d / "examples.json").write_text(json.dumps(res, indent=1))
+    ok = res["good"]["geometry"] == "PASS" and res["wrong-check-point"]["geometry"] == "FAIL" and res["zoom-changed"]["geometry"] == "FAIL"
+    out("PASS: the correct example passes, the wrong check point and the zoom change fail" if ok else "UNEXPECTED: see examples.json")
+    return 0 if ok else 1
+
+
 def run(args, out) -> int:
     try:
         pts = json.loads(args.points.read_text())
@@ -159,13 +330,20 @@ def run(args, out) -> int:
     except (OSError, ValueError, KeyError) as exc:
         out(f"INVALID INPUT: {exc}"); return 2
     args.out.mkdir(parents=True, exist_ok=True)
-    try:
-        c = cal.fit(pts["image"]["width"], pts["image"]["height"], pts["fit_points"], pts.get("check_points"), camera_id=pts.get("camera_id", ""),
-                    camera_settings=pts.get("camera_settings"))
-    except (cal.CalibrationError, KeyError, TypeError) as exc:
-        out("CALIBRATION NOT FITTED: " + "; ".join(getattr(exc, "errors", [str(exc)]))); return 2
-    cpath = args.out / "calibration.json"
-    c.save(cpath)
+    if getattr(args, "calibration", None):
+        try:
+            c = cal.load(args.calibration)
+        except (cal.CalibrationError, OSError, ValueError) as exc:
+            out("CALIBRATION NOT READ: " + "; ".join(getattr(exc, "errors", [str(exc)]))); return 2
+        if [p["field"] for p in c.fit_points] != [p["field"] for p in pts["fit_points"]] or [p["image"] for p in c.fit_points] != [p["image"] for p in pts["fit_points"]]:
+            out(f"REFUSED: {args.calibration} was not fitted from {args.points} (different fit points); fit it again with the fit command"); return 2
+        cpath = args.calibration
+    else:
+        c = fit_points(pts, out)
+        if c is None:
+            return 2
+        cpath = args.out / "calibration.json"
+        c.save(cpath)
     summ = inspect_calibration(cpath)
     now_settings = json.loads(args.now_settings.read_text()) if args.now_settings else None
     target = {"width": args.width or pts["image"]["width"], "height": args.height or pts["image"]["height"],
@@ -278,6 +456,14 @@ def main(argv=None, out=print) -> int:
     for k in ("points", "course", "samples", "out"):
         r.add_argument(f"--{k}", type=Path, required=True)
     r.add_argument("--athlete", required=True); r.add_argument("--now-settings", type=Path); r.add_argument("--width", type=int); r.add_argument("--height", type=int)
+    r.add_argument("--calibration", type=Path, help="use this fitted calibration (from the fit command) instead of fitting again")
+    f = sub.add_parser("fit"); f.add_argument("--points", type=Path, required=True); f.add_argument("--out", type=Path, required=True)
+    b = sub.add_parser("bench")
+    b.add_argument("--points", type=Path, required=True); b.add_argument("--out", type=Path, required=True); b.add_argument("--calibration", type=Path)
+    b.add_argument("--now-settings", type=Path); b.add_argument("--max-check-error-m", type=float); b.add_argument("--clip", type=Path)
+    b.add_argument("--model", type=Path); b.add_argument("--config", type=Path); b.add_argument("--max-frames", type=int); b.add_argument("--label")
+    e = sub.add_parser("bench-example"); e.add_argument("--out", type=Path, required=True); e.add_argument("--max-check-error-m", type=float, default=0.25)
+    e.add_argument("--with-clip", action="store_true"); e.add_argument("--model", type=Path)
     s = sub.add_parser("synthetic"); s.add_argument("--samples", type=Path, required=True); s.add_argument("--anchor-utc", required=True)
     s.add_argument("--out", type=Path, required=True); s.add_argument("--athlete", default="vx1")
     try:
@@ -288,6 +474,12 @@ def main(argv=None, out=print) -> int:
         return template(args.out, out)
     if args.cmd == "run":
         return run(args, out)
+    if args.cmd == "fit":
+        return fit_cmd(args, out)
+    if args.cmd == "bench":
+        return bench(args, out)
+    if args.cmd == "bench-example":
+        return bench_example(args, out)
     return synthetic(args, out)
 
 
