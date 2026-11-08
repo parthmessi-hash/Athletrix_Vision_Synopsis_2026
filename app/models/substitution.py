@@ -47,6 +47,12 @@ class ContextRule(AthletrixModel):
     partnerships: ContextPolicy = Field(..., description="Applies to recorded partnerships with a partner who is on the field.")
 
 
+class Routes(AthletrixModel):
+    performance_only: bool = Field(False, description="Allow a review without the physiological index, but ONLY for an athlete whose roster entry states "
+                                   "inputs.physiology = 'not_used' (the session plan never included a wearable for them). A sensor that was expected "
+                                   "and stopped sending never takes this route: that is missing evidence.")
+
+
 class SubstitutionProfile(AthletrixModel):
     format: Literal["athletrix-substitution-profile"]
     schema_version: Literal[1]
@@ -59,5 +65,6 @@ class SubstitutionProfile(AthletrixModel):
     performance: PerformanceRule
     performance_decline_requires_physiology: bool = Field(..., description="A sustained performance decline leads to 'consider replacement' only with an available physiological index.")
     context: ContextRule
+    routes: Routes = Field(default_factory=Routes, description="Explicit reduced-evidence routes (none by default).")
     cooldown_seconds: float = Field(..., ge=0, le=3600, description="After the output changes, an opposite keep / consider-replacement output is held back for this long.")
     review_again_after_seconds: float = Field(..., gt=0, le=3600, description="Suggested next review for 'review later'.")

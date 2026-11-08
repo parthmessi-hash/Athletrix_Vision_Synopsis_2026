@@ -84,10 +84,11 @@ def test_physiology_alone_never_recommends_a_replacement(series):
     assert r["review_again_at"] == ts(1200 + PROFILE.review_again_after_seconds).isoformat().replace("+00:00", "Z")
 
 
-def test_decline_with_physiology_unavailable_waits_and_missing_bench_physiology_is_not_freshness(series):
+def test_decline_with_physiology_unavailable_is_insufficient_and_missing_bench_physiology_is_not_freshness(series):
     series["phys"], series["perf"] = [None] * 30, [30] * 30
     r = sub.substitution_review(inputs(BASE))
-    assert r["outcome"] == "review_later" and "requires an available physiological index" in r["reasons"][-1]
+    assert r["outcome"] == "insufficient_evidence" and r["reasons"][0].startswith("required input unavailable: physiological index")
+    assert r["replacements"] == [], "no replacement step without every required input"
     series["phys"] = [40] * 30
     r = sub.substitution_review(inputs(BASE))
     assert r["outcome"] == "consider_replacement" and [(c["athlete_id"], c["role_fit"]) for c in r["replacements"]] == [("b1", "fits"), ("b2", "does_not_fit")]
@@ -140,7 +141,8 @@ def test_identity_uncertainty_and_missing_everything_are_insufficient(series):
     assert sub.substitution_review(inputs(BASE))["outcome"] == "insufficient_evidence"
     series["phys"] = [40] * 30
     r = sub.substitution_review(inputs(BASE))
-    assert r["outcome"] == "keep" and any(m.startswith("performance composite unavailable") for m in r["missing"]), "keep, with the missing evidence listed"
+    assert r["outcome"] == "insufficient_evidence" and any(m.startswith("performance composite unavailable") for m in r["missing"]), \
+        "decision rules 2: one available history is never enough for keep"
 
 
 def test_cooldown_holds_back_an_opposite_output(series):
@@ -158,3 +160,77 @@ def test_cooldown_holds_back_an_opposite_output(series):
     short = sub.substitution_review(inputs(BASE, at=(i + 3) * 60 + 0))
     assert short["outcome"] == "consider_replacement" and short["raw_outcome"] == "keep" and short["cooldown"]["held"] is True
 
+
+
+# ---- decision rules version 2 (2026-11-07): keep needs affirmative evidence; missing inputs never fall back -------------
+
+def test_p06_case_a_dropped_sensor_with_performance_still_available_is_insufficient_not_keep(series):
+    """The reported defect: physiology available, then the strap stops; performance stays available and normal."""
+    series["phys"], series["perf"] = [40] * 15 + [None] * 6, [70] * 21     # 21 review points: 0, 60, ... 1200 s
+    r = sub.substitution_review(inputs(BASE))
+    assert r["outcome"] == "insufficient_evidence" and r["reasons"][0].startswith("required input unavailable: physiological index")
+    assert r["route"]["name"] == "full" and "physiological index" in r["route"]["required_inputs"] and r["decision_rules"] == 2
+    outs = [h["outcome"] for h in r["history"]]
+    assert outs[:15] == ["keep"] * 15 and outs[15:] == ["insufficient_evidence"] * 6, "no earlier keep survives the dropout"
+    series["phys"] = [40] * 10 + [None] * 6 + [40] * 5
+    assert sub.substitution_review(inputs(BASE))["outcome"] == "keep", "fresh evidence again: keep is affirmative again"
+
+
+def test_keep_lists_its_affirmative_evidence(series):
+    series["phys"], series["perf"] = [40] * 30, [70] * 30
+    r = sub.substitution_review(inputs(BASE))
+    assert r["outcome"] == "keep" and r["reasons"][-1].startswith("affirmative evidence under the configured rule: physiological index 40")
+    assert r["missing"] == ["substitutions remaining: unknown"] or not any("unavailable" in m for m in r["missing"])
+
+
+def test_one_bad_reading_asks_to_wait_for_the_window_and_never_recommends(series):
+    series["phys"], series["perf"] = [40] * 20 + [95], [70] * 21
+    r = sub.substitution_review(inputs(BASE))
+    assert r["outcome"] == "review_later" and "has not matured (physiological index: 1 of 3" in r["reasons"][-1] and r["replacements"] == []
+    assert r["review_again_at"] == ts(1200 + 2 * PROFILE.step_seconds).isoformat().replace("+00:00", "Z"), "when two more points could confirm it"
+    series["phys"] = [40] * 19 + [95, 40]
+    assert sub.substitution_review(inputs(BASE))["outcome"] == "keep", "the single reading did not flip the later output"
+
+
+def test_role_mismatch_with_a_missing_input_is_a_context_only_observation(series):
+    series["phys"], series["perf"] = [None] * 30, [70] * 30
+    ctx = ContextEntry(id="c", recording_id="r", created_at=ts(0), effective_from=ts(0), source="head_coach", certainty="confirmed", athlete_id="a1", role={"status": "recorded", "value": "forward"})
+    r = sub.substitution_review(inputs(BASE, [ctx]))
+    assert r["outcome"] == "insufficient_evidence" and r["replacements"] == []
+    obs = r["context_observation"]
+    assert "not a recommendation" in obs["label"] and obs["unavailable_comparisons"][0].startswith("physiological index unavailable") and "'forward'" in obs["observation"]
+
+
+def test_performance_only_route_is_explicit_and_never_a_dropout_fallback(series):
+    series["phys"], series["perf"] = [None] * 30, [70] * 30
+    no_strap = [roster_entry("a1", "on_field", "centre back", ["centre back"], inputs={"physiology": "not_used"}), *BASE[1:]]
+    r = sub.substitution_review(inputs(no_strap))
+    assert r["outcome"] == "insufficient_evidence" and "no performance-only route" in r["reasons"][0], "the profile does not enable the route"
+    routed = PROFILE.model_copy(update={"routes": PROFILE.routes.model_copy(update={"performance_only": True})})
+    r = sub.substitution_review(inputs(no_strap, profile=routed))
+    assert r["outcome"] == "keep" and r["route"]["name"] == "performance_only" and "no physiological comparison" in r["route"]["limits"]
+    assert "performance-only route" in r["reasons"][-1]
+    assert sub.substitution_review(inputs(BASE, profile=routed))["outcome"] == "insufficient_evidence", \
+        "enabled route, but the plan expects a wearable: a dropout stays missing evidence"
+    series["perf"] = [30] * 30
+    r = sub.substitution_review(inputs(no_strap, profile=routed))
+    assert r["outcome"] == "review_later" and "session plan has no wearable" in r["reasons"][-1], "a decline asks for review on this route"
+
+
+def test_unavailable_replacement_becoming_available_again(series):
+    series["phys"], series["perf"] = [40] * 30, [30] * 30
+    away = RosterEntry(id="ros-b1-away", recording_id="r", created_at=ts(0), effective_from=ts(600), source="head_coach", athlete_id="b1", status="unavailable", able_roles=["centre back"])
+    back = RosterEntry(id="ros-b1-back", recording_id="r", created_at=ts(0), effective_from=ts(1100), source="head_coach", athlete_id="b1", status="bench", able_roles=["centre back"])
+    r = sub.substitution_review(inputs([*BASE, away], at=900))
+    assert r["outcome"] == "review_later" and "no bench athlete is recorded as able" in r["reasons"][-1]
+    r = sub.substitution_review(inputs([*BASE, away, back], at=1200))
+    assert r["outcome"] == "consider_replacement" and r["replacements"][0]["athlete_id"] == "b1"
+
+
+def test_an_expired_instruction_stops_applying(series):
+    series["phys"], series["perf"] = [40] * 30, [70] * 30
+    ctx = ContextEntry(id="c", recording_id="r", created_at=ts(0), effective_from=ts(0), effective_to=ts(900), source="head_coach", certainty="confirmed",
+                       athlete_id="a1", role={"status": "recorded", "value": "forward"})
+    assert sub.substitution_review(inputs(BASE, [ctx], at=600))["triggers"] == ["role_mismatch"]
+    r = sub.substitution_review(inputs(BASE, [ctx], at=1200))
+    assert r["outcome"] == "keep" and r["role"]["required"] == "centre back" and r["role"]["required_from"] == "roster", "after it expires the roster role applies"

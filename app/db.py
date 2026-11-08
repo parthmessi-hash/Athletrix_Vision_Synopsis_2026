@@ -182,6 +182,14 @@ CREATE TABLE IF NOT EXISTS recording_responses (
     payload      TEXT NOT NULL,
     UNIQUE (recording_id, client_token)
 );
+CREATE TABLE IF NOT EXISTS ingest_rejections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL,
+    stream      TEXT NOT NULL,
+    athlete_id  TEXT,
+    reason      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ingest_rejections_by_athlete ON ingest_rejections (athlete_id, received_at);
 CREATE TABLE IF NOT EXISTS recording_imports (
     recording_id         TEXT PRIMARY KEY,
     source_recording_id  TEXT NOT NULL,

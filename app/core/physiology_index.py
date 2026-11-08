@@ -213,7 +213,7 @@ def compute_index(profile: IndexProfile, profile_sha: str, baseline: Baseline | 
                 r["contribution"] = round(r["_score"] * r["weight"] / avail_w, 2)
     for r in rows:
         r.pop("_score", None)
-    else:
+    if value is None:
         reasons.append(f"available signals carry {share:.0%} of the weight; the profile needs {profile.min_weight_coverage:.0%}")
         reasons += [f"{r['signal']}: {r['reason']}" for r in rows if not r["available"]]
     if timing == "retrospective":

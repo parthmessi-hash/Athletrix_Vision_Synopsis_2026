@@ -20,17 +20,25 @@ SUSTAINED STATES (hysteresis, so one noisy reading does not flip the output). Ov
                consecutive composites >= clear_at ("below_unconfirmed" before that).
   An unavailable point resets the running counts, and the state AT T is "unavailable" when T's own value is unavailable.
 
-DECISION AT EACH POINT, in this order:
-  1. the roster state does not show the athlete on the field                          -> insufficient_evidence
-  2. triggers: performance concern; physiology concern; role mismatch (the role asked of the athlete, from coach context
-     or else the roster's current role, is not among the roles the coach says the athlete can play; exact text)
-  3. performance unavailable because evidence was left out for uncertain identity, and no role mismatch
+DECISION AT EACH POINT, in this order (decision rules version 2, 2026-11-07):
+  1. the roster state does not show the athlete on the field, or there is no roster entry (unknown)
                                                                                        -> insufficient_evidence
-  4. no trigger: both histories unavailable -> insufficient_evidence; otherwise -> keep (missing evidence listed)
-  5. physiology concern without performance concern or role mismatch                    -> review_later (an elevated
+  2. ROUTE. Required inputs are the performance composite and the physiological index ("full"). Only when the athlete's
+     roster entry states inputs.physiology = "not_used" (no wearable in the session plan) AND the profile enables
+     routes.performance_only is the index not required ("performance_only", with its limits stated); "not_used" without
+     that route -> insufficient_evidence. A sensor that was expected and stopped sending never changes the route.
+  3. triggers: performance concern; physiology concern (full route); role mismatch (the role asked of the athlete, from
+     coach context or else the roster's current role, is not among the roles the coach says the athlete can play)
+  4. a required input unavailable (stale, disconnected, no usable baseline, too little evidence, identity uncertain, no
+     profile)                                                                          -> insufficient_evidence; the
+     other input is never used as a fallback. A role mismatch is then reported as a context-only observation that names
+     the comparisons that were not made, never as a recommendation.
+  5. no trigger and an unconfirmed reading (the persistence window has not matured)     -> review_later at the point
+     where it could be confirmed; otherwise -> keep (affirmative: every required input available, no sustained concern)
+  6. physiology concern without performance concern or role mismatch                    -> review_later (an elevated
      index alone never recommends a replacement)
-  6. performance concern only, physiology unavailable and the profile requires it       -> review_later
-  7. replacement step (performance concern or role mismatch). Candidates: athletes on the bench at T, not named in
+  7. performance concern on the performance-only route when the profile requires physiology for a decline -> review_later
+  8. replacement step (performance concern or role mismatch). Candidates: athletes on the bench at T, not named in
      do_not_bring_on, whose able roles include the required role. Missing bench physiology is reported as unavailable,
      never as freshness. Then, in order: the athlete is in keep_on_field -> keep (coach constraint); no substitutions
      remaining -> keep; no role-compatible candidate -> review_later; before no_substitution_before -> review_later at
@@ -58,6 +66,9 @@ from app.models.substitution import SubstitutionProfile
 from app.store.context import select_effective
 from app.store.roster import effective_roster
 
+DECISION_RULES = 2   # 1: a single available history could give "keep" (before 2026-11-07); 2: keep needs every required input
+ROUTE_LIMITS = ("performance-only route: no physiological comparison is made for this athlete; a keep says only that recorded performance shows "
+                "no sustained decline, and a decline asks for review rather than replacement when the profile requires physiology")
 LABEL = "Experimental substitution review: decision support from configured rules. The coach decides; not an optimal-substitution claim."
 OUTCOMES = ("keep", "consider_replacement", "review_later", "insufficient_evidence")
 
@@ -140,6 +151,15 @@ def track(points: list[tuple[datetime, float | None]], high, low, persist: int, 
     return out
 
 
+def trailing_runs(values: list, cond) -> list[int]:
+    """Consecutive points (ending at each point) whose value is available and meets cond."""
+    out, n = [], 0
+    for v in values:
+        n = n + 1 if v is not None and cond(v) else 0
+        out.append(n)
+    return out
+
+
 def review_points(inp: ReviewInputs, prof: SubstitutionProfile) -> list[datetime]:
     pts, t = [], inp.at
     earliest = max(inp.started_at, inp.at - timedelta(seconds=prof.lookback_seconds))
@@ -169,7 +189,8 @@ def _candidates(inp: ReviewInputs, t: datetime, required: str | None, team_roste
     return out
 
 
-def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state: str, perf_state: str, phys: dict, perf: dict) -> dict:
+def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state: str, perf_state: str, phys: dict, perf: dict,
+           runs: tuple[int, int] = (0, 0)) -> dict:
     team_roster, roster = effective_roster(known(inp, inp.roster, t), t)
     me = roster.get(inp.athlete_id)
     team_ctx, my_ctx = _context_at(inp, inp.athlete_id, t)
@@ -184,8 +205,19 @@ def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state
         return res
 
     if me is None or me.status != "on_field":
-        reasons.append("the roster state at this time does not show the athlete on the field" + (f" (status: {me.status})" if me else " (no roster entry)"))
+        reasons.append("the roster state at this time does not show the athlete on the field" + (f" (status: {me.status})" if me else " (no roster entry: status unknown)"))
         return out("insufficient_evidence")
+    plan = me.inputs
+    route = "full"
+    if plan is not None and plan.physiology == "not_used":
+        if not prof.routes.performance_only:
+            reasons.append("the session plan says no wearable is used for this athlete, and the profile has no performance-only route; "
+                           "no keep or replacement is calculated")
+            res["route"] = {"name": "none", "physiology": "not_used"}
+            return out("insufficient_evidence")
+        route = "performance_only"
+    res["route"] = {"name": route, "required_inputs": ["performance composite"] + (["physiological index"] if route == "full" else []),
+                    "limits": None if route == "full" else ROUTE_LIMITS}
     role_src = "coach_context" if my_ctx and my_ctx.role.status == "recorded" else ("roster" if me.current_role else None)
     required = my_ctx.role.value if role_src == "coach_context" else me.current_role
     able = [norm(r) for r in me.able_roles]
@@ -198,38 +230,57 @@ def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state
         missing.append("the role asked of the athlete is not recorded (coach context or roster)")
     elif not able:
         missing.append("the roles the athlete can play are not recorded in the roster")
-    if phys_state == "unavailable":
+    if phys_state == "unavailable" and route == "full":
         missing.append("physiological index unavailable: " + "; ".join(phys.get("reasons") or ["no reason given"]))
     if perf_state == "unavailable":
         missing.append("performance composite unavailable: " + "; ".join(perf.get("reasons") or ["no reason given"]))
-    if phys_state == "elevated_unconfirmed":
+    if phys_state == "elevated_unconfirmed" and route == "full":
         reasons.append(f"physiological index {phys['value']} reached {prof.physiology.concern_at:g} but not yet for {prof.physiology.persistence_points} consecutive points")
     if perf_state == "below_unconfirmed":
         reasons.append(f"performance composite {perf['value']} is below {prof.performance.concern_below:g} but not yet for {prof.performance.persistence_points} consecutive points")
     if perf_state == "concern":
         triggers.append("performance_decline")
         reasons.append(f"performance composite below {prof.performance.concern_below:g} for at least {prof.performance.persistence_points} consecutive review points (now {perf['value']})")
-    if phys_state == "concern":
+    if phys_state == "concern" and route == "full":
         triggers.append("physiology_elevated")
         reasons.append(f"experimental physiological index at or above {prof.physiology.concern_at:g} for at least {prof.physiology.persistence_points} consecutive review points (now {phys['value']})")
     if role_mismatch:
         triggers.append("role_mismatch")
         reasons.append(f"the role asked ({required!r}, from {role_src.replace('_', ' ')}) is not among the roles recorded for this athlete ({', '.join(me.able_roles)})")
-    if perf_state == "unavailable" and perf.get("identity_uncertain_excluded") and not role_mismatch:
-        reasons.append(f"{perf['identity_uncertain_excluded']} performance observations in the window could not be attributed to this player with confidence (uncertain identity)")
+    unavailable = (["physiological index"] if route == "full" and phys_state == "unavailable" else []) + (["performance composite"] if perf_state == "unavailable" else [])
+    if unavailable:
+        reasons.insert(0, f"required input unavailable: {' and '.join(unavailable)}; keep and replacement both need every input the configured rule uses, "
+                          "so the remaining evidence is not used as a fallback")
+        if perf_state == "unavailable" and perf.get("identity_uncertain_excluded"):
+            reasons.insert(0, f"{perf['identity_uncertain_excluded']} performance observations in the window could not be attributed to this player with confidence (uncertain identity)")
+        if role_mismatch:
+            res["context_observation"] = {
+                "observation": reasons[-1] if reasons else "role mismatch",
+                "unavailable_comparisons": [m for m in missing if m.startswith(("physiological index unavailable", "performance composite unavailable"))],
+                "label": "Context-only observation (coach-entered roles), not a recommendation: the comparisons listed as unavailable were not made."}
         return out("insufficient_evidence")
     if not triggers:
-        if phys_state == "unavailable" and perf_state == "unavailable":
-            reasons.append("neither the physiological index nor the performance composite is available")
-            return out("insufficient_evidence")
-        reasons.append("no sustained concern in the available evidence")
+        pending = []
+        if phys_state == "elevated_unconfirmed" and route == "full":
+            pending.append(("physiological index", runs[0], prof.physiology.persistence_points))
+        if perf_state == "below_unconfirmed":
+            pending.append(("performance composite", runs[1], prof.performance.persistence_points))
+        if pending:
+            left = max(n - r for _, r, n in pending)
+            reasons.append("the review window has not matured (" + "; ".join(f"{k}: {r} of {n} consecutive points" for k, r, n in pending) +
+                           "); a single reading does not justify a recommendation")
+            return out("review_later", t + timedelta(seconds=prof.step_seconds * max(1, left)))
+        reasons.append("affirmative evidence under the configured rule: " +
+                       (f"physiological index {phys['value']} without a sustained elevation, " if route == "full" else "") +
+                       f"performance composite {perf['value']} without a sustained decline" +
+                       ("" if route == "full" else " (performance-only route: physiology is not part of this athlete's session plan)"))
         return out("keep")
     if triggers == ["physiology_elevated"]:
-        reasons.append("an elevated experimental index alone does not recommend a replacement; " +
-                       ("performance is maintained" if perf_state in ("normal", "below_unconfirmed") else "performance evidence is unavailable"))
+        reasons.append("an elevated experimental index alone does not recommend a replacement; performance is maintained")
         return out("review_later")
-    if "role_mismatch" not in triggers and phys_state == "unavailable" and prof.performance_decline_requires_physiology:
-        reasons.append("the profile requires an available physiological index before a performance decline leads to considering a replacement")
+    if "role_mismatch" not in triggers and route == "performance_only" and prof.performance_decline_requires_physiology:
+        reasons.append("the profile requires an available physiological index before a performance decline leads to considering a replacement; "
+                       "this athlete's session plan has no wearable")
         return out("review_later")
     cands = _candidates(inp, t, required, team_roster, roster)
     res["replacements"] = cands
@@ -283,7 +334,8 @@ def decide(inp: ReviewInputs, prof: SubstitutionProfile, t: datetime, phys_state
 
 
 def substitution_review(inp: ReviewInputs) -> dict:
-    head = {"recording_id": inp.recording_id, "athlete_id": inp.athlete_id, "at": iso(inp.at), "label": LABEL, "outcomes": list(OUTCOMES)}
+    head = {"recording_id": inp.recording_id, "athlete_id": inp.athlete_id, "at": iso(inp.at), "label": LABEL, "outcomes": list(OUTCOMES),
+            "decision_rules": DECISION_RULES}
     if inp.rule_variant != "context_aware":
         head["rule_variant"] = inp.rule_variant
     profiles = {"substitution": None, "physiological_index": None, "performance_rubric": None}
@@ -311,7 +363,9 @@ def substitution_review(inp: ReviewInputs) -> dict:
     ph, pr = prof.physiology, prof.performance
     phys_states = track([(t, p["value"]) for t, p in zip(pts, phys)], lambda v: v >= ph.concern_at, lambda v: v < ph.clear_below, ph.persistence_points, ph.clear_points, ("elevated_unconfirmed", ""))
     perf_states = track([(t, p["value"]) for t, p in zip(pts, perf)], lambda v: v < pr.concern_below, lambda v: v >= pr.clear_at, pr.persistence_points, pr.clear_points, ("below_unconfirmed", ""))
-    decisions = [decide(inp, prof, t, s1, s2, a, b) for t, s1, s2, a, b in zip(pts, phys_states, perf_states, phys, perf)]
+    runs = list(zip(trailing_runs([p["value"] for p in phys], lambda v: v >= ph.concern_at),
+                    trailing_runs([p["value"] for p in perf], lambda v: v < pr.concern_below)))
+    decisions = [decide(inp, prof, t, s1, s2, a, b, r) for t, s1, s2, a, b, r in zip(pts, phys_states, perf_states, phys, perf, runs)]
     emitted, last_change, held = [], None, []
     for t, d in zip(pts, decisions):
         raw = d["outcome"]
@@ -333,11 +387,12 @@ def substitution_review(inp: ReviewInputs) -> dict:
         c["physiology"] = _brief(physiology_at(inp, c["athlete_id"], inp.at), bench=True)
         c["performance_evidence"] = len([o for o in known(inp, inp.athletes[c["athlete_id"]].observations, inp.at) if o.period_end <= inp.at])
     history = [{"at": iso(t), "physiological_index": a["value"], "physiology_state": s1, "performance_composite": b["value"], "performance_state": s2,
-                "raw_outcome": d["outcome"], "outcome": e} for t, a, b, s1, s2, d, e in zip(pts, phys, perf, phys_states, perf_states, decisions, emitted)]
+                "raw_outcome": d["outcome"], "outcome": e, "route": (d.get("route") or {}).get("name")} for t, a, b, s1, s2, d, e in zip(pts, phys, perf, phys_states, perf_states, decisions, emitted)]
     knowledge = knowledge_summary(inp, perf[-1], phys[-1])
     return {**head, "available": True, "knowledge": knowledge, "outcome": emitted[-1], "raw_outcome": now["outcome"], "cooldown": cooldown,
             "triggers": now["triggers"], "reasons": now["reasons"], "missing": now["missing"], "tradeoffs": now["tradeoffs"],
             "constraints_applied": now["constraints_applied"], "review_again_at": now["review_again_at"], "role": now.get("role"),
+            "route": now.get("route"), "context_observation": now.get("context_observation"),
             "replacements": now["replacements"],
             "player": {"physiology": {"state": phys_states[-1], **_brief(phys[-1])}, "performance": {"state": perf_states[-1], **perf[-1]}},
             "history": history, "points": {"step_seconds": prof.step_seconds, "count": len(pts), "first": iso(pts[0]), "last": iso(pts[-1])},

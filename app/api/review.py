@@ -34,7 +34,10 @@ from app.models.review import ReviewRequest, SavedReview
 from app.models.response import CoachResponse, RecommendationRef, ResponseCreate
 from app.models.roster import RosterCreate, RosterEntry
 from app.models.substitution import SubstitutionProfile
+from app.core.evidence import player_evidence
 from app.store.baselines import baseline_store, new_baseline_id
+from app.store.device import latest_device_status_store
+from app.store.rejections import rejection_store
 from app.store.context import context_store
 from app.store.performance import performance_store
 from app.store.recordings import recording_store
@@ -45,6 +48,7 @@ from app.store.roster import effective_roster, new_roster_id, roster_store
 from app.store.roster import insert as roster_insert
 
 router = APIRouter(tags=["experimental review"])
+device_status_store = latest_device_status_store
 
 
 # ---- configuration -----------------------------------------------------------------------------------------------------
@@ -338,7 +342,11 @@ def reproduce_review(recording_id: str, review_id: str) -> dict:
         status_, why = "evidence_changed", ("recorded samples are missing for " + ", ".join(missing) + "; " if missing else "") + \
             ("recorded samples differ from the saved digest for " + ", ".join(changed) if changed else "")
     elif not same:
-        status_, why = "differs", "same configuration and evidence, different result: the calculation code has changed since the review was saved"
+        from app.core.substitution import DECISION_RULES  # noqa: PLC0415
+        then = saved.result.get("decision_rules", 1) if saved.kind == "substitution" else None
+        status_, why = "differs", ("same configuration and evidence, different result: the decision rules changed since the review was saved "
+                                   f"(version {then} then, {DECISION_RULES} now); the saved result stays as it was" if then is not None and then != DECISION_RULES else
+                                   "same configuration and evidence, different result: the calculation code has changed since the review was saved")
     else:
         status_, why = "reproduced", "same configuration, evidence copies and recorded samples give the same result"
     return {"review_id": saved.id, "kind": saved.kind, "at": iso(saved.at), "status": status_, "explanation": why.rstrip("; "),
@@ -390,6 +398,8 @@ def team_review(recording_id: str, knowledge: Literal["retrospective", "as_enter
             raise HTTPException(status_code=422, detail=f"the team review covers at most {TEAM_REVIEW_MAX_ATHLETES} athletes; this recording has {len(rec.athletes)}")
         t = review_time(rec, parse_at(at)) if at else min(captured_at, rec.stopped_at) if rec.stopped_at else captured_at
         inp, _ = gather(rec, rec.athletes[0].id, t, parsed, knowledge, unreadable)
+        rejections = rejections_by_athlete(rec, t)
+        devices = device_status_store.get_many([s.device_id for d in inp.athletes.values() for s, _ in d.samples[-1:]])
     rows = []
     for a in rec.athletes:
         row = {"athlete": a.model_dump(mode="json")}
@@ -412,7 +422,11 @@ def team_review(recording_id: str, knowledge: Literal["retrospective", "as_enter
         obs = known(inp, d.observations, t)
         latest_obs = max((o for o in obs if o.period_end <= t), key=lambda o: o.period_end, default=None)
         player = r.get("player") or {}
-        rows.append({**row, "reviewed": True,
+        try:
+            ev = athlete_evidence(rec, a.id, t, knowledge, parsed, d, entry, (player.get("performance") or None), latest_obs, r, devices, rejections)
+        except Exception as exc:  # noqa: BLE001  evidence details never block the review row
+            ev = {"summary": [f"evidence details could not be calculated ({type(exc).__name__})"], "sources": {}, "used_by_review": {}}
+        rows.append({**row, "reviewed": True, "evidence": ev,
                      "roster": {"status": entry.status if entry else "unknown", "current_role": entry.current_role if entry else None,
                                 "able_roles": entry.able_roles if entry else [], "entered_at": iso(entry.created_at) if entry else None},
                      "latest_reading": latest_reading(d, t, knowledge),
@@ -430,6 +444,66 @@ def team_review(recording_id: str, knowledge: Literal["retrospective", "as_enter
                        "outcomes": {o: sum(1 for x in reviewed if x["outcome"] == o) for o in ("keep", "consider_replacement", "review_later", "insufficient_evidence")}},
             "compute_ms": round(1000 * (_time.perf_counter() - started), 1), "athletes": rows,
             "note": "Athletes are listed in roster order, never ranked; an unavailable value is not a zero. Experimental decision support: the coach decides."}
+
+
+def rejections_by_athlete(rec: Recording, t: datetime) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for (aid, stream), v in rejection_store.counts(rec.started_at, t).items():
+        out.setdefault(aid, {})[stream] = v
+    return out
+
+
+def athlete_evidence(rec: Recording, athlete_id: str, t: datetime, knowledge: str, parsed: dict, d: AthleteData, entry: RosterEntry | None,
+                     performance: dict | None, latest_obs, review: dict | None, devices: dict, rejections: dict) -> dict:
+    """Evidence quality for one athlete at t (app/core/evidence.py); reads only the tracking window and newest sample."""
+    from datetime import timedelta  # noqa: PLC0415
+    idx = parsed["physiological_index"][0] if parsed.get("physiological_index") else None
+    window = idx.window_seconds if idx is not None else 60.0
+    tw = recording_store.range_with_receipts(rec.id, athlete_id, "tracking", t - timedelta(seconds=window), t)
+    tn = recording_store.newest_at_or_before(rec.id, athlete_id, "tracking", t)
+    if knowledge == "as_entered" and tn is not None and tn[1] and datetime.fromisoformat(tn[1]["received_at"].replace("Z", "+00:00")) > t:
+        usable = [x for x in tw if not (x[1] and datetime.fromisoformat(x[1]["received_at"].replace("Z", "+00:00")) > t)]
+        tn = usable[-1] if usable else None
+    phys_index = None
+    if idx is not None:
+        p, sha = parsed["physiological_index"]
+        b, timing, why = select_baseline(baselines_as_of(d.baselines, t) if knowledge == "as_entered" else d.baselines, p, t)
+        phys_index = compute_index(p, sha, b, timing, d.samples, t, why)
+    return player_evidence(plan=entry.inputs if entry else None, phys_samples=d.samples, phys_index=phys_index, tracking_window=tw, tracking_newest=tn,
+                           performance=performance, latest_perf=latest_obs, review=review, t=t, knowledge=knowledge, index_profile=idx, settings=get_settings(),
+                           device_statuses=devices, rejections=rejections.get(athlete_id, {}), recording_stopped=rec.stopped_at is not None)
+
+
+@router.get("/recordings/{recording_id}/evidence")
+def recording_evidence(recording_id: str, knowledge: Literal["retrospective", "as_entered"] = "as_entered", at: str | None = None) -> dict:
+    """Evidence quality for every roster athlete at one time, without calculating any recommendation (setup and
+    monitoring). Same per-source facts as the team review's `evidence`."""
+    captured_at = clock.utc_now()
+    parsed = parse_docs(configured_docs())
+    with get_database().read():
+        rec = require_recording(recording_id)
+        if len(rec.athletes) > TEAM_REVIEW_MAX_ATHLETES:
+            raise HTTPException(status_code=422, detail=f"at most {TEAM_REVIEW_MAX_ATHLETES} athletes")
+        t = review_time(rec, parse_at(at)) if at else min(captured_at, rec.stopped_at) if rec.stopped_at else captured_at
+        unreadable: dict[str, str] = {}
+        inp, _ = gather(rec, rec.athletes[0].id, t, parsed, knowledge, unreadable)
+        rejections = rejections_by_athlete(rec, t)
+        devices = device_status_store.get_many([s.device_id for d in inp.athletes.values() for s, _ in d.samples[-1:]])
+        from app.core.substitution import known  # noqa: PLC0415
+        _, ros = effective_roster(known(inp, inp.roster, t), t)
+        rows = []
+        for a in rec.athletes:
+            if a.id in unreadable:
+                rows.append({"athlete": a.model_dump(mode="json"), "error": unreadable[a.id]})
+                continue
+            d = inp.athletes[a.id]
+            obs = known(inp, d.observations, t)
+            latest_obs = max((o for o in obs if o.period_end <= t), key=lambda o: o.period_end, default=None)
+            entry = ros.get(a.id)
+            rows.append({"athlete": a.model_dump(mode="json"), "roster_status": entry.status if entry else "unknown",
+                         "evidence": athlete_evidence(rec, a.id, t, knowledge, parsed, d, entry, None, latest_obs, None, devices, rejections)})
+    return {"recording_id": rec.id, "recording_status": rec.status, "captured_at": iso(captured_at), "at": iso(t), "knowledge": knowledge, "athletes": rows,
+            "note": "Evidence facts only; no recommendation is calculated here. Status labels use adjustable engineering defaults."}
 
 
 # ---- coach responses and lineup changes -----------------------------------------------------------------------------------
@@ -489,9 +563,9 @@ def add_response(recording_id: str, body: ResponseCreate, response: Response) ->
         if team is None or team.substitutions_remaining is None:
             warnings.append("substitutions remaining are not recorded; nothing was decremented")
         note = f"lineup change by response token {body.client_token}"
-        entries.append(RosterCreate(athlete_id=lu.outgoing_athlete_id, effective_from=lu.effective_from, status="unavailable", able_roles=out_e.able_roles,
+        entries.append(RosterCreate(athlete_id=lu.outgoing_athlete_id, effective_from=lu.effective_from, status="unavailable", able_roles=out_e.able_roles, inputs=out_e.inputs,
                                     source="head_coach", recorded_by=body.recorded_by, note=f"substituted off ({note})"))
-        entries.append(RosterCreate(athlete_id=lu.incoming_athlete_id, effective_from=lu.effective_from, status="on_field", current_role=role, able_roles=in_e.able_roles,
+        entries.append(RosterCreate(athlete_id=lu.incoming_athlete_id, effective_from=lu.effective_from, status="on_field", current_role=role, able_roles=in_e.able_roles, inputs=in_e.inputs,
                                     source="head_coach", recorded_by=body.recorded_by, note=f"substituted on ({note})"))
         if team is not None and team.substitutions_remaining is not None:
             entries.append(RosterCreate(athlete_id=None, effective_from=lu.effective_from, substitutions_remaining=team.substitutions_remaining - 1,

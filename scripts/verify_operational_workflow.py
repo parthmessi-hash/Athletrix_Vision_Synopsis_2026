@@ -94,6 +94,20 @@ def main(argv=None, out=print) -> int:
         p06 = by["p06"]
         check("p06's stopped strap shows an old reading and no current index (a stale value is not shown as current)",
               p06["latest_reading"]["age_s"] > 15 and not p06["physiological_index"]["available"], f"reading {p06['latest_reading']['age_s']} s old; {p06['physiological_index']['reasons'][:1]}")
+        # targeted reproduction of the reported p06 defect: the strap stops, performance evidence stays available
+        stop_txt = next((e.split(" ", 1)[0] for e in stats.events if "p06's strap stops" in e), None)
+        stale_after = json.loads(Path(env["PHYSIOLOGICAL_INDEX_PROFILE_PATH"]).read_text())["staleness_seconds"]
+        after = [r for r in stats.reviews if stop_txt and r["at"] and datetime.fromisoformat(r["at"].replace("Z", "+00:00")) >
+                 datetime.fromisoformat(stop_txt.replace("Z", "+00:00")) + timedelta(seconds=stale_after)]
+        kept = [r["at"] for r in after if r["outcomes"].get("p06") == "keep"]
+        p06_hist = [h["outcome"] for h in p06["review"]["history"]]
+        check("p06 (strap stopped, performance still available) is 'insufficient evidence' in every live review once its last reading is stale; never 'keep'",
+              after and not kept and p06["outcome"] == "insufficient_evidence" and p06["performance"]["available"]
+              and p06["review"]["reasons"][0].startswith("required input unavailable: physiological index"),
+              f"{len(after)} periodic reviews after the strap stopped + {stale_after:g} s, keep in {len(kept)}; now {p06['outcome']} "
+              f"(performance available: {p06['performance']['available']}); history {'keep' in p06_hist and 'had keep before the dropout' or 'no keep in lookback'}")
+        healthy = [a for a in ("p01", "p03", "p04", "p07") if by[a]["outcome"] in ("keep", "review_later")]
+        check("players beside p06 with complete evidence are unaffected by its missing data", len(healthy) == 4, f"{[(a, by[a]['outcome']) for a in ('p01', 'p03', 'p04', 'p07')]}")
         live = [x["latest_reading"] for x in tr["athletes"] if x["reviewed"] and x["latest_reading"]]
         check("live readings keep observation time and receipt time apart (receipt recorded by this engine)",
               live and all(r["received_at"] and r["availability"] == "received_by_review_time" for r in live), f"{len(live)} readings")

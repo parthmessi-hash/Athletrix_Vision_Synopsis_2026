@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # engine ships neither, and no real-athlete profile exists. FICTIONAL examples live in scripts/examples/review/.
     physiological_index_profile_path: str | None = None
     substitution_profile_path: str | None = None
+    # Evidence-quality labels (app/core/evidence.py): adjustable engineering defaults, NOT the team's freshness
+    # requirements (a team decision still open). The wearable's "stale" uses the index profile's staleness_seconds when
+    # one is configured, because that is the rule the review applies; otherwise evidence_stale_after_seconds.
+    evidence_stale_after_seconds: float = Field(10.0, gt=0, le=3600)
+    evidence_disconnected_after_seconds: float = Field(30.0, gt=0, le=3600)
+    evidence_delayed_after_seconds: float = Field(5.0, gt=0, le=3600)
 
     @field_validator("code_revision", mode="before")
     @classmethod

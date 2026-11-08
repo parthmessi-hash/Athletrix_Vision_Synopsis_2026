@@ -127,12 +127,32 @@ class RecordingStore:
     def write_sample(self, c: sqlite3.Connection, recording_id: str, stream: str, sample, receipt: str | None = None) -> None:
         """Insert or replace (equal instant) one accepted sample into the recording, inside the caller's transaction.
 
-        A replacement replaces the receipt metadata with the payload (the earlier arrival's receipt is not kept)."""
+        An identical re-send (a retry: same payload) keeps the FIRST arrival's receipt and counts the repeat in
+        `duplicate_arrivals`, so a retry never makes a sample look later than it first became available. A different
+        payload for the same instant is a replacement: it takes the new receipt and counts `replaced_earlier`. Rows
+        without receipt metadata stay without it."""
         c.execute(
             f"INSERT INTO {TABLES[stream]} (recording_id, athlete_id, ts_utc, payload, receipt) VALUES (?, ?, ?, ?, ?) "
-            f"ON CONFLICT(recording_id, athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload, receipt = excluded.receipt",
+            f"ON CONFLICT(recording_id, athlete_id, ts_utc) DO UPDATE SET payload = excluded.payload, receipt = CASE "
+            f"WHEN payload = excluded.payload THEN CASE WHEN receipt IS NULL THEN excluded.receipt "
+            f"  ELSE json_set(receipt, '$.duplicate_arrivals', COALESCE(json_extract(receipt, '$.duplicate_arrivals'), 0) + 1) END "
+            f"WHEN excluded.receipt IS NULL THEN NULL "
+            f"ELSE json_set(excluded.receipt, '$.replaced_earlier', COALESCE(json_extract(receipt, '$.replaced_earlier'), 0) + 1) END",
             (recording_id, sample.athlete_id, to_utc_iso(sample.timestamp), sample.model_dump_json(), receipt),
         )
+
+    def range_with_receipts(self, recording_id: str, athlete_id: str, stream: str, start: datetime, end: datetime) -> list[tuple]:
+        """Recorded samples with start < timestamp <= end (UTC text order), with receipt metadata, oldest first."""
+        with self.db.read() as c:
+            rows = c.execute(f"SELECT payload, receipt FROM {TABLES[stream]} WHERE recording_id = ? AND athlete_id = ? AND ts_utc > ? AND ts_utc <= ? ORDER BY ts_utc ASC",
+                             (recording_id, athlete_id, to_utc_iso(start), to_utc_iso(end))).fetchall()
+        return [(MODELS[stream].model_validate_json(r["payload"]), json.loads(r["receipt"]) if r["receipt"] else None) for r in rows]
+
+    def newest_at_or_before(self, recording_id: str, athlete_id: str, stream: str, end: datetime) -> tuple | None:
+        with self.db.read() as c:
+            r = c.execute(f"SELECT payload, receipt FROM {TABLES[stream]} WHERE recording_id = ? AND athlete_id = ? AND ts_utc <= ? ORDER BY ts_utc DESC LIMIT 1",
+                          (recording_id, athlete_id, to_utc_iso(end))).fetchone()
+        return None if r is None else (MODELS[stream].model_validate_json(r["payload"]), json.loads(r["receipt"]) if r["receipt"] else None)
 
     def receipt_count(self, recording_id: str, athlete_id: str, stream: str) -> int:
         """How many of the recorded rows carry receipt metadata (rows from before instrumentation have none)."""
