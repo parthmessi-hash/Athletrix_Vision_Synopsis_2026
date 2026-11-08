@@ -7,7 +7,11 @@ BREAKS end a sprint (or a candidate) without bridging: a time gap longer than `m
 or a change of segment_id (a continuity break or a re-confirmed identity: never one person's sprint across two
 segments). Noise near the threshold: a dip shorter than `exit_samples` does not split a sprint, and fewer than
 `min_samples` samples above the threshold never start one. The detector reports peak and mean speed, duration and
-covered distance (speed x elapsed time between samples) of each sprint. Rules are configurable engineering defaults
+covered distance (speed x elapsed time between samples) of each sprint. INVALID samples (predicted, or below min_confidence) are never dropped silently: each ends any sprint or candidate,
+so an uncertain stretch is never bridged. COUNTED: a sprint needs min_samples valid samples at or above the threshold;
+one whose end was not observed (a gap, a segment change, an invalid sample, or the end of the available window, i.e.
+still in progress) is counted, marked complete = false, and its peak, duration and distance are lower bounds.
+Rules are configurable engineering defaults
 (the 5.5 m/s threshold is the draft plan's proposal), not validated sport standards.
 """
 
@@ -28,8 +32,8 @@ class SprintRule:
 
 def detect(samples: list, rule: SprintRule = SprintRule()) -> list[dict]:
     """samples: TrackingSample-like objects of ONE athlete, any order. Returns sprints oldest first."""
-    pts = sorted((s for s in samples if (getattr(s, "value_basis", None) or "observed") != "predicted" and s.tracking_confidence >= rule.min_confidence),
-                 key=lambda s: s.timestamp)
+    pts = sorted(samples, key=lambda s: s.timestamp)
+    valid = lambda s: (getattr(s, "value_basis", None) or "observed") != "predicted" and s.tracking_confidence >= rule.min_confidence  # noqa: E731
     out, cur, above, below, prev = [], None, [], 0, None
 
     def close(reason):
@@ -39,10 +43,16 @@ def detect(samples: list, rule: SprintRule = SprintRule()) -> list[dict]:
             dist = sum((a.speed_mps + b.speed_mps) / 2 * (b.timestamp - a.timestamp).total_seconds() for a, b in zip(p, p[1:]))
             out.append({"start": p[0].timestamp, "end": p[-1].timestamp, "samples": len(p), "peak_speed_mps": max(x.speed_mps for x in p),
                         "mean_speed_mps": sum(x.speed_mps for x in p) / len(p), "duration_s": (p[-1].timestamp - p[0].timestamp).total_seconds(),
-                        "distance_m": dist, "segment_id": p[0].segment_id, "ended_by": reason})
+                        "distance_m": dist, "segment_id": p[0].segment_id, "ended_by": reason, "complete": reason == "speed_below_threshold",
+                        **({} if reason == "speed_below_threshold" else {"note": "end not observed (" + reason.replace("_", " ") + "): counted as a sprint, "
+                                                                                "but its peak, duration and distance are lower bounds"})})
         cur = None
 
     for s in pts:
+        if not valid(s):   # never filtered out silently: an invalid sample ends a sprint or a candidate (no bridging)
+            close("invalid_sample")
+            above, below, prev = [], 0, None
+            continue
         broke = prev is not None and ((s.timestamp - prev.timestamp).total_seconds() > rule.max_gap_s or s.segment_id != prev.segment_id)
         if broke:
             close("gap" if (s.timestamp - prev.timestamp).total_seconds() > rule.max_gap_s else "segment_change")

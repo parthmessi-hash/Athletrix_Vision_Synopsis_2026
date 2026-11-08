@@ -173,31 +173,38 @@ def select(inp: ScoreInputs, prof: dict) -> dict:
             continue
         no_receipt += r is None
         phys.append(s)
-    track = []
+    track, invalid, all_track = [], [], []
     minc = prof["streams"].get("min_tracking_confidence", 0.5)
     for s, r in inp.track:
         if not visible(s, r):
             continue
         if s.tracking_confidence < minc or (s.value_basis or "observed") == "predicted":
             excl["low_confidence_or_predicted"] += 1
+            invalid.append(s.timestamp)
+            all_track.append(s)
             continue
+        all_track.append(s)
         no_receipt += r is None
         track.append(s)
     phys.sort(key=lambda s: s.timestamp)
     track.sort(key=lambda s: s.timestamp)
-    return {"phys": phys, "track": track, "excluded": excl, "without_receipt_metadata": no_receipt}
+    all_track.sort(key=lambda s: s.timestamp)
+    return {"phys": phys, "track": track, "all_track": all_track, "invalid_camera_times": sorted(invalid), "excluded": excl, "without_receipt_metadata": no_receipt}
 
 
 def _window(samples, t0, t1):
     return [s for s in samples if t0 < s.timestamp <= t1]
 
 
-def _covered(samples, max_gap, value=lambda s: 1.0):
-    """(covered seconds, integral of value over covered time) with left-point values; gaps > max_gap and segment changes not bridged."""
+def _covered(samples, max_gap, value=lambda s: 1.0, breaks=()):
+    """(covered seconds, integral of value over covered time) with left-point values. Never bridged: gaps > max_gap,
+    segment changes, and any `breaks` (an excluded interval (start, end) or an invalid sample's time) between two samples."""
     cov = acc = 0.0
     for a, b in zip(samples, samples[1:]):
         dt = (b.timestamp - a.timestamp).total_seconds()
         if dt <= 0 or dt > max_gap or getattr(a, "segment_id", None) != getattr(b, "segment_id", None):
+            continue
+        if any((x[0] < b.timestamp and x[1] > a.timestamp) if isinstance(x, tuple) else (a.timestamp < x < b.timestamp) for x in breaks):
             continue
         cov += dt
         acc += value(a) * dt
@@ -211,6 +218,8 @@ def _unavailable(reason: str, **extra) -> dict:
 def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
     F, T = prof["features"], inp.cutoff
     gap = prof["streams"]["max_gap_s"]
+    excl_iv = [(a, b) for a, b, _ in inp.exclusions]
+    cam_breaks = excl_iv + sel["invalid_camera_times"]
     phys = [s for s in sel["phys"] if s.heart_rate_bpm is not None]
     track = sel["track"]
     wearer = next((w for w in inp.wearers if w.start <= T and (w.end is None or T < w.end)), None)
@@ -254,7 +263,7 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
             out["time_above_threshold"] = {**base, **_unavailable(vest_ok or "no maximum heart rate (with its origin) in the wearer assignment")}
         else:
             thr = f["threshold_fraction_of_hr_max"] * hrmax
-            cov, above = _covered(w, gap, lambda s: 1.0 if s.heart_rate_bpm >= thr else 0.0)
+            cov, above = _covered(w, gap, lambda s: 1.0 if s.heart_rate_bpm >= thr else 0.0, excl_iv)
             base["reference"] = {"threshold_bpm": round(thr, 1), "hr_max_bpm": hrmax}
             if cov < f["min_coverage"] * f["window_s"]:
                 out["time_above_threshold"] = {**base, **_unavailable(f"{cov:.0f} s of the {f['window_s']} s window covered (gaps over {gap:g} s are not bridged); needs {f['min_coverage']:.0%}")}
@@ -282,7 +291,7 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
                 if any(s.heart_rate_bpm >= q for s in rw[1:]):
                     why = "a new qualifying effort interrupted the recovery window"
                     continue
-                cov, _ = _covered(rw, gap)
+                cov, _ = _covered(rw, gap, breaks=excl_iv)
                 if cov < f["min_coverage"] * f["recovery_s"]:
                     why = f"the recovery window is covered for {cov:.0f} of {f['recovery_s']} s"
                     break
@@ -323,8 +332,8 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
         else:
             ref = _window(track, r0, r1)
             rec = _window(track, t0, T)
-            cr, dr = _covered(ref, gap, lambda s: s.speed_mps)
-            cn, dn = _covered(rec, gap, lambda s: s.speed_mps)
+            cr, dr = _covered(ref, gap, lambda s: s.speed_mps, cam_breaks)
+            cn, dn = _covered(rec, gap, lambda s: s.speed_mps, cam_breaks)
             base["window"] = {"start": iso(t0), "end": iso(T)}
             if cr < f["min_coverage"] * R or cn < f["min_coverage"] * f["window_s"]:
                 out["output_change"] = {**base, **_unavailable(f"tracked coverage too low (reference {cr:.0f} of {R:g} s, recent {cn:.0f} of {f['window_s']} s; needs {f['min_coverage']:.0%})")}
@@ -343,8 +352,12 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
         if why:
             out["sprint_quality"] = {**base, **_unavailable(why)}
         else:
-            rule = SprintRule(threshold_mps=f["threshold_mps"], min_samples=f["min_samples"], max_gap_s=min(gap, 0.5))
-            rs, ns = detect(_window(track, r0, r1), rule), detect(_window(track, t0, T), rule)
+            rule = SprintRule(threshold_mps=f["threshold_mps"], min_samples=f["min_samples"], max_gap_s=min(gap, 0.5),
+                              min_confidence=prof["streams"].get("min_tracking_confidence", 0.5))
+            # the detector sees invalid samples too, so an uncertain stretch ends a sprint instead of being bridged;
+            # a sprint still in progress at the window's end has no observed peak and is not used
+            rs = [x for x in detect(_window(sel["all_track"], r0, r1), rule) if x["complete"]]
+            ns = [x for x in detect(_window(sel["all_track"], t0, T), rule) if x["complete"]]
             base.update(window={"start": iso(t0), "end": iso(T)}, reference_sprints=len(rs), recent_sprints=len(ns))
             if not rs:
                 out["sprint_quality"] = {**base, **_unavailable("no sprint detected in the reference window")}

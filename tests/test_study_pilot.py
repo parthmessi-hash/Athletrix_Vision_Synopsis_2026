@@ -187,3 +187,36 @@ def test_wearer_change_inherits_nothing_and_export_reproduces(pilot, tmp_path):
     finally:
         set_database(mine)
         other.close()
+
+
+def test_backdated_marker_same_instant_order_and_retry_with_another_time(pilot, tmp_path):
+    c, sim, rid, m0, st = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"]
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    late = entry(c, rid, kind="sprint_start", client_token="r1-sprint-late", athlete_id="x1", round=1, at=z(m0 + timedelta(seconds=290)))
+    pred = next(e for e in c.get(f"{API}/recordings/{rid}/study").json()["entries"] if e["kind"] == "prediction" and e["prediction"]["sprint_start_id"] == late["id"])
+    assert pred["prediction"]["prospective"] is False and pred["prediction"]["marker_lag_s"] == 10.0 and pred["prediction"]["timing_label"].startswith("RETROSPECTIVE")
+    r = c.post(f"{API}/recordings/{rid}/study", json={"kind": "sprint_start", "client_token": "r1-sprint-late", "athlete_id": "x1", "round": 1, "at": z(m0 + timedelta(seconds=295))})
+    assert r.status_code == 409, "the same token with another stated time is refused, never a second prediction"
+    assert sum(1 for e in c.get(f"{API}/recordings/{rid}/study").json()["entries"] if e["kind"] == "prediction") == 1
+    bad = c.post(f"{API}/recordings/{rid}/study", json={"kind": "round_end", "client_token": "r1-end-invalid", "athlete_id": "x1", "round": 1, "invalid": True})
+    assert bad.status_code == 422, "an invalid round needs its reason"
+    entry(c, rid, kind="round_end", client_token="r1-end-invalid2", athlete_id="x1", round=1, invalid=True, notes="FICTIONAL: false start")
+    for k in range(3):   # three notes at the same instant: their order must survive export and import
+        entry(c, rid, kind="note", client_token=f"same-instant-{k}", notes=f"note {k}")
+    before = [e["client_token"] for e in c.get(f"{API}/recordings/{rid}/study").json()["entries"]]
+    st["now"] += timedelta(seconds=5)
+    c.post(f"{API}/recordings/{rid}/stop")
+    pkg = read_package(c.get(f"{API}/recordings/{rid}/package.zip").content)
+    other = Database(tmp_path / "o.db")
+    from app.db import get_database
+    mine = get_database()
+    try:
+        new = import_package(other, pkg, st["now"]).recording_id
+        set_database(other)
+        after = [e["client_token"] for e in c.get(f"{API}/recordings/{new}/study").json()["entries"]]
+        rep = c.get(f"{API}/recordings/{new}/study/predictions/{[e for e in c.get(f'{API}/recordings/{new}/study').json()['entries'] if e['kind'] == 'prediction'][0]['id']}/reproduce").json()
+    finally:
+        set_database(mine)
+        other.close()
+    assert after == before, "same-instant entries keep their receipt order through export and import"
+    assert rep["status"] == "reproduced" and rep["prospective"] is False

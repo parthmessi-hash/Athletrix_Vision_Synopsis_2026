@@ -7,9 +7,14 @@ KINDS (operator entries unless noted)
                  the participant's OWN baseline and the maximum heart rate the profile may use, with its origin. The next
                  wearer entry (or an `end` wearer entry) closes it. Readings outside a participant's own assignment, or
                  from another device, are never used for that participant.
-  round_start / round_end    drill round boundaries (any number of rounds)
+  round_start / round_end    drill round boundaries (any number of rounds); round_end with invalid=true (and the
+                 reason in notes) leaves the round out of the evaluation
   sprint_start / sprint_end  a planned timed test sprint of a round. Marking sprint_start makes the engine save a
-                 PREDICTION (kind "prediction", written by the engine only) with the scores as available at that cutoff.
+                 PREDICTION (kind "prediction", written by the engine only) with the scores as available at that cutoff, in
+                 the same transaction as the marker. If the stated sprint time (`at`) is more than
+                 PROSPECTIVE_TOLERANCE_S before the marker reached the engine, the prediction is labelled RETROSPECTIVE
+                 (backdated marker): calculated with what was entered by the stated time, but not captured before the
+                 sprint, so the evaluation never counts it as a pre-sprint prediction.
   sprint_result  the independently timed result, entered later (time in seconds, or null with a missing reason)
   self_rating    optional self-rating (0-10) or null with a missing reason, plus notes; never a score input
   note           free text
@@ -28,6 +33,7 @@ from app.models.common import AthletrixModel
 
 StudyKind = Literal["session", "wearer", "round_start", "round_end", "sprint_start", "sprint_end", "sprint_result", "self_rating", "note"]
 MissingReason = Literal["not_collected", "declined", "not_recorded", "invalid_attempt", "equipment_failure", "other"]
+PROSPECTIVE_TOLERANCE_S = 2.0
 ROUND_KINDS = ("round_start", "round_end", "sprint_start", "sprint_end", "sprint_result", "self_rating")
 
 
@@ -59,6 +65,7 @@ class StudyEntryCreate(AthletrixModel):
     hr_max_bpm: float | None = Field(None, gt=100, lt=240)
     hr_max_origin: str | None = Field(None, min_length=1, max_length=120, description="Where the maximum heart rate came from, e.g. 'estimated: 208 - 0.7 x age' or 'measured test'.")
     end: bool = Field(False, description="wearer: true ends the athlete's assignment at `at` without a new one.")
+    invalid: bool = Field(False, description="round_end: the operator marks the round invalid (the reason goes in notes); it is left out of the evaluation.")
     # sprint_result / self_rating
     time_s: float | None = Field(None, gt=0, lt=60)
     method: Literal["timing_gates", "stopwatch", "video_frames", "other"] | None = None
@@ -91,6 +98,8 @@ class StudyEntryCreate(AthletrixModel):
             raise ValueError("a timed sprint result needs the timing method")
         if k == "self_rating" and (self.value is None) == (self.missing_reason is None):
             raise ValueError("a self-rating has either a value or a missing_reason (an explicit missing value)")
+        if self.invalid and (k != "round_end" or not self.notes):
+            raise ValueError("only a round_end can mark a round invalid, and it needs the reason in notes")
         if k == "note" and not self.notes:
             raise ValueError("a note needs notes")
         return self

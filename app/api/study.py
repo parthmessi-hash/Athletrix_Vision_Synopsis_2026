@@ -21,7 +21,7 @@ from app.core.fatigue import FatigueProfileError, ScoreInputs, Wearer, iso, pars
 from app.core.knowledge import baselines_as_of
 from app.db import get_database
 from app.models.recording import Recording
-from app.models.study import StudyEntry, StudyEntryCreate
+from app.models.study import PROSPECTIVE_TOLERANCE_S, StudyEntry, StudyEntryCreate
 from app.store.baselines import baseline_store
 from app.store.recordings import recording_store
 from app.store.study import current, insert, new_study_id, study_store
@@ -168,8 +168,14 @@ def add_study_entry(recording_id: str, body: StudyEntryCreate, response: Respons
             p, sha, _ = fz
             with get_database().read():
                 result = score(build_inputs(rec, entries + [e], p, body.athlete_id, t, "as_entered", marks_known_by=now), p, sha)
+        lag = (now - t).total_seconds()
+        prospective = lag <= PROSPECTIVE_TOLERANCE_S
         pred = StudyEntry(kind="prediction", client_token=f"pred-{e.id}", at=t, athlete_id=body.athlete_id, round=body.round, id=new_study_id(now, "prediction"),
                           recording_id=rec.id, created_at=now, prediction={"cutoff": iso(t), "sprint_start_id": e.id, "knowledge": "as_entered", "result": result,
+                                                                          "marker_received_at": iso(now), "marker_lag_s": round(lag, 3), "prospective": prospective,
+                                                                          "timing_label": ("prospective: saved when the sprint marker reached the engine" if prospective else
+                                                                                           f"RETROSPECTIVE: the marker reached the engine {lag:.1f} s after the stated sprint time; "
+                                                                                           "calculated with what was entered by that time, but not captured before the sprint"),
                                                                           "note": "saved at the cutoff; never rewritten. A retrospective view is a separate calculation."})
     with get_database().transaction() as c:
         insert(c, e)
@@ -296,12 +302,19 @@ def reproduce_prediction(recording_id: str, prediction_id: str) -> dict:
                 w.baseline = {"id": sb["baseline_id"], "rest_hr_bpm": sb["rest_hr_bpm"], "n": None, "status": p["baseline"]["require_status"] if ok else "unknown",
                               "source": "the values recorded in the prediction (the baseline's own recording is not on this engine)"}
         again = score(inp, p, sha)
-    same_inputs = (again["inputs"]["wearable_sha256"], again["inputs"]["camera_sha256"]) == (saved["inputs"]["wearable_sha256"], saved["inputs"]["camera_sha256"])
+    changed = [k.split("_")[0] for k in ("wearable_sha256", "camera_sha256") if again["inputs"][k] != saved["inputs"][k]]
+    same_inputs = not changed
+    missing_baseline = any(w.baseline is None for w in inp.wearers) and (saved["features"].get("hr_strain") or {}).get("available")
     same_values = {c: again["candidates"][c]["value"] for c in again["candidates"]} == {c: saved["candidates"][c]["value"] for c in saved["candidates"]}
-    st = "reproduced" if same_inputs and same_values else ("inputs_changed" if not same_inputs else "differs")
+    st = "reproduced" if same_inputs and same_values else ("not_reproducible" if missing_baseline else ("inputs_changed" if not same_inputs else "differs"))
     return {"prediction_id": pred.id, "cutoff": pred.prediction["cutoff"], "status": st, "saved": {c: saved["candidates"][c]["value"] for c in saved["candidates"]},
             "recalculated": {c: again["candidates"][c]["value"] for c in again["candidates"]},
-            "explanation": {"reproduced": "same visible inputs and the same scores", "inputs_changed": "the stored samples visible at the cutoff changed since the prediction was saved",
+            "explanation": {"reproduced": "same visible inputs and the same scores",
+                            "inputs_changed": f"the stored {' and '.join(changed)} samples visible at the cutoff differ from those the prediction used "
+                                              f"(saved {saved['inputs']['wearable_samples']} wearable / {saved['inputs']['camera_samples']} camera samples, now "
+                                              f"{again['inputs']['wearable_samples']} / {again['inputs']['camera_samples']}): the original evidence is not all here",
+                            "not_reproducible": "the baseline the prediction used is not on this engine and the prediction did not record its values",
                             "differs": "same inputs, different scores: the scoring code changed"}[st],
+            "prospective": pred.prediction.get("prospective"), "timing_label": pred.prediction.get("timing_label"),
             "note": "The saved prediction is never rewritten."}
 

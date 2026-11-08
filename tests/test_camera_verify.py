@@ -85,3 +85,13 @@ def test_synthetic_fixture_report(tmp_path):
     assert abs(c["error_pct"]) < 5 and c["within_target"] and abs(sp["error_pct"]) < 5 and "not ground truth" in sp["meaning"]
     assert (ev["manual"], ev["detected"], ev["matched"], ev["false_detections"]) == (2, 2, 2, [])
     assert "SYNTHETIC" in (tmp_path / "r" / "report.md").read_text()
+
+
+def test_short_invalid_interval_long_gap_and_a_sprint_at_the_end_of_the_window():
+    low = s(0.5, 7.0, conf=0.2)
+    pts = series([6, 6.2, 6.4, 6.6, 6.8]) + [low] + series([6.8, 6.6, 6.4], start=0.6) + series([3, 3])[:0]
+    sp = detect(pts)
+    assert [(x["samples"], x["ended_by"]) for x in sp] == [(5, "invalid_sample"), (3, "end_of_data")], "never bridged across the invalid sample"
+    assert sp[1]["complete"] is False and "lower bounds" in sp[1]["note"], "a sprint still in progress at the window's end is counted, marked incomplete"
+    long_gap = detect(series([6, 6.2, 6.4]) + series([6.4, 6.2, 6.0], start=5.0))
+    assert [x["ended_by"] for x in long_gap] == ["gap", "end_of_data"] and not any(x["complete"] for x in long_gap)

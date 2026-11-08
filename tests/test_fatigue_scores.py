@@ -116,10 +116,12 @@ def sprint(start, peak, seg="seg-1"):
 
 
 def test_no_sprint_opportunity_is_not_a_drop():
-    track = moving(0, 50, 3.0) + sprint(50.2, 7.5) + moving(52, 600, 3.0)
+    # contiguous at 0.2 s steps (an earlier version had an accidental 0.6 s gap after the sprint, which is a sprint end
+    # that was not observed: such a sprint is counted but has no observed peak, so it is not used for sprint quality)
+    track = moving(0, 50, 3.0) + sprint(50.2, 7.5) + moving(51.6, 600, 3.0)
     r = fz.score(inputs(steady(0, 600, 140), track, 600), P, SHA)["features"]["sprint_quality"]
     assert r["available"] is False and "no sprint opportunity" in r["reason"] and r["value"] is None
-    track2 = moving(0, 50, 3.0) + sprint(50.2, 7.5) + moving(52, 500, 3.0) + sprint(500.2, 6.75) + moving(502, 600, 3.0)
+    track2 = moving(0, 50, 3.0) + sprint(50.2, 7.5) + moving(51.6, 500, 3.0) + sprint(500.2, 6.75) + moving(501.6, 600, 3.0)
     r2 = fz.score(inputs(steady(0, 600, 140), track2, 600), P, SHA)["features"]["sprint_quality"]
     assert r2["available"] and r2["measure"]["drop"] == pytest.approx(0.1, abs=1e-3) and r2["value"] == pytest.approx(66.67, abs=0.01)
 
@@ -163,3 +165,36 @@ def test_samples_received_after_the_cutoff_are_not_seen_as_entered():
     late = [(s, {"received_at": fz.iso(at(700))}) for s, _ in steady(590, 600, 199)]
     r = fz.score(inputs(phys[:590] + late, moving(0, 600, 3.0), 600), P, SHA)
     assert r["inputs"]["excluded"]["received_after_cutoff"] == 11
+
+
+def test_camera_identity_loss_keeps_the_valid_vest_score_and_makes_combined_unavailable():
+    phys = steady(0, 600, 150)
+    track = moving(0, 560, 3.0) + [(tr(560 + k * 0.2, 3.0)[0].model_copy(update={"tracking_confidence": 0.2}), None) for k in range(200)]
+    r = fz.score(inputs(phys, track, 600), P, SHA)
+    c = r["candidates"]
+    assert c["vest_only"]["available"] and not c["camera_only"]["available"] and not c["combined"]["available"]
+    assert r["inputs"]["excluded"]["low_confidence_or_predicted"] == 200 and "camera stream" in c["combined"]["reasons"][0]
+
+
+def test_no_usable_movement_window_is_unavailable_with_its_reason():
+    track = moving(0, 120, 3.0, step=8.0) + moving(130, 600, 3.0)   # the reference window is barely tracked
+    r = fz.score(inputs(steady(0, 600, 150), track, 600), P, SHA)["features"]["output_change"]
+    assert r["available"] is False and r["reason"].startswith("tracked coverage too low (reference 0 of 120 s")
+
+
+def test_features_never_bridge_an_excluded_interval_even_with_a_generous_gap_rule():
+    loose = json.loads(TEXT)
+    loose["streams"]["max_gap_s"] = 60
+    lp, lsha = fz.parse_profile(json.dumps(loose))
+    ex = [(at(400), at(420), "timed test sprint, round 1")]
+    r = fz.score(inputs(steady(0, 600, 150), moving(0, 600, 3.0), 600, exclusions=ex), lp, lsha)["features"]["time_above_threshold"]
+    # samples 301..600 s span 299 s; the pair 399 -> 421 s (22 s) crosses the excluded interval and is never bridged
+    assert r["measure"]["covered_s"] == 299 - 22
+
+
+def test_an_invalid_stretch_inside_a_sprint_is_not_bridged():
+    pts = moving(0, 30, 3.0) + [tr(30.2 + k * 0.2, 7.0) for k in range(5)] + [(tr(31.2, 7.0)[0].model_copy(update={"tracking_confidence": 0.1}), None)] + \
+        [tr(31.4 + k * 0.2, 7.0) for k in range(5)] + moving(32.4, 40, 3.0)
+    from app.core.sprints import detect
+    sp = detect([s for s, _ in pts])
+    assert [(x["samples"], x["ended_by"], x["complete"]) for x in sp] == [(5, "invalid_sample", False), (5, "speed_below_threshold", True)]
