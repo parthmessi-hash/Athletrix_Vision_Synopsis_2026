@@ -2,7 +2,12 @@
 (pure functions; scripts/evaluate.py pilot does the I/O).
 
 ROWS: one per participant / session / round with a saved prediction (scores as they were at the cutoff) and, entered
-later and separately, the timed 20 m sprint result. OUTCOME: percent slowdown = 100 x (time - best) / best, where best is
+later and separately, the timed 20 m sprint result. ELIGIBLE rows only: a prediction captured before the sprint
+(prospective: the marker reached the engine within the tolerance of the stated sprint time) in a round the operator did
+not mark invalid. Retrospective-only predictions (backdated markers) and invalid rounds are listed with their reason and
+never enter a correlation; an invalid round's time is never the best reference.
+UNITS: slowdown_pct = 100 x (time_s - best_s) / best_s, both in seconds from the independent timing (percent; 0 for the
+best round, positive = slower). OUTCOME: percent slowdown = 100 x (time - best) / best, where best is
 the participant's fastest valid timed sprint IN THAT SESSION. The best is a retrospective reference for the outcome only:
 it never enters a score, a feature or any normalisation (scores are saved before it is known).
 COMPARISON: for each candidate, coverage (rows with a value and an outcome) and the reasons for missing values; then the
@@ -27,9 +32,9 @@ SMALL_N = 5
 def pearson(xs: list[float], ys: list[float]) -> dict:
     n = len(xs)
     if n < 3:
-        return {"r": None, "n": n, "why": "fewer than 3 rows"}
+        return {"r": None, "n": n, "why": "not enough data (fewer than 3 usable rounds)"}
     if len(set(xs)) == 1 or len(set(ys)) == 1:
-        return {"r": None, "n": n, "why": "constant input: correlation undefined"}
+        return {"r": None, "n": n, "why": "undefined: constant input"}
     mx, my = statistics.fmean(xs), statistics.fmean(ys)
     sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
     sxx, syy = sum((x - mx) ** 2 for x in xs), sum((y - my) ** 2 for y in ys)
@@ -37,18 +42,26 @@ def pearson(xs: list[float], ys: list[float]) -> dict:
     return {"r": round(r, 4), "n": n, **({"flag": f"small sample (n < {SMALL_N})"} if n < SMALL_N else {})}
 
 
+def not_eligible(r: dict) -> str | None:
+    if r.get("invalid"):
+        return "round marked invalid by the operator: " + (r.get("invalid_reason") or "no reason given")
+    if r.get("prospective") is False:
+        return "retrospective-only prediction (marker reached the engine after the stated sprint time): not a pre-sprint prediction"
+    return None
+
+
 def with_outcomes(rows: list[dict]) -> list[dict]:
     """Adds slowdown_pct (or outcome_missing) using the best valid time of the same participant and session."""
     best = {}
     for r in rows:
-        if r.get("time_s"):
+        if r.get("time_s") and not r.get("invalid"):
             k = (r["participant"], r["session"])
             best[k] = min(best.get(k, math.inf), r["time_s"])
     out = []
     for r in rows:
         k = (r["participant"], r["session"])
-        if not r.get("time_s"):
-            out.append({**r, "slowdown_pct": None, "outcome_missing": r.get("time_missing_reason") or "no timed result"})
+        if not r.get("time_s") or k not in best:
+            out.append({**r, "slowdown_pct": None, "outcome_missing": r.get("time_missing_reason") or ("no valid round to compare with" if r.get("time_s") else "no timed result")})
         else:
             out.append({**r, "slowdown_pct": round(100 * (r["time_s"] - best[k]) / best[k], 4), "best_time_s": best[k]})
     return out
@@ -57,6 +70,8 @@ def with_outcomes(rows: list[dict]) -> list[dict]:
 def compare(rows: list[dict]) -> dict:
     """rows: [{participant, session, round, time_s|None, time_missing_reason, scores{c: value|None}, reasons{c: [..]}, self_rating|None}]"""
     rows = with_outcomes(rows)
+    ineligible = [{"participant": r["participant"], "session": r["session"], "round": r["round"], "reason": not_eligible(r)} for r in rows if not_eligible(r)]
+    all_rows, rows = rows, [r for r in rows if not not_eligible(r)]
     coverage = {}
     for c in CANDIDATES:
         have = [r for r in rows if r["slowdown_pct"] is not None and r["scores"].get(c) is not None]
@@ -67,7 +82,9 @@ def compare(rows: list[dict]) -> dict:
                     why[x] = why.get(x, 0) + 1
             elif r["slowdown_pct"] is None:
                 why[f"outcome missing: {r['outcome_missing']}"] = why.get(f"outcome missing: {r['outcome_missing']}", 0) + 1
-        coverage[c] = {"rows": len(rows), "usable": len(have), "missing_reasons": why}
+        for x in ineligible:
+            why[x["reason"]] = why.get(x["reason"], 0) + 1
+        coverage[c] = {"rows": len(all_rows), "usable": len(have), "missing_reasons": why}
     matched = [r for r in rows if r["slowdown_pct"] is not None and all(r["scores"].get(c) is not None for c in CANDIDATES)]
 
     def block(sub: list[dict]) -> dict:
@@ -87,7 +104,8 @@ def compare(rows: list[dict]) -> dict:
                "combined_above_both_single_source": None if None in (rc, rv, rk) else (rc > rv and rc > rk),
                "note": "engineering targets from the plan, on the pooled matched rows; meeting them is not proof of effectiveness, and None means undefined"}
     rated = [r for r in rows if r.get("self_rating") is not None and r["slowdown_pct"] is not None]
-    return {"rows": rows, "coverage": coverage, "matched_rows": len(matched), "participants": len({r["participant"] for r in matched}),
+    return {"rows": all_rows, "ineligible": ineligible, "units": "slowdown_pct = 100 x (time_s - best_s) / best_s (percent; seconds from the independent timing)",
+            "coverage": coverage, "matched_rows": len(matched), "participants": len({r["participant"] for r in matched}),
             "sessions": len({(r["participant"], r["session"]) for r in matched}), "pooled": pooled, "by_participant": by_participant, "by_session": by_session,
             "targets": targets, "self_rating_exploratory": {"rows": len(rated), "self_rating_vs_slowdown": pearson([r["self_rating"] for r in rated], [r["slowdown_pct"] for r in rated]),
                                                             "note": "exploratory only; self-ratings are never a score input"},
@@ -108,7 +126,10 @@ def rows_from_package(pkg) -> list[dict]:
         rate = next((e for e in cur if e.kind == "self_rating" and e.athlete_id == s.athlete_id and e.round == s.round), None)
         p = preds.get(s.id)
         cands = ((p.prediction or {}).get("result") or {}).get("candidates") if p else None
-        out.append({"participant": code.get(s.athlete_id, s.athlete_id), "session": sess.session_label if sess else pkg.recording["id"], "recording_id": pkg.recording["id"],
+        end = next((e for e in cur if e.kind == "round_end" and e.athlete_id == s.athlete_id and e.round == s.round), None)
+        out.append({"invalid": bool(end and end.invalid), "invalid_reason": end.notes if end and end.invalid else None,
+                    "prospective": (p.prediction or {}).get("prospective", True) if p else None, "marker_lag_s": (p.prediction or {}).get("marker_lag_s") if p else None,
+                    "participant": code.get(s.athlete_id, s.athlete_id), "session": sess.session_label if sess else pkg.recording["id"], "recording_id": pkg.recording["id"],
                     "round": s.round, "cutoff": p.prediction["cutoff"] if p else None,
                     "scores": {c: (cands or {}).get(c, {}).get("value") for c in CANDIDATES},
                     "reasons": {c: (cands or {}).get(c, {}).get("reasons") or ([] if cands else ["no score: " + str(((p.prediction or {}).get("result") or {}).get("reason") if p else "no prediction")]) for c in CANDIDATES},

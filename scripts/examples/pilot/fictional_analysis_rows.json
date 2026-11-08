@@ -2,7 +2,7 @@
   "format": "athletrix-pilot-rows",
   "format_version": 1,
   "fictional": true,
-  "note": "FICTIONAL deterministic fixture for the paired analysis. Expected values below were computed separately with exact fractions, not by the analysis code.",
+  "note": "FICTIONAL deterministic fixture for the paired analysis. Expected values below were computed separately with exact fractions, not by the analysis code. Round 7 is retrospective-only (backdated marker) and round 8 is marked invalid with a time faster than the best valid one: neither may change any figure.",
   "rows": [
     {
       "participant": "P1",
@@ -176,6 +176,48 @@
       },
       "self_rating": null,
       "fictional": true
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 7,
+      "time_s": 3.15,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 35,
+        "camera_only": 15,
+        "combined": 35
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": null,
+      "fictional": true,
+      "prospective": false,
+      "marker_lag_s": 42.0
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 8,
+      "time_s": 2.9,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 5,
+        "camera_only": 45,
+        "combined": 5
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": null,
+      "fictional": true,
+      "invalid": true,
+      "invalid_reason": "FICTIONAL: false start, timed from the wrong cone"
     }
   ],
   "expected": {
@@ -211,6 +253,18 @@
       "combined_r_at_least_0.5": true,
       "combined_above_both_single_source": false
     },
-    "self_rating_r": 0.9899
+    "self_rating_r": 0.9899,
+    "ineligible": [
+      [
+        "P1",
+        7,
+        "retrospective-only"
+      ],
+      [
+        "P1",
+        8,
+        "round marked invalid"
+      ]
+    ]
   }
 }

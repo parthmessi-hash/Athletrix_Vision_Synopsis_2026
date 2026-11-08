@@ -732,7 +732,7 @@ def pilot_pin(args, out) -> int:
 def pilot(args, out) -> int:
     from app.core.pilot_analysis import compare, rows_from_package  # noqa: PLC0415
     from app.core.recording_package import read_package  # noqa: PLC0415
-    source, rows, fictional, starts = [], [], False, {}
+    source, rows, fictional, starts, frozen = [], [], False, {}, {}
     if args.rows:
         doc = json.loads(Path(args.rows).read_text())
         rows, fictional = doc["rows"], bool(doc.get("fictional"))
@@ -748,6 +748,9 @@ def pilot(args, out) -> int:
         fictional = fictional or any(r["fictional"] for r in rr)
         for r in rr:
             starts[(r["participant"], r["session"])] = pkg.recording["started_at"]
+        sess = next((e for e in pkg.study if e.kind == "session" and e.profile), None)
+        if sess:
+            frozen[sess.profile["sha256"]] = {"version": sess.profile["version"], "fictional": sess.profile["fictional"], "text": sess.profile["text"]}
         source.append({"package": Path(pth).name, "sha256": hashlib.sha256(data).hexdigest(), "recording_id": pkg.recording["id"]})
     pin = json.loads(Path(args.pin).read_text()) if args.pin else None
     held = {"status": "no pin: nothing is reported as held out"}
@@ -771,7 +774,10 @@ def pilot(args, out) -> int:
                           "and is not evidence for other players.")
         rows = [r for r in rows if r[key] not in pin["held_out"]] if test else rows
     res = compare(rows)
-    res.update(source=source, fictional=fictional, pin=pin, held_out=held, generated_at=datetime.now().astimezone().isoformat(timespec="seconds"))
+    res.update(source=source, fictional=fictional, pin=pin, held_out=held, generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+               frozen_profiles=frozen, analysis_choices={"outcome": res["units"], "eligibility": "prospective predictions in rounds not marked invalid",
+                                                          "statistic": "Pearson r on rows where all three candidates and the outcome exist", "targets": ["combined r >= 0.5",
+                                                          "combined r above both single-source r"], "small_sample_flag_below": 5, "tuned_on_outcomes": False})
     if args.out.exists():
         out(f"{args.out} exists; not overwritten")
         return 2
@@ -784,12 +790,13 @@ def pilot(args, out) -> int:
 
 def pilot_report(r: dict) -> str:
     def rr(x):
-        return "undefined" if x["r"] is None else f"{x['r']:+.3f}"
+        return (x.get("why") or "undefined") if x["r"] is None else f"{x['r']:+.3f}"
     L = ["# Fatigue pilot: paired report", ""]
     if r["fictional"]:
         L += ["**FICTIONAL data: made-up readings and made-up sprint times. This exercises the analysis; it shows nothing about real players.**", ""]
     L += ["Saved pre-sprint scores (as available at each cutoff) against percent slowdown of the independently timed 20 m sprint "
-          "(against the participant's best valid time in that session, a retrospective reference for the outcome only).", "",
+          "(against the participant's best valid time in that session, a retrospective reference for the outcome only). "
+          f"Units: {r['units']}.", "",
           f"Matched rows (all three scores and an outcome): **{r['matched_rows']}** from {r['participants']} participants and {r['sessions']} participant-sessions. "
           "Rounds of one person are repeated observations, not independent participants.", "", "## Coverage per candidate", "",
           "| Candidate | Rows | Usable | Missing reasons |", "|---|---|---|---|"]
@@ -815,6 +822,7 @@ def pilot_report(r: dict) -> str:
     L += ["", "## By participant and session", "", "| Participant/session | rows | vest-only r | camera-only r | combined r |", "|---|---|---|---|---|"]
     for k, b in r["by_session"].items():
         L.append(f"| {k} | {b['rows']} | {rr(b['vest_only'])} | {rr(b['camera_only'])} | {rr(b['combined'])} |")
+    L += ["", "## Rounds left out of every correlation", ""] + ([f"- {x['participant']} {x['session']} round {x['round']}: {x['reason']}" for x in r["ineligible"]] or ["- none"])
     L += ["", "## Held out", r["held_out"]["status"], r["held_out"].get("limits", ""), "",
           "## Self-rating (exploratory, never a score input)", f"r(self-rating, slowdown) = {rr(r['self_rating_exploratory']['self_rating_vs_slowdown'])} on {r['self_rating_exploratory']['rows']} rows.", "",
           "## Rows", "", "| Participant | Session | Round | vest-only | camera-only | combined | time (s) | slowdown % |", "|---|---|---|---|---|---|---|---|"]

@@ -28,10 +28,14 @@ def test_fixture_matches_the_separately_computed_values():
     for p, want in EXP["by_participant_r"].items():
         got = {c: r(res["by_participant"][p][c]) for c in want}
         assert got == {c: None if v is None else round(v, 3) for c, v in want.items()}, p
-    assert res["by_participant"]["P2"]["vest_only"]["why"].startswith("constant input")
+    assert res["by_participant"]["P2"]["vest_only"]["why"] == "undefined: constant input"
     assert {k: v for k, v in res["targets"].items() if k != "note"} == EXP["targets_pooled"]
     assert round(res["self_rating_exploratory"]["self_rating_vs_slowdown"]["r"], 4) == EXP["self_rating_r"]
     assert "camera stream" in json.dumps(res["coverage"]["combined"]["missing_reasons"])
+    got = [[x["participant"], x["round"], x["reason"]] for x in res["ineligible"]]
+    assert [g[:2] for g in got] == [e[:2] for e in EXP["ineligible"]] and all(g[2].startswith(e[2]) for g, e in zip(got, EXP["ineligible"])), \
+        "the retrospective-only and the invalid round are listed, never hidden, and change no figure (the invalid 2.90 s is not the best)"
+    assert res["units"].startswith("slowdown_pct = 100 x (time_s - best_s) / best_s")
 
 
 def test_a_losing_combined_method_is_reported_as_not_met():
@@ -41,7 +45,7 @@ def test_a_losing_combined_method_is_reported_as_not_met():
 
 
 def test_undefined_and_small_correlations_are_never_numbers():
-    assert pearson([1, 2], [1, 2])["r"] is None and pearson([5, 5, 5], [1, 2, 3])["r"] is None
+    assert pearson([1, 2], [1, 2]) == {"r": None, "n": 2, "why": "not enough data (fewer than 3 usable rounds)"} and pearson([5, 5, 5], [1, 2, 3])["r"] is None
     assert pearson([1, 2, 3, 4], [2, 4, 6, 8]) == {"r": 1.0, "n": 4, "flag": "small sample (n < 5)"}
 
 
@@ -55,3 +59,4 @@ def test_report_and_held_out_guard(tmp_path):
     assert res["matched_rows"] == 4, "the declared held-out participant is kept out of the development figures"
     md = (tmp_path / "r" / "report.md").read_text()
     assert "FICTIONAL data" in md and "not proof of effectiveness" in md and "repeated observations" in md
+    assert "retrospective-only prediction" in md and "round marked invalid" in md and res["analysis_choices"]["tuned_on_outcomes"] is False
