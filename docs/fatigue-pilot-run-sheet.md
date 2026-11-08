@@ -43,17 +43,42 @@ Ctrl-C stops only what it started.
 | Step | Dashboard (Fatigue pilot card) | Or type (re-running is safe) |
 |---|---|---|
 | Put the vest on | — | `pilot_session.py wearer px1 --code P1 --device VEST --baseline BL --hr-max 201 --hr-max-origin "measured test"` |
-| Start the round | — | `pilot_session.py round-start px1 --round 1` |
+| Wait for **READY TO START** | the **Next** line at the top of the box | `pilot_session.py ready px1` (exit 0 = ready) |
+| Start the round | **Start round** | `pilot_session.py round-start px1 --round 1` |
 | **1. Save the score** | enter the round, press **1. Save score**, read "SAVED … all three estimates available: yes/NO" | `pilot_session.py save-score px1 --round 1` |
 | **2. Start the sprint** (only after step 1 is confirmed) | press **2. Start timed sprint**, then give the start signal | `pilot_session.py sprint-start px1 --round 1 --confirm PREDICTION_ID` |
 | Sprint over | — | `pilot_session.py sprint-end px1 --round 1`, then `round-end px1 --round 1` (or `--invalid "false start"`) |
 
+- The **Next** line names one of: NO STREAM (nothing arriving), NOT USABLE (arriving but stale, from another device,
+  still tagged for the previous wearer, or camera identity not confirmed), READY TO START, WARMING UP (round open,
+  reference or windows still building, with seconds left), READY TO SAVE (with the estimates that will be available).
+- A round start is **refused** while the streams are not usable. To record the round anyway, type the reason (box next
+  to **Start round**, or `round-start ... --partial "strap being refitted"`). The reason goes into the report; such a
+  start never opens the camera reference, and the reference is never moved to make a score appear.
+- The first round started with both streams usable opens the athlete's camera reference period (the card and CLI say
+  "camera reference OPENED"). Right after a sprint, Next says how many seconds of the sprint exclusion would fall inside
+  that period; waiting that long gives a fuller reference.
 - If the save says "NO" for some estimate, the reason is on the card (for example "wearable stream: newest sample
   20 s old"). Fix it if possible and save again. The round stays recorded either way.
 - If you forget to save, start the sprint anyway: the round is kept but labelled ORDER UNVERIFIED, and it is not in the
   primary comparison.
 - If the wearer or round changes after a save, the card refuses the start; save again.
 - Never type a time for "save score". A sprint marker stated more than 2 s in the past is labelled retrospective.
+
+## 2b. Camera-only field check (before the first camera session; camera only, no participant)
+
+1. `python scripts/camera_field_check.py template --out FIELD/`, then fill in `FIELD/points.json` from the tape: each
+   mark's pixel position and field position in metres, at least 4 fit points and **at least 2 check points** that are
+   not used in the fit, and the camera settings (zoom, focus, mount). Fill in `FIELD/course.json`: the course axis, the
+   lane, and the timing marks in metres.
+2. Track a short permitted clip (`scripts/camera_track_video.py CLIP --model models/yolox_s.onnx --out OBS --log LOG`),
+   assign the tracks after review, export samples (`scripts/camera_to_samples.py export ...`).
+3. `python scripts/camera_field_check.py run --points FIELD/points.json --course FIELD/course.json --samples samples.jsonl --athlete ID --out FIELD/report --now-settings NOW.json`
+   Read: each check point's error in metres; the usable field region; the share of the course tracked; each interval's
+   average speed or why it was excluded; whether the calibration is still compatible with the camera now. Exit 1 means
+   the camera changed (zoom, resolution, camera id, mount): recalibrate, nothing is timed.
+4. Average interval speed and peak speed are separate. Peak-speed accuracy is **not established** without an
+   independent reference (gates or measured video timing).
 
 ## 3. Timing (independent timer, who never sees the scores)
 
@@ -100,8 +125,17 @@ Ctrl-C stops only what it started.
 | Entered afterwards (timer, blind) | 3.18 s by timing gates | 3.27 s by timing gates |
 | In the report | `saved_before_recorded_start / timing_gate`: primary comparison; increase 0.0 % (best valid time) | `order_unverified / marker_only`: listed under "Rounds left out of the primary comparison"; increase 2.83 % is shown in the trace only |
 
-Tip from the rehearsal: start a round only when the card shows both streams fresh. A round started without data keeps
-an empty camera reference, and its camera and combined scores stay unavailable.
+Tip from the rehearsal: start a round only when the card shows both streams fresh. Since 2026-11-08 the engine refuses
+a start without usable data unless the operator gives a reason (see section 2).
+
+## 5c. Readiness (2026-11-08, one laptop)
+
+| | What ran | Conditions | Not shown |
+|---|---|---|---|
+| **Runs today with fictional inputs** | dashboard and fictional demo (`demo_launcher.py --session pilot`), round readiness and refused/partial starts, save-then-start, blind timing sheet, export, reproduction in a fresh database, report; run from clean snapshots with the scripts' outbound requests sent to a dead proxy (nothing failed) and no detector model on disk | fictional heart rate, synthetic tracking, isolated engine; the browser itself was online and its only remote request was the Google Fonts stylesheet (without it, system fonts) | anything about real people; a laptop with networking switched off |
+| **Passed through the actual video software path** | decoding, YOLOX-S person detection, ByteTrack, calibration, samples, paced playback into an isolated pilot session (`scripts/video_pilot_check.py`); camera-only field check (`scripts/camera_field_check.py synthetic`) | a GENERATED 20 s clip of drawn figures, 1280x720 at 25 fps; identities from a simulated operator; this laptop ran the detector at about 9 frames/s, so paced playback dropped about 63 % of frames | real footage, real kits, lighting, crowds; live camera capture; camera-to-engine latency |
+| **Needs an approved field setup and an independent timing reference** | positional accuracy on the field (measured check points), interval timing against gates or measured video timing, peak speed accuracy, coverage with real players | permission, a fixed camera position, tape measurements | — |
+| **Waits on Zephyr** | the vest stream from real hardware; until then the source label says "simulated", and nothing on screen claims a connected device | see the list below | — |
 
 ## 6. Still needed before the real pilot
 

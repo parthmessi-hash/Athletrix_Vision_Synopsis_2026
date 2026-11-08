@@ -18,6 +18,15 @@ fatigue.** The coach makes every substitution decision. The pilot view gives no 
   - Corrections supersede an entry and keep the history.
   - Event time (`at`), receipt time (`created_at`), sample timestamps, sample receipts and any adapter clock mapping
     (the session's `clock_references`) are separate fields.
+  - **Round readiness** (`GET .../study/readiness?athlete_id=`, also in the pilot view and `pilot_session.py ready`):
+    no_stream, stale_or_unassigned, ready_to_start, warming_up (with seconds left), ready_to_save. A round start is
+    refused (409, with the readiness) while the streams are not usable, unless it carries `partial_reason`, which is
+    stored and listed in the report ("Rounds started without usable data").
+  - **Camera reference opening** (since 2026-11-08): the camera reference period starts at the first round start of
+    that athlete that was made with both streams usable; the entry records `opens_camera_reference` and the readiness
+    the engine saw. A partial start never opens it, and nothing moves it later. Recordings made before this change
+    have no such field and keep the old rule (the athlete's first round start). The frozen profiles' `reference.note`
+    text still says "first round_start"; the engine rule above is what applies.
 - **Three candidate scores** (`app/core/fatigue.py`, profile `FATIGUE_PROFILE_PATH`): vest-only, camera-only and
   combined, each 0–100 relative to the athlete's own reference. 0 is a real value; "not available" is never 0.
   - Features: heart-rate strain (heart-rate reserve), time above a heart-rate threshold (elapsed time, gaps over 5 s not
