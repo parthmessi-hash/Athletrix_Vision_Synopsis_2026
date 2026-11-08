@@ -1,0 +1,216 @@
+{
+  "format": "athletrix-pilot-rows",
+  "format_version": 1,
+  "fictional": true,
+  "note": "FICTIONAL deterministic fixture for the paired analysis. Expected values below were computed separately with exact fractions, not by the analysis code.",
+  "rows": [
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 1,
+      "time_s": 3.0,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 10,
+        "camera_only": 40,
+        "combined": 10
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": 3,
+      "fictional": true
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 2,
+      "time_s": 3.06,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 20,
+        "camera_only": 30,
+        "combined": 30
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": 4,
+      "fictional": true
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 3,
+      "time_s": 3.12,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 30,
+        "camera_only": 20,
+        "combined": 20
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": 6,
+      "fictional": true
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 4,
+      "time_s": 3.18,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 40,
+        "camera_only": 10,
+        "combined": 40
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": 7,
+      "fictional": true
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 5,
+      "time_s": 3.09,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 25,
+        "camera_only": 25,
+        "combined": null
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": [
+          "camera stream: newest camera sample is 15 s old (stale after 10 s)"
+        ]
+      },
+      "self_rating": null,
+      "fictional": true
+    },
+    {
+      "participant": "P1",
+      "session": "day1",
+      "round": 6,
+      "time_s": null,
+      "time_missing_reason": "equipment_failure",
+      "scores": {
+        "vest_only": 50,
+        "camera_only": 50,
+        "combined": 50
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": null,
+      "fictional": true
+    },
+    {
+      "participant": "P2",
+      "session": "day1",
+      "round": 1,
+      "time_s": 3.2,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 50,
+        "camera_only": 20,
+        "combined": 30
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": null,
+      "fictional": true
+    },
+    {
+      "participant": "P2",
+      "session": "day1",
+      "round": 2,
+      "time_s": 3.296,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 50,
+        "camera_only": 20,
+        "combined": 40
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": null,
+      "fictional": true
+    },
+    {
+      "participant": "P2",
+      "session": "day1",
+      "round": 3,
+      "time_s": 3.392,
+      "time_missing_reason": null,
+      "scores": {
+        "vest_only": 50,
+        "camera_only": 10,
+        "combined": 50
+      },
+      "reasons": {
+        "vest_only": [],
+        "camera_only": [],
+        "combined": []
+      },
+      "self_rating": null,
+      "fictional": true
+    }
+  ],
+  "expected": {
+    "coverage_usable": {
+      "vest_only": 8,
+      "camera_only": 8,
+      "combined": 7
+    },
+    "matched_rows": 7,
+    "pooled_r": {
+      "vest_only": 0.4092,
+      "camera_only": -0.8053,
+      "combined": 0.6893
+    },
+    "round_vs_slowdown_r": 0.9523,
+    "by_participant_r": {
+      "P1": {
+        "vest_only": 1.0,
+        "camera_only": -1.0,
+        "combined": 0.8
+      },
+      "P2": {
+        "vest_only": null,
+        "camera_only": -0.866,
+        "combined": 1.0
+      }
+    },
+    "targets_pooled": {
+      "combined_r_at_least_0.5": true,
+      "combined_above_both_single_source": true
+    },
+    "targets_P1_only": {
+      "combined_r_at_least_0.5": true,
+      "combined_above_both_single_source": false
+    },
+    "self_rating_r": 0.9899
+  }
+}

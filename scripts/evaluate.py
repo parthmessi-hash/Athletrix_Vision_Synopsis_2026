@@ -3,6 +3,9 @@
 USAGE
     python scripts/evaluate.py make-fictional --out DIR          # a FICTIONAL dataset to exercise the workbench (labelled fictional)
     python scripts/evaluate.py manifest DATASET.json --out MANIFEST.json [profile options]   # pin what a run will use
+    python scripts/evaluate.py pilot-pin --profile PROFILE.json --analysis-split participant|session [--held-out P3 ...] --out PIN.json
+    python scripts/evaluate.py pilot (--packages A.zip [B.zip ...] | --rows ROWS.json) --out DIR [--pin PIN.json]
+                               # the fatigue pilot's paired report: saved pre-sprint scores vs timed sprint slowdown
     python scripts/evaluate.py run DATASET.json --out DIR [--split development|held_out|all] [--manifest MANIFEST.json]
                                [--index-profile A.json [--index-profile B.json]] [--substitution-profile S.json] [--rubric R.json]
                                [--expected EXPECTED.json] [--no-sensitivity]
@@ -707,6 +710,120 @@ def make_fictional(out_dir: Path, out) -> int:
     return 0
 
 
+# ---- the fatigue pilot (app/core/pilot_analysis.py) ------------------------------------------------------------------------
+
+def pilot_pin(args, out) -> int:
+    text = Path(args.profile).read_text()
+    from app.core.fatigue import parse_profile  # noqa: PLC0415
+    _, sha = parse_profile(text)
+    pin = {"format": "athletrix-pilot-pin", "format_version": 1, "pinned_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+           "profile_sha256": sha, "profile_file": Path(args.profile).name, "split_by": args.analysis_split, "held_out": sorted(args.held_out or []),
+           "analysis": {"outcome": "percent slowdown of the timed 20 m sprint against the participant's best valid time in that session",
+                        "statistic": "Pearson r per candidate on matched rows; per participant, per session and pooled", "targets": ["combined r >= 0.5", "combined r above both single-source r"]},
+           "note": "Pin the profile and the analysis before collecting the held-out data. Rows whose recording started before pinned_at are never reported as held out."}
+    if args.out.exists():
+        out(f"{args.out} exists; not overwritten")
+        return 2
+    args.out.write_text(json.dumps(pin, indent=2) + "\n")
+    out(f"wrote {args.out} (profile {sha[:12]}, split by {args.analysis_split}, held out: {', '.join(pin['held_out']) or 'none'})")
+    return 0
+
+
+def pilot(args, out) -> int:
+    from app.core.pilot_analysis import compare, rows_from_package  # noqa: PLC0415
+    from app.core.recording_package import read_package  # noqa: PLC0415
+    source, rows, fictional, starts = [], [], False, {}
+    if args.rows:
+        doc = json.loads(Path(args.rows).read_text())
+        rows, fictional = doc["rows"], bool(doc.get("fictional"))
+        source.append({"rows": Path(args.rows).name, "sha256": hashlib.sha256(Path(args.rows).read_bytes()).hexdigest()})
+    for pth in args.packages or []:
+        data = Path(pth).read_bytes()
+        pkg = read_package(data)
+        if pkg.manifest["format_version"] < 8:
+            out(f"{pth}: package format {pkg.manifest['format_version']} has no study log")
+            return 1
+        rr = rows_from_package(pkg)
+        rows += rr
+        fictional = fictional or any(r["fictional"] for r in rr)
+        for r in rr:
+            starts[(r["participant"], r["session"])] = pkg.recording["started_at"]
+        source.append({"package": Path(pth).name, "sha256": hashlib.sha256(data).hexdigest(), "recording_id": pkg.recording["id"]})
+    pin = json.loads(Path(args.pin).read_text()) if args.pin else None
+    held = {"status": "no pin: nothing is reported as held out"}
+    if pin:
+        shas = {r.get("profile_sha256") for r in rows if r.get("profile_sha256")}
+        if shas and shas != {pin["profile_sha256"]}:
+            out(f"refused: the rows were scored with profile(s) {sorted(s[:12] for s in shas)}, the pin names {pin['profile_sha256'][:12]}")
+            return 1
+        key = "participant" if pin["split_by"] == "participant" else "session"
+        pinned_at = datetime.fromisoformat(pin["pinned_at"])
+        test = [r for r in rows if r[key] in pin["held_out"]]
+        late = [r for r in test if (r["participant"], r["session"]) not in starts or datetime.fromisoformat(starts[(r["participant"], r["session"])].replace("Z", "+00:00")) < pinned_at]
+        participants = sorted({r["participant"] for r in rows})
+        if not test:
+            held = {"status": "no held-out rows in this data"}
+        elif late:
+            held = {"status": "NOT HELD OUT: some of these rows were recorded before the pin (or their recording time is unknown), so they could have influenced the choices"}
+        else:
+            held = {"status": f"held out by {key} ({', '.join(pin['held_out'])}), recorded after the pin", "comparison": compare(test)}
+        held["limits"] = (f"{len(participants)} participants in total: a held-out {key} is one or two people, so any held-out figure describes those few rounds only "
+                          "and is not evidence for other players.")
+        rows = [r for r in rows if r[key] not in pin["held_out"]] if test else rows
+    res = compare(rows)
+    res.update(source=source, fictional=fictional, pin=pin, held_out=held, generated_at=datetime.now().astimezone().isoformat(timespec="seconds"))
+    if args.out.exists():
+        out(f"{args.out} exists; not overwritten")
+        return 2
+    args.out.mkdir(parents=True)
+    (args.out / "results.json").write_text(json.dumps(res, indent=2, default=str))
+    (args.out / "report.md").write_text(pilot_report(res))
+    out(f"wrote {args.out / 'report.md'} and results.json" + (" · FICTIONAL" if fictional else ""))
+    return 0
+
+
+def pilot_report(r: dict) -> str:
+    def rr(x):
+        return "undefined" if x["r"] is None else f"{x['r']:+.3f}"
+    L = ["# Fatigue pilot: paired report", ""]
+    if r["fictional"]:
+        L += ["**FICTIONAL data: made-up readings and made-up sprint times. This exercises the analysis; it shows nothing about real players.**", ""]
+    L += ["Saved pre-sprint scores (as available at each cutoff) against percent slowdown of the independently timed 20 m sprint "
+          "(against the participant's best valid time in that session, a retrospective reference for the outcome only).", "",
+          f"Matched rows (all three scores and an outcome): **{r['matched_rows']}** from {r['participants']} participants and {r['sessions']} participant-sessions. "
+          "Rounds of one person are repeated observations, not independent participants.", "", "## Coverage per candidate", "",
+          "| Candidate | Rows | Usable | Missing reasons |", "|---|---|---|---|"]
+    for c, v in r["coverage"].items():
+        L.append(f"| {c} | {v['rows']} | {v['usable']} | " + "; ".join(f"{k} ({n})" for k, n in v["missing_reasons"].items()) + " |")
+    p = r["pooled"]
+    t = r["targets"]
+    verdict = lambda v: "MET" if v is True else ("NOT MET" if v is False else "UNDEFINED")  # noqa: E731
+    L += ["", "## Pooled matched rows", "", "| Candidate | r | n | flag |", "|---|---|---|---|"]
+    for c in ("vest_only", "camera_only", "combined"):
+        L.append(f"| {c} | {rr(p[c])} | {p[c]['n']} | {p[c].get('flag') or p[c].get('why') or ''} |")
+    L += ["", f"Combined minus vest-only: {p['combined_minus_vest_only']}; combined minus camera-only: {p['combined_minus_camera_only']}.", "",
+          f"**Engineering targets** (not proof of effectiveness): combined r >= 0.5: **{verdict(t['combined_r_at_least_0.5'])}**; "
+          f"combined above both single-source: **{verdict(t['combined_above_both_single_source'])}**.", "",
+          f"Round order: r(round, slowdown) = {rr(p['round_order']['round_vs_slowdown'])}; " +
+          ", ".join(f"r(round, {c}) = {rr(p['round_order'][f'round_vs_{c}'])}" for c in ("vest_only", "camera_only", "combined")) +
+          ". If everything rises with the round number, a score can correlate with slowdown simply because both grow with time.", "",
+          "## By participant", "", "| Participant | rows | vest-only r | camera-only r | combined r | combined wins? | flags |", "|---|---|---|---|---|---|---|"]
+    for k, b in r["by_participant"].items():
+        wins = (None if None in (b["combined"]["r"], b["vest_only"]["r"], b["camera_only"]["r"]) else b["combined"]["r"] > max(b["vest_only"]["r"], b["camera_only"]["r"]))
+        L.append(f"| {k} | {b['rows']} | {rr(b['vest_only'])} | {rr(b['camera_only'])} | {rr(b['combined'])} | {'yes' if wins else 'NO' if wins is False else 'undefined'} | " +
+                 "; ".join(sorted({x.get("flag") or x.get("why") for x in (b["vest_only"], b["camera_only"], b["combined"]) if x.get("flag") or x.get("why")})) + " |")
+    L += ["", "## By participant and session", "", "| Participant/session | rows | vest-only r | camera-only r | combined r |", "|---|---|---|---|---|"]
+    for k, b in r["by_session"].items():
+        L.append(f"| {k} | {b['rows']} | {rr(b['vest_only'])} | {rr(b['camera_only'])} | {rr(b['combined'])} |")
+    L += ["", "## Held out", r["held_out"]["status"], r["held_out"].get("limits", ""), "",
+          "## Self-rating (exploratory, never a score input)", f"r(self-rating, slowdown) = {rr(r['self_rating_exploratory']['self_rating_vs_slowdown'])} on {r['self_rating_exploratory']['rows']} rows.", "",
+          "## Rows", "", "| Participant | Session | Round | vest-only | camera-only | combined | time (s) | slowdown % |", "|---|---|---|---|---|---|---|---|"]
+    for x in r["rows"]:
+        s = x["scores"]
+        L.append(f"| {x['participant']} | {x['session']} | {x['round']} | {s['vest_only']} | {s['camera_only']} | {s['combined']} | {x.get('time_s') or x.get('outcome_missing')} | {x['slowdown_pct']} |")
+    return "\n".join(L) + "\n"
+
+
 def main(argv=None, out=print) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -733,10 +850,25 @@ def main(argv=None, out=print) -> int:
     mf.add_argument("--rubric")
     mf.add_argument("--match-window-s", type=float, default=0.1)
     mf.add_argument("--swap-margin-m", type=float, default=1.0)
+    pp = sub.add_parser("pilot", help="the fatigue pilot's paired report")
+    g = pp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--packages", nargs="+")
+    g.add_argument("--rows", type=Path)
+    pp.add_argument("--out", type=Path, required=True)
+    pp.add_argument("--pin", type=Path)
+    pn = sub.add_parser("pilot-pin", help="pin the pilot profile and analysis before collecting held-out data")
+    pn.add_argument("--profile", type=Path, required=True)
+    pn.add_argument("--analysis-split", choices=["participant", "session"], required=True)
+    pn.add_argument("--held-out", nargs="*")
+    pn.add_argument("--out", type=Path, required=True)
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
         return 2 if exc.code else 0
+    if args.command == "pilot":
+        return pilot(args, out)
+    if args.command == "pilot-pin":
+        return pilot_pin(args, out)
     if args.out.exists():
         out(f"{args.out} exists; not overwritten")
         return 2
