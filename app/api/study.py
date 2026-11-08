@@ -304,3 +304,4 @@ def reproduce_prediction(recording_id: str, prediction_id: str) -> dict:
             "explanation": {"reproduced": "same visible inputs and the same scores", "inputs_changed": "the stored samples visible at the cutoff changed since the prediction was saved",
                             "differs": "same inputs, different scores: the scoring code changed"}[st],
             "note": "The saved prediction is never rewritten."}
+

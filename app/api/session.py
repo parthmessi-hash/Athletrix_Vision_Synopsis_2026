@@ -46,7 +46,7 @@ def preflight(plan: SessionPlan | None) -> dict:
     now = clock.utc_now()
     s = get_settings()
     db = get_database()
-    checks: dict[str, list] = {"raw_recording": [], "camera_review": [], "experimental_recommendation": []}
+    checks: dict[str, list] = {"raw_recording": [], "camera_review": [], "fatigue_pilot": [], "experimental_recommendation": []}
 
     def add(area, level, text):   # level: ok | warn | block
         checks[area].append({"level": level, "text": text})
@@ -122,6 +122,19 @@ def preflight(plan: SessionPlan | None) -> dict:
         if plan.fictional:
             for k in checks:
                 add(k, "warn", "FICTIONAL plan: a demonstration, not a real session")
+    # the fatigue pilot (independent of the substitution review's profiles)
+    fp = s.fatigue_profile_path
+    if not fp:
+        add("fatigue_pilot", "block", "no fatigue profile is configured (FATIGUE_PROFILE_PATH): the pilot estimate is unavailable (raw recording is unaffected)")
+    else:
+        try:
+            from app.core.fatigue import parse_profile  # noqa: PLC0415
+            fpp, fsha = parse_profile(Path(fp).read_text(encoding="utf-8"))
+            add("fatigue_pilot", "warn" if fpp["fictional"] else "ok", f"fatigue profile {fpp['version']} ({fsha[:12]}) configured" + (" (FICTIONAL)" if fpp["fictional"] else "") +
+                "; a study session freezes it when created")
+        except (OSError, ValueError) as exc:
+            add("fatigue_pilot", "block", f"the fatigue profile cannot be used: {exc}")
+    add("fatigue_pilot", "ok", "the experimental substitution review is not needed for the pilot estimate")
     # profiles
     prof = _profiles()
     for kind, label in (("substitution", "substitution profile"), ("physiological_index", "physiological index profile"), ("performance_rubric", "performance rubric")):
