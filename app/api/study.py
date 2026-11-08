@@ -272,7 +272,12 @@ def pilot_view(recording_id: str, at: str | None = None, trend_step_s: int = Que
         if now.get("streams"):
             newest = max((x.get("newest") for x in now["streams"].values() if x.get("newest")), default=None)
         recs = [r for s, r in recording_store.range_with_receipts(rec.id, w.athlete_id, "physiological", t - timedelta(seconds=60), t) if r and r.get("received_at")]
+        lastp = next((e for e in reversed(known) if e.kind == "prediction" and e.athlete_id == w.athlete_id), None)
+        last = None if lastp is None else {"round": lastp.round, "cutoff": lastp.prediction["cutoff"], "prospective": lastp.prediction.get("prospective", True),
+                                           "timing_label": lastp.prediction.get("timing_label"),
+                                           "values": {c: v["value"] for c, v in ((lastp.prediction.get("result") or {}).get("candidates") or {}).items()}}
         return {**base, "wearer": {"athlete_id": w.athlete_id, "participant_code": w.participant_code, "device_id": w.device_id, "since": iso(live[0]["start"])},
+                "last_saved_prediction": last,
                 "estimate": now, "trend": trend, "newest_sample": newest,
                 "newest_receipt": max((r["received_at"] for r in recs), default=None)}
 

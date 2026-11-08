@@ -220,3 +220,22 @@ def test_backdated_marker_same_instant_order_and_retry_with_another_time(pilot, 
         other.close()
     assert after == before, "same-instant entries keep their receipt order through export and import"
     assert rep["status"] == "reproduced" and rep["prospective"] is False
+
+
+def test_operator_cli_main_path(pilot):
+    import sys as _s
+    _s.path.insert(0, str(ROOT / "scripts"))
+    import pilot_session
+    c, sim, rid, m0 = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"]
+    run = lambda *a: (lambda lines: (pilot_session.main(["--engine", "http://testserver", *a], out=lines.append, client=c), lines))([])  # noqa: E731
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    code, lines = run("sprint-start", "x1", "--round", "1")
+    assert code == 0 and lines[0].startswith("Stored: sprint_start") and "saved prediction (prospective" in lines[1]
+    code, lines = run("sprint-start", "x1", "--round", "1")
+    assert code == 0 and lines[0].startswith("Already stored"), "re-running the same command stores nothing new"
+    assert run("result", "x1", "--round", "1", "--time", "3.31", "--method", "timing_gates")[0] == 0
+    assert run("round-end", "x1", "--round", "1", "--invalid", "FICTIONAL: slipped at the start")[0] == 0
+    code, lines = run("rounds")
+    assert code == 0 and "x1 round 1: vest_only" in lines[1] and "prospective" in lines[1] and "time 3.31" in lines[1]
+    pv = c.get(f"{API}/recordings/{rid}/study/pilot").json()
+    assert pv["last_saved_prediction"]["round"] == 1 and pv["last_saved_prediction"]["prospective"] is True
