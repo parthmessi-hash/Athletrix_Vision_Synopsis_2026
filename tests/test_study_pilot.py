@@ -393,3 +393,20 @@ def test_blind_timing_sheet_validate_apply_and_correct(pilot, tmp_path):
     assert res[1]["time_s"] == 3.25 and res[1]["corrects"] is not None, "a traceable correction"
     assert any("line 3" in x and "correction" in x and "add correction_reason" in x for x in lines), "the unreadable clip turns the row into a missing result, which differs and needs a reason"
     assert res[2]["time_s"] == 3.2667, "the stored video time stays until a reasoned correction"
+
+
+def test_field_check_keeps_the_three_readiness_levels_apart(pilot, tmp_path):
+    import sys as _s
+    _s.path.insert(0, str(ROOT / "scripts"))
+    import sideline_session
+    c, sim, rid, m0 = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"]
+    sim.run(m0 + timedelta(seconds=60), "x1", "strap-A", t0=m0)
+    lines = []
+    sideline_session.main(["field-check", "--engine", "http://localhost", "--export-dir", str(tmp_path),
+                           "--manifest", str(ROOT / "scripts" / "examples" / "pilot" / "fictional_study_manifest.json")], out=lines.append, client=c)
+    text = "\n".join(lines)
+    assert "READY FOR A FICTIONAL REHEARSAL: NO" in text and "dashboard not checked" in text, "the dashboard must be checked, not assumed"
+    assert "READY TO RECORD INPUTS: NO" in text and "no stream arrives from a real (non-simulated) source" in text
+    assert "READY TO RUN THE CONTROLLED PILOT: NO" in text and "SIMULATED: fine for a rehearsal, never a real device" in text
+    assert "must be non-fictional, record an approval status and pin the profile" in text and "export folder writable" in text
+    assert "active wearer: P1 on strap-A" in text and "camera clock alignment: operator_estimate" in text

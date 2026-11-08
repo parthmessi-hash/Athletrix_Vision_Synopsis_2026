@@ -35,4 +35,6 @@ def test_accelerated_rehearsal_end_to_end(tmp_path):
     p3r2 = next(r for r in report["rows"] if r["participant"] == "P3" and r["round"] == 2)
     assert p3r2["scores"]["vest_only"] is not None and p3r2["scores"]["camera_only"] is None and p3r2["scores"]["combined"] is None, "a camera gap: vest stays, combined never one-source"
     assert all(t["exit"] == 0 for t in s["log"]["timing_sheet"]), s["log"]["timing_sheet"]
+    p2r3 = next(r for r in report["rows"] if r["participant"] == "P2" and r["round"] == 3)
+    assert p2r3["scores"]["vest_only"] is not None, "after the strap reconnects, the vest score is available again"
     assert pilot_rehearsal.main(["--mode", "accelerated", "--duration-min", "90", "--out", str(tmp_path / "x")], out=lines.append) == 2, "never a 90-minute claim"

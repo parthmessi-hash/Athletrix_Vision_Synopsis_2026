@@ -30,6 +30,7 @@ environment); the normal engine still starts with no profile. It is a paced scri
 USAGE
     python scripts/demo_launcher.py --session match                   # the fictional match session (about 6 minutes)
     python scripts/demo_launcher.py --session match --speed 3 --duration 360 --exit-after-demo
+    python scripts/demo_launcher.py --session pilot                   # the FICTIONAL fatigue-pilot rehearsal with the dashboard (about 13 minutes)
     python scripts/demo_launcher.py                                  # frontend folder guessed next to this repository
     python scripts/demo_launcher.py --frontend "/path/to/Athletrix Fixed Website" --athletes 4 --duration 90 --device-status
     python scripts/demo_launcher.py --exit-after-demo                 # stop everything when data generation ends
@@ -312,7 +313,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frontend", type=Path, default=DEFAULT_FRONTEND, help=f"folder containing the Athletrix_Web index.html (default {DEFAULT_FRONTEND})")
     p.add_argument("--athletes", type=int, default=DEFAULT_ATHLETES, help=f"fictional athletes on the demo team (default {DEFAULT_ATHLETES})")
     p.add_argument("--duration", type=int, default=None, help=f"seconds of fictional data to generate (default {DEFAULT_DURATION_S}; with --session match: scenario seconds, default 360)")
-    p.add_argument("--session", choices=["simple", "match"], default="simple", help="simple: the sine-wave feed (default); match: the paced fictional match session (scripts/live_session.py)")
+    p.add_argument("--session", choices=["simple", "match", "pilot"], default="simple", help="simple: the sine-wave feed (default); match: the paced fictional match session (scripts/live_session.py); pilot: the FICTIONAL fatigue-pilot rehearsal (scripts/pilot_rehearsal.py) at wall-clock time")
+    p.add_argument("--rounds", type=int, default=3, help="--session pilot: rounds per participant (default 3)")
     p.add_argument("--speed", type=float, default=1.0, help="--session match: scenario seconds per wall second (default 1; timestamps stay real send times)")
     p.add_argument("--device-status", action="store_true", help="also send clearly fictional device-status reports every 5 s")
     p.add_argument("--backend-port", type=int, default=None, help="backend port (default: a free port; an occupied port is an error)")
@@ -329,6 +331,8 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = say, wai
         args.duration = 360 if args.session == "match" else DEFAULT_DURATION_S
     if args.session == "match":
         return run_match(args, out, wait_for_interrupt, demo_factory)
+    if args.session == "pilot":
+        return run_pilot(args, out, wait_for_interrupt, demo_factory)
     if args.athletes < 1 or args.duration < 1:
         out("athletes and duration must be at least 1")
         return 2
@@ -390,6 +394,71 @@ def main(argv: list[str] | None = None, *, out: Callable[[str], None] = say, wai
             demo.cleanup()
         for s, h in previous.items():
             signal.signal(s, h)
+
+
+def run_pilot(args, out, wait_for_interrupt, demo_factory) -> int:
+    """--session pilot: the FICTIONAL fatigue-pilot rehearsal (scripts/pilot_rehearsal.py) against an isolated backend
+    with a FICTIONAL profile, the dashboard copy pointed at it, an engine restart after the first participant, and the
+    export, fresh-database reproduction and paired report at the end."""
+    import types  # noqa: PLC0415
+
+    import pilot_rehearsal as pr  # noqa: PLC0415
+    import live_session  # noqa: PLC0415
+    frontend = args.frontend.expanduser()
+    if not (frontend / "index.html").is_file():
+        out(f"Frontend folder not found or has no index.html: {frontend}. Pass the Athletrix_Web folder with --frontend.")
+        return 2
+    try:
+        demo = (demo_factory or Demo)(frontend, args.backend_port, args.frontend_port, {}, {"FATIGUE_PROFILE_PATH": str(pr.PROFILE)})
+    except RuntimeError as exc:
+        out(f"Cannot start the rehearsal: {exc}")
+        return 1
+    prepared = {}
+    players = [(aid, f"Fictional participant {code}", int(aid[2:]) + 10, False, None, [], True) for code, aid, _, _ in pr.PARTICIPANTS]
+
+    def before(db_path):
+        prepared["rest"], _ = live_session.prepare_database(db_path, datetime.now(UTC), players=players)
+    demo.before_start = before
+
+    def on_signal(signum, _frame):
+        out("\nStopping (only the backend and frontend copy started here are stopped; the temporary folder is removed)…")
+        demo.cleanup()
+        raise SystemExit(130)
+    previous = {sg: signal.signal(sg, on_signal) for sg in (signal.SIGINT, signal.SIGTERM)}
+    out_dir = demo.tmp_path / "pilot-output"
+    out_dir.mkdir()
+    try:
+        out("ATHLETRIX FICTIONAL FATIGUE-PILOT REHEARSAL · made-up participants, readings and sprint times · no camera, wearable or person involved")
+        try:
+            demo.start()
+        except (RuntimeError, FileNotFoundError, OSError) as exc:
+            out(f"Startup failed: {exc}")
+            return 1
+        out(f"OPEN THE DASHBOARD:  {demo.dashboard_url}  (click Live Demo; the Fatigue pilot card is at the top)")
+        out("  The script plays the operator: it assigns the wearer, saves each score, confirms it, starts the sprint, enters times on the")
+        out("  blind timing sheet, misses one save (P2 round 1), marks one round invalid (P1 round 3), drops the strap (P2 round 2),")
+        out("  loses the camera before a save (P3 round 2) and restarts the engine after P1. You can press Save score yourself between rounds.")
+        api = pr.Api(demo.backend_url, httpx.Client(timeout=15.0))
+        ns = types.SimpleNamespace(mode="wall", rounds=args.rounds, round_s=70.0, sprint_s=4.0, rest_s=5.0, dropout_s=20.0, duration_min=0.0, profile=pr.PROFILE,
+                                   rest_id=prepared["rest"], out=out_dir)
+
+        def restart():
+            demo.backend.proc.terminate(); demo.backend.proc.wait(timeout=10); demo.backend.proc = None
+            demo.backend.start()
+        log = pr.run(ns, api, lambda: datetime.now(UTC), time.sleep, out, restart)
+        fin = pr.finish(ns, api, log, out)
+        out(f"Done. Saved predictions reproduced in a fresh database: {fin['reproduction_on_second_database']['all_reproduced']}; "
+            f"report: {out_dir / 'report' / 'report.md'} (copy it out before stopping: the temporary folder is removed on exit)")
+        out(f"Failed requests: {api.failed or 'none'}")
+        if args.exit_after_demo:
+            return 0 if fin["reproduction_on_second_database"]["all_reproduced"] else 1
+        out("Servers stay up for exploring the dashboard. Press Ctrl-C to stop and clean up.")
+        (wait_for_interrupt or (lambda: signal.pause()))()
+        return 0
+    finally:
+        for sg, h in previous.items():
+            signal.signal(sg, h)
+        demo.cleanup()
 
 
 def run_match(args, out, wait_for_interrupt, demo_factory) -> int:
