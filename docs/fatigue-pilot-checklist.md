@@ -68,3 +68,14 @@ Fictional only: no participant data, no real readings, no footage. Zephyr: not i
   a scoring version so this is named explicitly.
 - **To get the missing numbers,** run the same command again without editing code during it (about 92 minutes), ideally
   with the dashboard open in a foreground tab.
+
+## Field-kit batch (started 2026-11-08 03:50 UTC): checkpoint
+
+| # | Milestone | State | Where |
+|---|-----------|-------|-------|
+| 1 | Close out the pilot | done | 90-minute run recorded above; commit bd31333 |
+| 2 | Save score, then start sprint | done | `score_save` + `sprint_start --confirm` (app/api/study.py), `app/core/timing_evidence.py` (saved_before_recorded_start / order_unverified / retrospective; policy independent_start_reference or confirmed_sequence; legacy grace never promoted), RULES_VERSION in predictions, CLI `save-score`, dashboard Save / Start controls (harness 93/93), tests in tests/test_study_pilot.py |
+| 3 | Independent sprint timing worksheet | pending | |
+| 4 | Study manifest and traceable report | pending | |
+| 5 | One-laptop offline preflight | pending | |
+| 6 | Operator rehearsal and handoff | pending | |

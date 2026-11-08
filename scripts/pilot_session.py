@@ -9,7 +9,10 @@ USAGE (default engine http://127.0.0.1:8000, default recording: the active one; 
     pilot_session.py wearer ATHLETE --code P1 --device VEST_ID --baseline BASELINE_ID --hr-max 200 --hr-max-origin "measured test 2026-11-01"
     pilot_session.py wearer ATHLETE --end
     pilot_session.py round-start ATHLETE --round N
-    pilot_session.py sprint-start ATHLETE --round N      # saves the pre-sprint prediction; press it BEFORE the sprint
+    pilot_session.py save-score ATHLETE --round N       # 1. saves the score now and prints its confirmation id
+    pilot_session.py sprint-start ATHLETE --round N --confirm PREDICTION_ID [--gate-time ISO --gate-offset-s S --gate-uncertainty-s U]
+                                                         # 2. only after the confirmation: start the timed sprint
+    (sprint-start without --confirm still works, but its prediction is labelled ORDER UNVERIFIED)
     pilot_session.py sprint-end ATHLETE --round N
     pilot_session.py round-end ATHLETE --round N [--invalid "reason"]
     pilot_session.py result ATHLETE --round N (--time 3.21 --method timing_gates | --missing equipment_failure) [--correct ENTRY_ID --why "reason"]
@@ -42,10 +45,12 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
     p.add_argument("--fictional", action="store_true"); p.add_argument("--camera-alignment"); p.add_argument("--calibration-sha256"); p.add_argument("--planned-rounds", type=int)
     p = sub.add_parser("wearer"); p.add_argument("athlete"); p.add_argument("--code"); p.add_argument("--device"); p.add_argument("--baseline")
     p.add_argument("--hr-max", type=float); p.add_argument("--hr-max-origin"); p.add_argument("--end", action="store_true")
-    for name in ("round-start", "sprint-start", "sprint-end", "round-end"):
+    for name in ("round-start", "save-score", "sprint-start", "sprint-end", "round-end"):
         p = sub.add_parser(name); p.add_argument("athlete"); p.add_argument("--round", type=int, required=True)
         if name == "round-end":
             p.add_argument("--invalid")
+        if name == "sprint-start":
+            p.add_argument("--confirm"); p.add_argument("--gate-time"); p.add_argument("--gate-offset-s", type=float); p.add_argument("--gate-uncertainty-s", type=float)
     p = sub.add_parser("result"); p.add_argument("athlete"); p.add_argument("--round", type=int, required=True); p.add_argument("--time", type=float)
     p.add_argument("--method", choices=["timing_gates", "stopwatch", "video_frames", "other"]); p.add_argument("--missing"); p.add_argument("--correct"); p.add_argument("--why")
     p.add_argument("--by")
@@ -74,7 +79,7 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
                     (f" · {'prospective' if p.get('prospective', True) else 'RETROSPECTIVE'}" if p else "") +
                     f" · time {res.get('time_s') or res.get('missing_reason') or 'not entered'}" + (" · INVALID" if inv.get("notes") and "invalid" in str(inv) else ""))
             return 0
-        k = {"round-start": "round_start", "sprint-start": "sprint_start", "sprint-end": "sprint_end", "round-end": "round_end", "result": "sprint_result",
+        k = {"round-start": "round_start", "save-score": "score_save", "sprint-start": "sprint_start", "sprint-end": "sprint_end", "round-end": "round_end", "result": "sprint_result",
              "rating": "self_rating", "session": "session", "wearer": "wearer"}[args.cmd]
         body = {"kind": k, "client_token": token(args, k)}
         if args.cmd == "session":
@@ -89,6 +94,10 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
                                                                                           baseline_id=args.baseline, hr_max_bpm=args.hr_max, hr_max_origin=args.hr_max_origin)
         else:
             body.update(athlete_id=args.athlete, round=args.round)
+            if args.cmd == "sprint-start" and args.confirm:
+                body.update(confirms_prediction_id=args.confirm)
+            if args.cmd == "sprint-start" and args.gate_time:
+                body.update(start_reference={"source": "timing_gate", "device_time": args.gate_time, "clock_offset_s": args.gate_offset_s, "clock_uncertainty_s": args.gate_uncertainty_s})
             if args.cmd == "round-end" and args.invalid:
                 body.update(invalid=True, notes=args.invalid)
             if args.cmd == "result":
@@ -103,7 +112,15 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
             return 2
         x = r.json()
         out(("Already stored: " if r.status_code == 200 else "Stored: ") + f"{x['kind']} {x['id']} at {x['at']}")
-        if args.cmd == "sprint-start":
+        if args.cmd == "save-score":
+            p = x["prediction"]
+            cands = (p.get("result") or {}).get("candidates") or {}
+            out(f"  SAVED score for {x['athlete_id']} round {x['round']} · cutoff {p['cutoff']} · all three available: {'yes' if p.get('all_three_available') else 'NO'}")
+            out("  " + " · ".join(f"{n} {v['value'] if v['available'] else 'not available: ' + v['reasons'][0]}" for n, v in cands.items()))
+            out(f"  Now start the timed sprint with: sprint-start {x['athlete_id']} --round {x['round']} --confirm {x['id']}")
+        if args.cmd == "sprint-start" and args.confirm:
+            out(f"  confirmed saved score {args.confirm}; enter the time separately (scripts/sprint_timing.py)")
+        elif args.cmd == "sprint-start":
             d = c.get(f"{e}/recordings/{rid}/study").json()
             p = next((y["prediction"] for y in d["entries"] if y["kind"] == "prediction" and y["prediction"].get("sprint_start_id") == x["id"]), None)
             if p:

@@ -52,6 +52,7 @@ from datetime import datetime, timedelta
 from app.core.sprints import SprintRule, detect
 
 FORMAT = "athletrix-fatigue-profile"
+RULES_VERSION = 2   # 1: before 2026-11-08 (gaps up to max_gap_s bridged across excluded intervals; incomplete sprints used)
 CANDIDATES = ("vest_only", "camera_only", "combined")
 FEATURES = ("hr_strain", "time_above_threshold", "recovery", "hr_per_speed", "output_change", "sprint_quality")
 FEATURE_INPUTS = {"hr_strain": {"wearable"}, "time_above_threshold": {"wearable"}, "recovery": {"wearable"}, "hr_per_speed": {"wearable", "camera"},
@@ -456,7 +457,7 @@ def score(inp: ScoreInputs, prof: dict, sha: str) -> dict:
         value = None if reasons else round(sum(x["contribution"] for x in contrib), 2)
         cands[c] = {"available": value is not None, "value": value, "reasons": reasons, "contributions": contrib if value is not None else [],
                     "features_left_out": left_out, "streams": spec["streams"], "weight_coverage": round(share, 4)}
-    return {"athlete_id": inp.athlete_id, "at": iso(inp.cutoff), "knowledge": inp.knowledge, "label": LABEL, "display": DISPLAY,
+    return {"athlete_id": inp.athlete_id, "at": iso(inp.cutoff), "knowledge": inp.knowledge, "label": LABEL, "rules_version": RULES_VERSION, "display": DISPLAY,
             "profile": {"version": prof["version"], "sha256": sha, "fictional": prof["fictional"]}, "candidates": cands, "features": feats,
             "streams": fresh, "inputs": {"wearable_samples": len(sel["phys"]), "camera_samples": len(sel["track"]), "excluded": sel["excluded"],
                                          "without_receipt_metadata": sel["without_receipt_metadata"],

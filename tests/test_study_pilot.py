@@ -229,13 +229,114 @@ def test_operator_cli_main_path(pilot):
     c, sim, rid, m0 = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"]
     run = lambda *a: (lambda lines: (pilot_session.main(["--engine", "http://testserver", *a], out=lines.append, client=c), lines))([])  # noqa: E731
     sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
-    code, lines = run("sprint-start", "x1", "--round", "1")
-    assert code == 0 and lines[0].startswith("Stored: sprint_start") and "saved prediction (prospective" in lines[1]
-    code, lines = run("sprint-start", "x1", "--round", "1")
-    assert code == 0 and lines[0].startswith("Already stored"), "re-running the same command stores nothing new"
+    code, lines = run("save-score", "x1", "--round", "1")
+    assert code == 0 and lines[0].startswith("Stored: prediction") and "SAVED score for x1 round 1" in lines[1], lines
+    pid = lines[0].split()[2]
+    assert run("save-score", "x1", "--round", "1")[1][0].startswith("Already stored"), "re-running the same command stores nothing new"
+    code, lines = run("sprint-start", "x1", "--round", "1", "--confirm", pid)
+    assert code == 0 and lines[0].startswith("Stored: sprint_start") and "confirmed saved score" in lines[1]
+    code, lines = run("sprint-start", "x1", "--round", "1", "--confirm", pid)
+    assert code == 0 and lines[0].startswith("Already stored"), "a double click stores one start"
     assert run("result", "x1", "--round", "1", "--time", "3.31", "--method", "timing_gates")[0] == 0
     assert run("round-end", "x1", "--round", "1", "--invalid", "FICTIONAL: slipped at the start")[0] == 0
     code, lines = run("rounds")
-    assert code == 0 and "x1 round 1: vest_only" in lines[1] and "prospective" in lines[1] and "time 3.31" in lines[1]
+    assert code == 0 and "x1 round 1" in lines[1] and "time 3.31" in lines[1], lines
     pv = c.get(f"{API}/recordings/{rid}/study/pilot").json()
     assert pv["last_saved_prediction"]["round"] == 1 and pv["last_saved_prediction"]["prospective"] is True
+
+
+def _rows(c, rid):
+    return {(r["athlete_id"], r["round"]): r for r in c.get(f"{API}/recordings/{rid}/study").json()["rounds"]}
+
+
+def test_save_then_start_confirmation_stale_and_double_clicks(pilot):
+    c, sim, rid, m0, st, base = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"], pilot["base"]
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    assert c.post(f"{API}/recordings/{rid}/study", json={"kind": "score_save", "client_token": "save-x-stated", "athlete_id": "x1", "round": 1, "at": z(st["now"])}).status_code == 422, \
+        "a saved score takes the engine's receipt time, never a stated one"
+    s1 = entry(c, rid, kind="score_save", client_token="save-r1-a", athlete_id="x1", round=1)
+    assert s1["kind"] == "prediction" and s1["prediction"]["trigger"] == "score_save" and s1["prediction"]["cutoff"] == z(st["now"]) and s1["prediction"]["all_three_available"] is True
+    assert c.post(f"{API}/recordings/{rid}/study", json={"kind": "score_save", "client_token": "save-r1-a", "athlete_id": "x1", "round": 1}).json()["id"] == s1["id"], "retry: same prediction"
+    st["now"] += timedelta(seconds=2)
+    s2 = entry(c, rid, kind="score_save", client_token="save-r1-b", athlete_id="x1", round=1)
+    old = c.post(f"{API}/recordings/{rid}/study", json={"kind": "sprint_start", "client_token": "start-old", "athlete_id": "x1", "round": 1, "confirms_prediction_id": s1["id"]})
+    assert old.status_code == 409 and "newer score" in old.json()["detail"]
+    other = c.post(f"{API}/recordings/{rid}/study", json={"kind": "sprint_start", "client_token": "start-r2", "athlete_id": "x1", "round": 2, "confirms_prediction_id": s2["id"]})
+    assert other.status_code == 409 and "round 1, not x1 round 2" in other.json()["detail"]
+    st["now"] += timedelta(seconds=1)
+    body = {"kind": "sprint_start", "client_token": "start-r1", "athlete_id": "x1", "round": 1, "confirms_prediction_id": s2["id"]}
+    r1, r2 = c.post(f"{API}/recordings/{rid}/study", json=body), c.post(f"{API}/recordings/{rid}/study", json=body)
+    assert (r1.status_code, r2.status_code) == (201, 200), "a double click stores one start"
+    again = c.post(f"{API}/recordings/{rid}/study", json={**body, "client_token": "start-r1-again"})
+    assert again.status_code == 409 and "already started a sprint" in again.json()["detail"]
+    row = _rows(c, rid)[("x1", 1)]
+    assert row["prediction"]["id"] == s2["id"] and row["timing_evidence"]["category"] == "order_unverified" and row["timing_evidence"]["basis"] == "confirmed_sequence"
+    preds = [e for e in c.get(f"{API}/recordings/{rid}/study").json()["entries"] if e["kind"] == "prediction"]
+    assert len(preds) == 2, "two saves, no extra prediction from the confirmed start"
+    # a wearer change between saving and starting
+    sim.run(st["now"] + timedelta(seconds=60), "x1", "strap-A", t0=m0)
+    s3 = entry(c, rid, kind="score_save", client_token="save-r2-x1", athlete_id="x1", round=2)
+    entry(c, rid, kind="wearer", client_token="wear-x2-mid", athlete_id="x2", participant_code="P2", device_id="strap-A", baseline_id=base["x2"], hr_max_bpm=195, hr_max_origin="FICTIONAL")
+    w = c.post(f"{API}/recordings/{rid}/study", json={"kind": "sprint_start", "client_token": "start-r2-b-x1", "athlete_id": "x1", "round": 2, "confirms_prediction_id": s3["id"]})
+    assert w.status_code == 409 and "wearer assignment changed" in w.json()["detail"]
+    assert c.post(f"{API}/recordings/{rid}/study", json={"kind": "score_save", "client_token": "save-x1-not-wearing", "athlete_id": "x1", "round": 3}).status_code == 409
+
+
+def test_restart_between_steps_future_and_late_markers_and_start_references(pilot, tmp_path):
+    c, sim, rid, m0, st = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"]
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    saved = entry(c, rid, kind="score_save", client_token="save-r1-x1", athlete_id="x1", round=1)
+    from app.db import get_database
+    path = get_database().path
+    get_database().close()
+    set_database(Database(path))   # the engine restarted between saving and starting
+    st["now"] += timedelta(seconds=3)
+    fut = c.post(f"{API}/recordings/{rid}/study", json={"kind": "sprint_start", "client_token": "start-fut", "athlete_id": "x1", "round": 1, "confirms_prediction_id": saved["id"],
+                                                        "at": z(st["now"] + timedelta(seconds=30))})
+    assert fut.status_code == 422 and "cannot be marked in the future" in fut.json()["detail"]
+    early = c.post(f"{API}/recordings/{rid}/study", json={"kind": "sprint_start", "client_token": "start-early", "athlete_id": "x1", "round": 1, "confirms_prediction_id": saved["id"],
+                                                          "at": z(st["now"] - timedelta(seconds=10))})
+    assert early.status_code == 409 and "before the score was saved" in early.json()["detail"]
+    gate = {"source": "timing_gate", "device_time": z(st["now"] + timedelta(seconds=1.5) - timedelta(seconds=0.8)), "clock_offset_s": 0.8, "clock_uncertainty_s": 0.2,
+            "mapping_reference": "FICTIONAL gate clock check"}
+    entry(c, rid, kind="sprint_start", client_token="start-r1-x1", athlete_id="x1", round=1, confirms_prediction_id=saved["id"], start_reference=gate)
+    ev = _rows(c, rid)[("x1", 1)]["timing_evidence"]
+    assert ev["category"] == "saved_before_recorded_start" and ev["gap_s"] == 4.5, ev
+    # round 2: no saved score (the operator missed it), a legacy-style marker within two seconds: never verified
+    sim.run(st["now"] + timedelta(seconds=90), "x1", "strap-A", t0=m0)
+    entry(c, rid, kind="sprint_start", client_token="start-r2-x1", athlete_id="x1", round=2)
+    ev2 = _rows(c, rid)[("x1", 2)]["timing_evidence"]
+    assert ev2["category"] == "order_unverified" and ev2["basis"] == "marker_only"
+    # round 3: a backdated marker is retrospective; a gate start without a mapping stays unverified
+    sim.run(st["now"] + timedelta(seconds=90), "x1", "strap-A", t0=m0)
+    entry(c, rid, kind="sprint_start", client_token="start-r3-x1", athlete_id="x1", round=3, at=z(st["now"] - timedelta(seconds=20)))
+    assert _rows(c, rid)[("x1", 3)]["timing_evidence"]["category"] == "retrospective"
+    sim.run(st["now"] + timedelta(seconds=90), "x1", "strap-A", t0=m0)
+    s4 = entry(c, rid, kind="score_save", client_token="save-r4-x1", athlete_id="x1", round=4)
+    st["now"] += timedelta(seconds=2)
+    entry(c, rid, kind="sprint_start", client_token="start-r4-x1", athlete_id="x1", round=4, confirms_prediction_id=s4["id"],
+          start_reference={"source": "timing_gate", "device_time": z(st["now"])})
+    assert _rows(c, rid)[("x1", 4)]["timing_evidence"]["basis"] == "no_mapping"
+    entry(c, rid, kind="sprint_result", client_token="res-r4-x1", athlete_id="x1", round=4, missing_reason="invalid_attempt", notes="FICTIONAL: slipped")
+    assert _rows(c, rid)[("x1", 4)]["sprint_result"]["missing_reason"] == "invalid_attempt"
+
+
+def test_delayed_sprint_readings_never_reach_later_rounds(pilot):
+    c, sim, rid, m0, st = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"]
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    saved = entry(c, rid, kind="score_save", client_token="save-r1-x1", athlete_id="x1", round=1)
+    st["now"] += timedelta(seconds=1)
+    entry(c, rid, kind="sprint_start", client_token="start-r1-x1", athlete_id="x1", round=1, confirms_prediction_id=saved["id"])
+    t_sprint = st["now"]
+    st["now"] += timedelta(seconds=5)
+    entry(c, rid, kind="sprint_end", client_token="end-r1-x1", athlete_id="x1", round=1)
+    # the strap's sprint readings are NOT sent now: they arrive later, after round 2 has been played
+    sim.run(st["now"] + timedelta(seconds=200), "x1", "strap-A", t0=m0, hr=lambda s: 140)
+    t2 = st["now"]
+    before = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1", "at": z(t2), "knowledge": "retrospective"}).json()
+    for k in range(5):
+        c.post(f"{API}/samples/physiological", json=hr_body("x1", t_sprint + timedelta(seconds=k + 0.5), 198, "strap-A"))
+        c.post(f"{API}/samples/tracking", json=tr_body("x1", t_sprint + timedelta(seconds=k + 0.3), 8.5))
+    after = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1", "at": z(t2), "knowledge": "retrospective"}).json()
+    assert {k: v["value"] for k, v in after["candidates"].items()} == {k: v["value"] for k, v in before["candidates"].items()}
+    assert after["inputs"]["excluded"]["test_effort"] == before["inputs"]["excluded"]["test_effort"] + 10, "the delayed sprint readings are recognised and excluded"

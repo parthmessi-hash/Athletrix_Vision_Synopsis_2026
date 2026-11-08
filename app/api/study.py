@@ -17,16 +17,17 @@ from app.api.recordings import require_member, require_recording
 from app.core import clock
 from app.core.clock import MAX_FUTURE_TIMESTAMP_SKEW
 from app.core.config import get_settings
-from app.core.fatigue import FatigueProfileError, ScoreInputs, Wearer, iso, parse_profile, score
+from app.core.fatigue import RULES_VERSION, FatigueProfileError, ScoreInputs, Wearer, iso, parse_profile, score
 from app.core.knowledge import baselines_as_of
 from app.db import get_database
 from app.models.recording import Recording
-from app.models.study import PROSPECTIVE_TOLERANCE_S, StudyEntry, StudyEntryCreate
+from app.models.study import CONFIRM_MAX_AGE_S, PROSPECTIVE_TOLERANCE_S, StudyEntry, StudyEntryCreate
 from app.store.baselines import baseline_store
 from app.store.recordings import recording_store
 from app.store.study import current, insert, new_study_id, study_store
 
 router = APIRouter(tags=["fatigue pilot"])
+FUTURE_TOLERANCE_S = 0.5
 TREND_STEP_S = 30
 TREND_SPAN_S = 600
 
@@ -126,11 +127,18 @@ def add_study_entry(recording_id: str, body: StudyEntryCreate, response: Respons
         rec = require_recording(recording_id)
         if body.athlete_id:
             require_member(rec, body.athlete_id)
+    if body.at is not None and body.at > now + timedelta(seconds=FUTURE_TOLERANCE_S) and body.kind in ("round_start", "sprint_start", "sprint_end", "round_end"):
+        raise HTTPException(status_code=422, detail=f"a {body.kind} cannot be marked in the future (stated {iso(body.at)}, engine time {iso(now)})")
     t = body.at or now
     check_time(rec, t)
     entries = study_store.list(rec.id)
     with get_database().read() as c:
         existing = study_store.by_token(c, rec.id, body.client_token)
+    if existing is not None and body.kind == "score_save":
+        if existing.kind != "prediction" or (existing.athlete_id, existing.round) != (body.athlete_id, body.round):
+            raise HTTPException(status_code=409, detail=f"client_token {body.client_token!r} was already used for a different entry")
+        response.status_code = status.HTTP_200_OK
+        return existing
     if existing is not None:
         if existing.model_dump(include=set(StudyEntryCreate.model_fields) - {"at"}) != body.model_dump(exclude={"at"}) or (body.at and body.at != existing.at):
             raise HTTPException(status_code=409, detail=f"client_token {body.client_token!r} was already used for a different entry")
@@ -157,9 +165,50 @@ def add_study_entry(recording_id: str, body: StudyEntryCreate, response: Respons
         b = [x for x in baseline_store.list(body.athlete_id) if x.id == body.baseline_id]
         if not b:
             raise HTTPException(status_code=422, detail=f"baseline {body.baseline_id!r} is not a baseline of {body.athlete_id}: a wearer never uses another participant's baseline")
+    if body.kind == "score_save":
+        live = [w for w in wearer_intervals(current(entries)) if w["start"] <= now and (w["end"] is None or now < w["end"])]
+        if not live or live[0]["entry"].athlete_id != body.athlete_id:
+            raise HTTPException(status_code=409, detail=f"{body.athlete_id} is not the active wearer: assign the wearer before saving their score")
+        fz = frozen_profile(entries)
+        if fz is None:
+            result = {"available": False, "reason": "no study session with a frozen fatigue profile: nothing can be scored"}
+        else:
+            p, sha, _ = fz
+            with get_database().read():
+                result = score(build_inputs(rec, entries, p, body.athlete_id, now, "as_entered", marks_known_by=now), p, sha)
+        cands = (result or {}).get("candidates") or {}
+        pred = StudyEntry(kind="prediction", client_token=body.client_token, at=now, athlete_id=body.athlete_id, round=body.round, id=new_study_id(now, "prediction"),
+                          recording_id=rec.id, created_at=now, notes=body.notes,
+                          prediction={"cutoff": iso(now), "trigger": "score_save", "wearer_entry_id": live[0]["entry"].id, "knowledge": "as_entered", "result": result,
+                                      "rules_version": RULES_VERSION, "all_three_available": all(cands.get(k, {}).get("available") for k in ("vest_only", "camera_only", "combined")),
+                                      "timing_label": "saved by the operator's 'save score' action; whether it preceded the sprint is decided by the start that confirms it",
+                                      "note": "saved at the cutoff; never rewritten. Start the timed sprint only after this confirmation."})
+        with get_database().transaction() as c:
+            insert(c, pred)
+        return pred
+    if body.kind == "sprint_start" and body.confirms_prediction_id:
+        saved = next((x for x in entries if x.id == body.confirms_prediction_id and x.kind == "prediction"), None)
+        if saved is None or (saved.prediction or {}).get("trigger") != "score_save":
+            raise HTTPException(status_code=422, detail="confirms_prediction_id must name a score saved with score_save in this recording")
+        if (saved.athlete_id, saved.round) != (body.athlete_id, body.round):
+            raise HTTPException(status_code=409, detail=f"that saved score belongs to {saved.athlete_id} round {saved.round}, not {body.athlete_id} round {body.round}")
+        newer = [x for x in entries if x.kind == "prediction" and (x.prediction or {}).get("trigger") == "score_save" and (x.athlete_id, x.round) == (saved.athlete_id, saved.round)
+                 and x.created_at > saved.created_at]
+        if newer:
+            raise HTTPException(status_code=409, detail=f"a newer score was saved for this round ({newer[-1].id}): confirm that one")
+        live = [w for w in wearer_intervals(current(entries)) if w["start"] <= now and (w["end"] is None or now < w["end"])]
+        if not live or live[0]["entry"].id != saved.prediction.get("wearer_entry_id"):
+            raise HTTPException(status_code=409, detail="the wearer assignment changed since the score was saved: save the score again")
+        if any(x.kind == "sprint_start" and x.confirms_prediction_id == saved.id for x in current(entries)):
+            raise HTTPException(status_code=409, detail="that saved score already started a sprint")
+        age = (t - saved.created_at).total_seconds()
+        if age < 0:
+            raise HTTPException(status_code=409, detail="the stated start is before the score was saved: that is not a pre-sprint prediction (enter the round without confirmation)")
+        if age > CONFIRM_MAX_AGE_S:
+            raise HTTPException(status_code=409, detail=f"the saved score is {age:.0f} s old (limit {CONFIRM_MAX_AGE_S:g} s): save the score again")
     e = StudyEntry(**body.model_dump(exclude={"at"}), at=t, id=new_study_id(now, body.kind), recording_id=rec.id, created_at=now, profile=profile)
     pred = None
-    if body.kind == "sprint_start":
+    if body.kind == "sprint_start" and not body.confirms_prediction_id:
         fz = frozen_profile(entries)
         result = None
         if fz is None:
@@ -172,8 +221,9 @@ def add_study_entry(recording_id: str, body: StudyEntryCreate, response: Respons
         prospective = lag <= PROSPECTIVE_TOLERANCE_S
         pred = StudyEntry(kind="prediction", client_token=f"pred-{e.id}", at=t, athlete_id=body.athlete_id, round=body.round, id=new_study_id(now, "prediction"),
                           recording_id=rec.id, created_at=now, prediction={"cutoff": iso(t), "sprint_start_id": e.id, "knowledge": "as_entered", "result": result,
+                                                                          "trigger": "sprint_marker", "rules_version": RULES_VERSION,
                                                                           "marker_received_at": iso(now), "marker_lag_s": round(lag, 3), "prospective": prospective,
-                                                                          "timing_label": ("prospective: saved when the sprint marker reached the engine" if prospective else
+                                                                          "timing_label": ("ORDER UNVERIFIED: calculated when the sprint marker reached the engine (no score was saved and confirmed before the start)" if prospective else
                                                                                            f"RETROSPECTIVE: the marker reached the engine {lag:.1f} s after the stated sprint time; "
                                                                                            "calculated with what was entered by that time, but not captured before the sprint"),
                                                                           "note": "saved at the cutoff; never rewritten. A retrospective view is a separate calculation."})
@@ -197,11 +247,17 @@ def list_study(recording_id: str) -> dict:
         r = rows.setdefault((e.athlete_id, e.round), {"athlete_id": e.athlete_id, "round": e.round})
         r[e.kind] = e.model_dump(mode="json", include={"id", "at", "time_s", "method", "value", "scale", "missing_reason", "notes", "prediction", "supersedes"})
     preds = [e for e in entries if e.kind == "prediction"]
-    for r in rows.values():   # the prediction of the CURRENT sprint start (a corrected mark has its own)
+    from app.core.timing_evidence import classify  # noqa: PLC0415
+    by_id = {e.id: e for e in entries}
+    for r in rows.values():   # the prediction of the CURRENT sprint start (a corrected mark has its own), or the confirmed saved score
         s = r.get("sprint_start")
         if s:
-            p = next((x for x in preds if x.prediction and x.prediction.get("sprint_start_id") == s["id"]), None)
-            r["prediction"] = None if p is None else p.model_dump(mode="json", include={"id", "at", "prediction"})
+            st = by_id[s["id"]]
+            p = by_id.get(st.confirms_prediction_id) if st.confirms_prediction_id else next((x for x in preds if x.prediction and x.prediction.get("sprint_start_id") == s["id"]), None)
+            r["prediction"] = None if p is None else p.model_dump(mode="json", include={"id", "at", "created_at", "prediction"})
+        if r.get("prediction"):
+            res = by_id[r["sprint_result"]["id"]].model_dump(mode="json") if r.get("sprint_result") else None
+            r["timing_evidence"] = classify(by_id[r["prediction"]["id"]].model_dump(mode="json"), by_id[s["id"]].model_dump(mode="json") if s else None, res)
     sess = session_of(entries)
     return {"recording_id": rec.id, "session": None if sess is None else sess.model_dump(mode="json", exclude={"profile"}) | {"profile": None if not sess.profile else {k: v for k, v in sess.profile.items() if k != "text"}},
             "wearers": [{"athlete_id": w["entry"].athlete_id, "participant_code": w["entry"].participant_code, "device_id": w["entry"].device_id, "start": iso(w["start"]),
@@ -319,7 +375,8 @@ def reproduce_prediction(recording_id: str, prediction_id: str) -> dict:
                                               f"(saved {saved['inputs']['wearable_samples']} wearable / {saved['inputs']['camera_samples']} camera samples, now "
                                               f"{again['inputs']['wearable_samples']} / {again['inputs']['camera_samples']}): the original evidence is not all here",
                             "not_reproducible": "the baseline the prediction used is not on this engine and the prediction did not record its values",
-                            "differs": "same inputs, different scores: the scoring code changed"}[st],
+                            "differs": f"same inputs, different scores: the scoring rules changed since it was saved (rules version {pred.prediction.get('rules_version', 1)} then, "
+                                       f"{RULES_VERSION} now); the saved prediction stands"}[st],
             "prospective": pred.prediction.get("prospective"), "timing_label": pred.prediction.get("timing_label"),
             "note": "The saved prediction is never rewritten."}
 

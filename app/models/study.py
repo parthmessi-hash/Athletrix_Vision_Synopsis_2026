@@ -15,6 +15,12 @@ KINDS (operator entries unless noted)
                  PROSPECTIVE_TOLERANCE_S before the marker reached the engine, the prediction is labelled RETROSPECTIVE
                  (backdated marker): calculated with what was entered by the stated time, but not captured before the
                  sprint, so the evaluation never counts it as a pre-sprint prediction.
+  score_save     "save the score now" for the active wearer and a round: the engine writes a PREDICTION at the moment
+                 it receives the request (no stated time is accepted) and returns it; that prediction's id is the
+                 confirmation the operator must quote when starting the sprint
+  sprint_start with confirms_prediction_id  starts the timed sprint only for the latest saved score of the same wearer
+                 assignment and round (stale, other-round or other-wearer confirmations are refused); optional
+                 start_reference: an independently recorded start with its clock mapping
   sprint_result  the independently timed result, entered later (time in seconds, or null with a missing reason)
   self_rating    optional self-rating (0-10) or null with a missing reason, plus notes; never a score input
   note           free text
@@ -31,10 +37,23 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from app.models.common import AthletrixModel
 
-StudyKind = Literal["session", "wearer", "round_start", "round_end", "sprint_start", "sprint_end", "sprint_result", "self_rating", "note"]
+StudyKind = Literal["session", "wearer", "round_start", "round_end", "score_save", "sprint_start", "sprint_end", "sprint_result", "self_rating", "note"]
 MissingReason = Literal["not_collected", "declined", "not_recorded", "invalid_attempt", "equipment_failure", "other"]
 PROSPECTIVE_TOLERANCE_S = 2.0
-ROUND_KINDS = ("round_start", "round_end", "sprint_start", "sprint_end", "sprint_result", "self_rating")
+ROUND_KINDS = ("round_start", "round_end", "score_save", "sprint_start", "sprint_end", "sprint_result", "self_rating")
+CONFIRM_MAX_AGE_S = 300.0   # a saved score older than this cannot be confirmed: save again
+
+
+class StartReference(AthletrixModel):
+    """An independently recorded sprint start (e.g. a timing gate, or a video frame's presentation time), on its own
+    clock, with the recorded mapping onto the engine clock. Without a mapping the order stays unverified."""
+
+    source: Literal["timing_gate", "video", "other"]
+    device_time: str = Field(..., min_length=1, max_length=64, description="The start time on the device's own clock (ISO 8601 with timezone, as the device recorded it).")
+    clock_offset_s: float | None = Field(None, description="engine time = device time + offset (from a recorded clock mapping); null = no mapping.")
+    clock_uncertainty_s: float | None = Field(None, ge=0, description="Uncertainty of the mapping; null = unknown.")
+    mapping_reference: str | None = Field(None, max_length=200, description="Where the mapping came from, e.g. a time-alignment file's SHA-256.")
+    note: str | None = Field(None, max_length=200)
 
 
 class ClockReference(AthletrixModel):
@@ -74,6 +93,14 @@ class StudyEntryCreate(AthletrixModel):
     missing_reason: MissingReason | None = None
     recorded_by: str | None = Field(None, min_length=1, max_length=80)
     notes: str | None = Field(None, max_length=500)
+    confirms_prediction_id: str | None = Field(None, min_length=1, max_length=64, description="sprint_start: the saved score (score_save) this start confirms.")
+    start_reference: StartReference | None = Field(None, description="sprint_start or sprint_result: an independently recorded start.")
+    precision_s: float | None = Field(None, gt=0, lt=5, description="sprint_result: the stated precision of the timing method.")
+    timing_uncertainty_s: float | None = Field(None, ge=0, lt=5, description="sprint_result: uncertainty of this time (e.g. from video timestamps).")
+    video_name: str | None = Field(None, min_length=1, max_length=200, description="sprint_result by video: the local clip's file name (never uploaded).")
+    video_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    start_pts_s: float | None = Field(None, ge=0, description="sprint_result by video: presentation timestamp of the start frame, as read from the file.")
+    finish_pts_s: float | None = Field(None, ge=0)
     supersedes: str | None = Field(None, min_length=1, max_length=64)
     correction_reason: str | None = Field(None, min_length=1, max_length=300)
 
@@ -96,6 +123,15 @@ class StudyEntryCreate(AthletrixModel):
             raise ValueError("a sprint result has either time_s or a missing_reason")
         if k == "sprint_result" and self.time_s is not None and self.method is None:
             raise ValueError("a timed sprint result needs the timing method")
+        if k == "sprint_result" and self.method == "video_frames" and self.time_s is not None and (self.start_pts_s is None or self.finish_pts_s is None or self.timing_uncertainty_s is None):
+            raise ValueError("a video-timed result needs the start and finish presentation timestamps read from the file and their uncertainty")
+        if k == "sprint_result" and self.start_pts_s is not None and self.finish_pts_s is not None and self.time_s is not None \
+                and abs((self.finish_pts_s - self.start_pts_s) - self.time_s) > 0.002:
+            raise ValueError("time_s must equal finish_pts_s - start_pts_s")
+        if self.confirms_prediction_id and k != "sprint_start":
+            raise ValueError("only a sprint_start confirms a saved score")
+        if k == "score_save" and self.at is not None:
+            raise ValueError("a score is saved at the moment the engine receives the request: no stated time")
         if k == "self_rating" and (self.value is None) == (self.missing_reason is None):
             raise ValueError("a self-rating has either a value or a missing_reason (an explicit missing value)")
         if self.invalid and (k != "round_end" or not self.notes):
@@ -106,7 +142,7 @@ class StudyEntryCreate(AthletrixModel):
 
 
 class StudyEntry(StudyEntryCreate):
-    kind: Literal["session", "wearer", "round_start", "round_end", "sprint_start", "sprint_end", "sprint_result", "self_rating", "note", "prediction"]  # type: ignore[assignment]
+    kind: Literal["session", "wearer", "round_start", "round_end", "score_save", "sprint_start", "sprint_end", "sprint_result", "self_rating", "note", "prediction"]  # type: ignore[assignment]
     id: str
     recording_id: str
     at: AwareDatetime  # type: ignore[assignment]
