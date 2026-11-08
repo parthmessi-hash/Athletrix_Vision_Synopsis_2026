@@ -1139,7 +1139,7 @@ different figures and the same saved bounds; an earlier file stays a
 standalone record of the earlier calculation. Nothing interpretive is in it:
 no diagnosis, score, recovery judgement, baseline comparison or advice.
 
-### Portable recording package (`package.zip`, format `athletrix-recording-package` version 7)
+### Portable recording package (`package.zip`, format `athletrix-recording-package` version 8)
 
 `GET /api/v1/recordings/{id}/package.zip` downloads one **stopped** recording
 (409 while active, 404 if unknown) as a ZIP read from one database snapshot,
@@ -1165,7 +1165,8 @@ layer" below):
 
 Version 7 adds no member: roster entries may carry `inputs` (the session plan's expected sources and stated sampling
 intervals) and performance observations may carry `confidence`, `rationale` and `instruction_exception`. Versions 1 to 6
-still read, with those fields absent (not stated, never assumed).
+still read, with those fields absent (not stated, never assumed). Version 8 adds `study.json`: the fatigue pilot's study
+log with the engine-written pre-sprint predictions (app/models/study.py).
 
 Every recorded sample is included, independent of the rolling caps and the
 300-row history page. Recording times are kept apart from sample timestamps.
@@ -1659,6 +1660,33 @@ single noisy reading (keep). The 40:00 reviews are retrospective (the last five-
 code, saving and reproducing every review, a restart, a correction, a configuration change, export and import into a
 second database, a deliberately changed recorded sample that reproduction must report, and removal of an athlete.
 
+## Science-fair fatigue pilot (2026-11-08): one vest, one camera, one laptop
+
+**FICTIONAL participants, readings and sprint times only. The software runs end to end; nothing shows that any score
+measures fatigue. No substitution advice: the coach decides.** Operator guide, commands, team decisions and field
+dependencies are in `docs/fatigue-pilot-guide.md`; the batch checkpoint with measured results is in
+`docs/fatigue-pilot-checklist.md`.
+
+- **Study log** (`app/models/study.py`, `POST/GET /api/v1/recordings/{id}/study`). Session with a frozen profile, one
+  active wearer with their own baseline, rounds, timed sprints, independent results, and optional self-ratings with
+  explicit missing values. Entries are idempotent and corrections keep their history. Package format 8 adds `study.json`
+  (versions 1–7 still read).
+- **Three explainable candidates** (`app/core/fatigue.py`, `FATIGUE_PROFILE_PATH`). Vest-only, camera-only and combined,
+  each feature with its window, reference and exclusion reason. The combined score is never turned into a one-source
+  score.
+- **Saved pre-sprint predictions.** A prediction is saved at every sprint cutoff, as entered. Sprints are excluded from
+  both streams and from all later windows. Reproduction (`.../study/predictions/{id}/reproduce`) recomputes and
+  compares.
+- **Paired report** (`scripts/evaluate.py pilot`, `pilot-pin`). Coverage and missing reasons, matched-row correlations
+  with percent sprint slowdown per participant, session and pooled, round order, engineering targets, and a held-out
+  guard.
+- **Camera verification** (`scripts/camera_verify.py`, `camera_adapter/verification.py`, `app/core/sprints.py`). Distance,
+  average speed and sprint counts against independent references; jumps and tackles are manual only; peak speed is
+  unmeasured without a reference.
+- **Pilot view** (dashboard "Fatigue pilot" card, `GET .../study/pilot`) and display-delay measurement
+  (`scripts/pilot_display_delay.py`).
+- **Rehearsal** (`scripts/pilot_rehearsal.py`): accelerated in-process, wall-clock, or the 90-minute reliability check.
+
 ## Sideline rehearsal (2026-11-07): missing-data decisions, evidence quality, session setup, evaluation pilot
 
 **A rehearsal with FICTIONAL athletes, readings, profiles, reviewers and coach decisions. It shows the software
@@ -1714,7 +1742,7 @@ camera adapter ─────────────────────�
 people: context, roster, performance ────┤──> samples, receipts, ├─> GET .../substitution-review, physiological-index,
         evidence, baselines, responses ──┘   evidence, baselines,│     performance-review (per athlete)
                                               roster, responses  ├─> POST .../reviews (saved, pinned), .../reproduce
-                                                                 └─> package.zip (format 7) ─> import on another engine
+                                                                 └─> package.zip (format 8) ─> import on another engine
 ```
 Each sample keeps three times apart: when it was measured (`timestamp`), when this engine received it (receipt
 metadata) and its age at the review time. Every entry by a person (observation, correction, context, roster entry,

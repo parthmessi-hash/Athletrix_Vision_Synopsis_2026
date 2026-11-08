@@ -12,7 +12,7 @@ Start: backend `5951617`, frontend `bded804` (835 backend tests, harness 89/89, 
 | 4 | Paired analysis and report | done | `app/core/pilot_analysis.py`, `scripts/evaluate.py pilot` / `pilot-pin`; fixture with separately computed values `scripts/examples/pilot/fictional_analysis_rows.json`; tests/test_pilot_analysis.py |
 | 5 | Camera verification and sprint detector | done (synthetic fixtures) | `camera_adapter/verification.py`, `scripts/camera_verify.py` (make-synthetic, report); `app/core/sprints.py`; tests/test_camera_verify.py; jumps/tackles automatic = unavailable; peak speed unmeasured without a reference |
 | 6 | Pilot view and display delay | done (fictional wall-clock run, real browser) | dashboard Fatigue pilot card (harness 91/91); `GET /recordings/{id}/study/pilot`; preflight `fatigue_pilot` area (substitution review not needed); `scripts/pilot_display_delay.py` (proxy with slowed responses + analysis; tests/test_display_delay.py). Run 2026-11-08 02:01-02:09 UTC, foreground tab, 1 s polling, every 10th response delayed 2.5 s: 384 samples, 0 missing, median 0.656 s, p95 1.837 s, max 8.483 s (inside an 8.9 s display gap during a layout check), 97.4 % within 2 s, clock mapping ±0.022 s. Fixed on the way: a millisecond-resolution bug in the analysis (first result had a false 21 s) |
-| 7 | Rehearsal, reliability check, handoff | rehearsal done; 90-min run in progress (started 02:13:39 UTC 2026-11-08, out in the scratch folder `rel90/`) | `scripts/pilot_rehearsal.py` (accelerated PASS: 9 predictions reproduced, restart, invalid round, removal on a copy); `docs/fatigue-pilot-run-sheet.md`; guide section 7 compares the draft protocol and the profile |
+| 7 | Rehearsal, reliability check, handoff | done, with the 90-minute run only partly recorded (see below) | `scripts/pilot_rehearsal.py` (accelerated PASS: 9 predictions reproduced, restart, invalid round, removal on a copy); `docs/fatigue-pilot-run-sheet.md`; guide section 7 compares the draft protocol and the profile |
 
 Design (decided in this batch):
 - Study records: one append-only table `recording_study` (kinds session, wearer, round_start, round_end, sprint_start,
@@ -38,3 +38,33 @@ Fictional only: no participant data, no real readings, no footage. Zephyr: not i
   analysis choices; `scripts/pilot_session.py` operator command; pilot card freshness, session and last saved prediction.
 - Known limitation of the 90-minute run: it was started before these changes, so it ran the code at commit 578c28e plus
   the then-uncommitted rehearsal script (synthetic tracking, no video processing).
+
+## The 90-minute wall-clock run (2026-11-08 02:13:41 to 03:44:50 UTC): what it actually covered
+
+- **Command:** `python scripts/pilot_rehearsal.py --mode wall --duration-min 90 --out DIR`. One real engine process on a
+  loopback port. FICTIONAL readings were sent at their real times: heart rate 1 Hz for the wearer, synthetic camera
+  tracking 10 Hz for the wearer and two camera-only players. The script also polled the pilot view through the API once a
+  second. No browser, no video processing, no camera, no wearable.
+- **Ingest:** completed and exported, 91.15 minutes:
+  - 3,868 heart-rate and 131,089 tracking samples, every one with a receipt;
+  - 62 rounds, each with a saved prediction, sprint, result and self-rating;
+  - 32 wearer turns over 3 fictional participants.
+- **Crashed at the end:** the step after the export (report and summary) crashed. The running process imported the
+  analysis module from disk after I had changed the study model during the run (the process still held the old model
+  without `invalid`). So `summary.json` was never written, and these were lost: request failures, scheduling lateness,
+  pilot-view API latency and engine memory. My mistake, not an engine failure: never edit code under a running
+  rehearsal.
+- **Recovered from the export** (receipt minus sample timestamp):
+  - heart rate p50 0.001 s, p99 0.091 s, max 0.24 s;
+  - tracking p50 0.003 s, p99 0.88 s, max 13.0 s;
+  - 1,053 of 134,957 samples (0.78 %) more than 1 s late, more often in the last 40 minutes (03:02-03:44). I ran other
+    work on the laptop only around 02:27-02:41, so that does not explain the later growth.
+  - Probable causes, not established: the per-second pilot view with trend recalculation, and database growth.
+  - Some rounds' camera coverage fell below the profile's minimum (e.g. "recent 9 of 30 s").
+- **Report (current code, FICTIONAL):** 57 matched rows from 3 people. Pooled r: vest-only 0.712, camera-only 0.642,
+  combined 0.706. Combined r ≥ 0.5 MET; combined above both NOT MET. r(round, slowdown) 0.52.
+- **Reproduction in a fresh database with today's code:** 56 reproduced, 6 "differs". Same inputs, different scores,
+  because the scoring rules changed after they were saved (no bridging, complete sprints only). Predictions now record
+  a scoring version so this is named explicitly.
+- **To get the missing numbers,** run the same command again without editing code during it (about 92 minutes), ideally
+  with the dashboard open in a foreground tab.

@@ -5,7 +5,14 @@ Sections 1-9 were checked against the code on 2026-10-25 and updated since; the
 status at a glance below was checked on 2026-10-29. Where something is a plan
 rather than working code it is marked **planned**.
 
-## 0. Product and status at a glance (2026-11-07)
+## 0. Product and status at a glance (2026-11-08)
+
+**Immediate goal: the science-fair fatigue pilot.** One wearable, one fixed sideline camera and one offline laptop
+estimate fatigue relative to a player's own baseline, showing the estimate, the trend and the reasons; the coach decides.
+Planned study: three participants taking turns in one vest (a club-game demo would have one wearer). The software for
+this is built and rehearsed with FICTIONAL data only (`docs/fatigue-pilot-guide.md`, `docs/fatigue-pilot-checklist.md`);
+the substitution and performance tools below stay intact but are not prerequisites for the pilot. Zephyr purchase,
+licence, hardware and live access remain unconfirmed.
 
 **Intended product.** Athletrix is a soccer-first coaching tool,
 designed to extend to other sports. It is meant to combine (1) wearable physiology
@@ -660,7 +667,7 @@ Implemented today is listed above; the following are **not** implemented:
 ## 9. Verification commands
 
 ```bash
-# engine: full suite, isolated temporary databases (835 tests as of 2026-11-07; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
+# engine: full suite, isolated temporary databases (see docs/fatigue-pilot-checklist.md for the latest count; the OpenCV and video-tracking tests are skipped without the optional packages, and the real-detector test without models/yolox_s.onnx)
 cd "/Users/parthgupta/Athletrix Vision Synopsis 2026" && source .venv/bin/activate && pytest -q
 
 # engine: window carries the applied rule (backend running)
