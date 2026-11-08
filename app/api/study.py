@@ -123,6 +123,7 @@ def build_inputs(rec: Recording, entries: list[StudyEntry], prof: dict, athlete_
 
 
 READY_LOOKBACK_S = 30.0
+NAMES = {"vest_only": "vest only", "camera_only": "camera only", "combined": "combined"}
 
 
 def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: datetime) -> dict:
@@ -223,7 +224,7 @@ def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: dat
                 "next": f"windows still building (about {remaining:.0f} s): wait before saving a score for a controlled round"}
     missing = {c: (v["reasons"] or ["unavailable"])[0] for c, v in sc["candidates"].items() if not v["available"]}
     return {"state": "ready_to_save", "streams": streams, "estimates_available": avail, "unavailable_reasons": missing, **extra,
-            "next": "save the score now" + ("" if not missing else f" (not available: {', '.join(missing)})")}
+            "next": "save the score now" + ("" if not missing else " (not available: " + "; ".join(f"{NAMES.get(k, k)}: {v}" for k, v in missing.items()) + ")")}
 
 
 def check_time(rec: Recording, t: datetime) -> None:

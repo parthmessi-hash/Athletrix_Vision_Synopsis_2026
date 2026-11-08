@@ -489,6 +489,11 @@ def test_round_readiness_early_start_dropout_identity_loss_and_recovery(pilot):
     entry(c, rid, kind="sprint_start", client_token="r2-sprint-x2", athlete_id="x2", round=2, confirms_prediction_id=sv2["id"])
     view = c.get(f"{API}/recordings/{rid}/study/pilot").json()
     assert view["readiness"]["open_round"] == 2
+    sim.run(st["now"] + timedelta(seconds=40), "x2", "strap-A")
+    entry(c, rid, kind="sprint_end", client_token="r2-sprint-end-x2", athlete_id="x2", round=2)
+    pre = c.get(f"{API}/recordings/{rid}/study/readiness", params={"athlete_id": "x2"}).json()
+    assert pre["state"] == "ready_to_save" and pre["unavailable_reasons"], pre   # the sprint's readings are excluded from the windows
+    assert all(f"{k.replace('_', ' ')}: {v}" in pre["next"] for k, v in pre["unavailable_reasons"].items()), "the next action names each missing estimate with its reason"
     st["now"] += timedelta(seconds=5)
     c.post(f"{API}/recordings/{rid}/stop")
     rows = {(r["participant"], r["round"]): r for r in rows_from_package(read_package(c.get(f"{API}/recordings/{rid}/package.zip").content))}
