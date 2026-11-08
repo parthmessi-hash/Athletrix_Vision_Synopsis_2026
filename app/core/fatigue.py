@@ -44,7 +44,6 @@ turned into a one-source score.
 from __future__ import annotations
 
 import bisect
-import functools
 import hashlib
 import json
 import statistics
@@ -138,13 +137,8 @@ class ScoreInputs:
     reference_note: str | None = None                     # why there is no camera reference, when the study log says so
 
 
-@functools.lru_cache(maxsize=262144)
-def _parse_utc(text: str) -> datetime:
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
-
-
 def _received(r) -> datetime | None:
-    return _parse_utc(r["received_at"]) if r and r.get("received_at") else None
+    return datetime.fromisoformat(r["received_at"].replace("Z", "+00:00")) if r and r.get("received_at") else None
 
 
 def _merged(intervals) -> tuple[list, list]:

@@ -220,6 +220,7 @@ def main(argv=None, out=print) -> int:
     ap.add_argument("--cors-origin", action="append", default=[], help="dashboard origin allowed to read the isolated engine (repeatable)")
     ap.add_argument("--hold-s", type=float, default=0.0, help="keep the engine up this long after the score is saved, for a browser look")
     ap.add_argument("--reconfirm-delay-s", type=float, default=0.0, help="path B: re-confirm a track only this long after an encounter ends")
+    ap.add_argument("--keep-package", action="store_true", help="save path B's FICTIONAL recording export as DIR/pilot-package.zip")
     ap.add_argument("--wearable-dropout", help="path B: video seconds A:B during which the FICTIONAL vest sends nothing")
     args = ap.parse_args(argv)
     if args.out.exists() and any(args.out.iterdir()):
@@ -440,6 +441,8 @@ def main(argv=None, out=print) -> int:
         stop.set()
         time.sleep(0.6)
         c.post(f"/recordings/{rid}/stop")
+        if args.keep_package:   # the FICTIONAL export, for scripts/pilot_display_delay.py analyze --package (stays in DIR, out of git)
+            (d / "pilot-package.zip").write_bytes(c.get(f"/recordings/{rid}/package.zip").content)
         # receipts: engine receipt minus the sample's own (anchor-mapped) time
         con = sqlite3.connect(eng.db_path)
         delays = []

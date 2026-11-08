@@ -603,3 +603,54 @@ def test_fast_pilot_view_equals_the_full_calculation(pilot):
     entry(c, rid, kind="round_start", client_token="fastview-x2-r1", athlete_id="x2", round=1)
     sim.run(st["now"] + timedelta(seconds=200), "x2", "strap-A")
     assert check("after a wearer change")["wearer"]["athlete_id"] == "x2"
+
+
+@pytest.mark.parametrize("variant", [
+    {"name": "short", "window_s": 7, "camera_reference_s": 33, "recovery_lookback_s": 45, "staleness_s": 4},
+    {"name": "long", "window_s": 200, "camera_reference_s": 60, "recovery_lookback_s": 400, "staleness_s": 15},
+])
+def test_display_trend_trimming_matches_the_full_score_for_other_window_lengths(pilot, tmp_path, monkeypatch, variant):
+    """The display-only trend inputs must give the full score's values for any profile, including at exact window
+    boundaries: samples arrive on a 0.2 s grid and trend points fall on 15 s steps, so window edges (integer seconds)
+    land exactly on samples. A new FICTIONAL session per profile variant (windows, reference, recovery lookback,
+    staleness changed)."""
+    c, sim, base, st = pilot["c"], pilot["sim"], pilot["base"], pilot["st"]
+    prof = json.loads(Path(PROFILE).read_text())
+    prof["version"] = f"fictional-trend-boundary-{variant['name']}"
+    prof["streams"]["staleness_s"] = variant["staleness_s"]
+    prof["reference"]["camera_reference_s"] = variant["camera_reference_s"]
+    for f in prof["features"].values():
+        if "window_s" in f:
+            f["window_s"] = variant["window_s"]
+    prof["features"]["recovery"]["lookback_s"] = variant["recovery_lookback_s"]
+    path = tmp_path / "variant.json"
+    path.write_text(json.dumps(prof))
+    monkeypatch.setattr(study_api, "get_settings", lambda: Settings(fatigue_profile_path=str(path)))
+    c.post(f"{API}/recordings/{pilot['rid']}/stop")
+    st["now"] += timedelta(seconds=1)
+    rid = c.post(f"{API}/recordings", json={"name": "FICTIONAL trend boundary", "athlete_ids": ["x1", "x2"]}).json()["id"]
+    entry(c, rid, kind="session", client_token=f"trendb-sess-{variant['name']}", session_label="boundary", protocol="rehearsal", fictional=True,
+          clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.05}])
+    entry(c, rid, kind="wearer", client_token=f"trendb-wear-{variant['name']}", athlete_id="x1", participant_code="P1", device_id="strap-A", baseline_id=base["x1"],
+          hr_max_bpm=200, hr_max_origin="FICTIONAL")
+    m0 = st["now"]
+    sim.run(m0 + timedelta(seconds=3), "x1", "strap-A", t0=m0)
+    entry(c, rid, kind="round_start", client_token=f"trendb-r1-{variant['name']}", athlete_id="x1", round=1)
+    sim.run(m0 + timedelta(seconds=150), "x1", "strap-A", hr=lambda s: 120 + 0.3 * s, v=lambda s: 3.0 + (2.0 if s % 40 < 10 else 0.0), t0=m0)
+    entry(c, rid, kind="sprint_start", client_token=f"trendb-s1-{variant['name']}", athlete_id="x1", round=1)
+    sim.run(st["now"] + timedelta(seconds=5), "x1", "strap-A", hr=lambda s: 185, v=lambda s: 7.5, t0=m0)
+    entry(c, rid, kind="sprint_end", client_token=f"trendb-e1-{variant['name']}", athlete_id="x1", round=1)
+    sim.run(st["now"] + timedelta(seconds=240), "x1", "strap-A", hr=lambda s: 140 + 10 * ((s // 20) % 2), t0=m0)
+    compared = 0
+    for _ in range(3):   # three polls 7 s apart: different alignments of the trend steps
+        v = c.get(f"{API}/recordings/{rid}/study/pilot", params={"trend_span_s": 300, "trend_step_s": 15}).json()
+        full = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1", "at": v["at"]}).json()
+        assert v["estimate"] == full
+        for pt in v["trend"]:
+            ref = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1", "at": pt["at"]}).json()
+            assert {k: pt[k] for k in ref["candidates"]} == {k: x["value"] for k, x in ref["candidates"].items()}, (variant["name"], pt["at"])
+            compared += 1
+        sim.run(st["now"] + timedelta(seconds=7), "x1", "strap-A", t0=m0)
+    assert compared >= 45
+    avail = {k: sum(1 for pt in v["trend"] if pt[k] is not None) for k in ("vest_only", "camera_only", "combined")}
+    assert sum(avail.values()) >= 10, ("the comparison must include available values", avail)

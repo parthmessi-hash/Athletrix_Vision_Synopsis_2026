@@ -347,11 +347,58 @@ dashboard copy of frontend f2faf7f through the timing proxy, a paint heartbeat i
 **This is NOT a completed display test** (one minute of visible time). It needs the laptop with nobody else's windows
 in front of Chrome for the whole run; the exact steps are in run sheet section 5d.
 
+### 5. Completion of the performance batch (2026-11-08, 20:15-21:10 UTC)
+
+**Final code vs the original baseline (ea14e8c), same frozen package, cutoffs and trend settings, only import-generated
+ids normalised:** 336 scores (as entered and retrospective, values, reasons, freshness, input fingerprints), 57
+reproductions, 112 recorded pilot views (estimate with fingerprints, 966 trend points) and 178 LIVE pilot views
+(readiness included: ready_to_start 152, stale_or_unassigned 6, no_stream 20; 917 trend points) are identical.
+New tests: the API-level equivalence test (late arrival, correction, wearer change, sprint exclusion, identity gap,
+refresh, time passing) and a trend-trimming test with two other profiles (windows 7 s and 200 s, references 33 s and
+60 s, recovery lookbacks 45 s and 400 s, staleness 4 s and 15 s) at exact window boundaries: every trend point equals
+the full score. Rules version, saved fingerprints and the save/reproduce path are unchanged; the trimmed inputs are
+used only for display trend points.
+
+**Receipt-time cache removed.** Measured with and without it on the late request: no benefit beyond noise (warm median
+379 / 462 ms with, 435 / 418 ms without); it held 3.3 MB for 17k entries and could have grown to about 50 MB. Request
+reuse holds one read of the rows instead of three, so it lowers memory.
+
+**Fair before/after** (alternating old and new twice on the same fixture, load average 3.5-4.8, battery 38-39 %
+discharging for both; `scripts/pilot_view_benchmark.py --point early --point late --setting dashboard --setting none`).
+The earlier 3,532 -> 566 ms figure was an INTERMEDIATE result (before the shared read); 3,495 -> 405 ms was the first
+alternating pair.
+
+| | before, median / p95 | after, median / p95 | rows read |
+|---|---|---|---|
+| early, dashboard | 129-132 / 187-190 ms | 72-73 / 138-171 ms | 4,343 -> 1,485 |
+| early, no trend | 36-37 / 72-74 ms | 25-29 / 59-90 ms | 3,030 -> 1,546 |
+| late, dashboard (wearer px1 active) | 3,585-3,642 / 3,910-4,112 ms | 426-436 / 493-586 ms | 50,473 -> 16,841 |
+| late, dashboard, during ingest | 3,635-3,641 / 3,832-4,082 ms | 425-432 / 519-530 ms | |
+| late, no trend | 379-413 / 410-616 ms | 180-181 / 222-225 ms | 33,772 -> 16,901 |
+
+First (cold) requests are close to the warm median for both versions (late, after: 425-586 ms). Remaining late time
+(after): scoring 208 ms (selection 130 ms, of which about 70 ms is the current estimate's full selection), database
+read 55 ms, readiness 32 ms, the current estimate's fingerprints 22 ms, the rest building inputs and the response.
+
+**Camera checks completed.** Coordinate mapping with the smaller detector input: the wearer's foot point lies a median
+1.6 px (p95 3.3 px) from the truth in the original 1280x720 image with YOLOX-Tiny at 416 (YOLOX-S at 640: 1.0 / 2.6 px);
+detections reach the image edges. Every-other-frame runs processed only even frames and every observation kept its
+original time (frame / 25).
+
+**Visible-browser check: not achieved.** A third attempt (20:47-20:51 UTC, `video_pilot_check.py --setting
+field-rehearsal --reconfirm-delay-s 6 --wearable-dropout 13:17 --hold-s 120 --keep-package`, display kept awake with
+`caffeinate -d -w PID`): Chrome drew frames for about 20 of 233 s and the card updated about once a minute, so 0 samples
+were measurable. The display was awake; the Chrome window was covered. The software behaviour repeated the earlier
+run: confirmed track, identity loss (camera stale 7.3-11.5 s), wearable dropout (vest stale 15.6-17.2 s), recovery,
+0 frames dropped, no combined score while a stream was stale.
+
 ## Checkpoint for the next session (2026-11-08, after the performance batch)
 
-Committed: backend 3137f36 (speedup), 185b46e (camera and display tooling) and the docs commit after them; frontend
-unchanged at f2faf7f. Do not repeat: the long-history benchmark, the camera comparison, the integrated check. Next:
-1. At the laptop, with Chrome in front and uncovered for 30 minutes: the display run of section 4 (run sheet 5d); on
-   mains power with nothing else open, rerun the camera comparison once to confirm `field-rehearsal` keeps up.
-2. Decide on the rules-version-3 proposal above (only if the current estimate's remaining growth matters).
-3. On a permitted field: run sheet sections 2b and 5d with a real camera and an independent timing reference.
+Committed and pushed: backend 3137f36, 185b46e, 4ef3f57 and the completion commit after them; frontend unchanged at
+f2faf7f. Do not repeat: the equivalence checks, the alternating benchmark, the camera comparison, the integrated check.
+Needs a person at the laptop:
+1. **Display delay.** Keep Chrome in front and uncovered for 30 minutes (run sheet 5d). Three attempts on 2026-11-08
+   were covered by other windows (61 s, 0 s and about 20 s visible).
+2. On mains power with nothing else open, rerun `scripts/camera_settings_compare.py` once to confirm `field-rehearsal`.
+Decisions: the rules-version-3 proposal (section 1) only if the current estimate's remaining growth matters. Field: run
+sheet sections 2b and 5d with a permitted camera and an independent timing reference.

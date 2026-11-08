@@ -179,7 +179,10 @@ up to 3x in our measurements).
    `python scripts/pilot_display_delay.py analyze --display display.json --package EXPORT.zip`.
    Only samples received and displayed while the page was drawing frames count; the rest are "not observable". A
    covered Chrome window draws nothing even with the display awake: on 2026-11-08 only 61 s of a 31-minute run were
-   visible, so that run is not a display measurement. Someone must keep Chrome in front for the whole run.
+   visible, and two shorter attempts had about 20 s and none, so no display measurement exists yet. Someone must keep
+   Chrome in front for the whole run. A short integrated version with paced video:
+   `.venv/bin/python scripts/video_pilot_check.py --out camera-work/visible --setting field-rehearsal --reconfirm-delay-s 6 --wearable-dropout 13:17 --engine-port 3932 --cors-origin http://127.0.0.1:3918 --hold-s 120 --keep-package`
+   with the proxy pointed at port 3932 and `analyze --display display.json --package camera-work/visible/pilot-package.zip`.
 
 **Camera setting for a permitted field rehearsal: `field-rehearsal` (YOLOX-Tiny 416, every other frame).** On this
 laptop it was the only setting that kept up with a 25 fps feed with headroom (0 frames dropped, lag p95 0.04 s); the

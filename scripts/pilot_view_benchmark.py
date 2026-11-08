@@ -167,13 +167,13 @@ def main(argv=None, out=print) -> int:
                         counts.append(dict(m.n))
                         rows.append(m.rows)
                     results.append({"point": pname, "at": t0.isoformat(), "setting": sname, "mode": mode, "polls": args.polls,
-                                    "ms_median": round(statistics.median(lat), 1), "ms_p95": round(pct(lat, 0.95), 1),
+                                    "ms_median": round(statistics.median(lat), 1), "ms_p95": round(pct(lat, 0.95), 1), "ms_first": round(lat[0], 1),
                                     "score_calls_per_poll": statistics.median(c["score"] for c in counts),
                                     "rows_read_per_poll": statistics.median(rows),
                                     "stage_ms_median": {k: round(statistics.median(s[k] for s in stages), 1) for k in stages[0]},
                                     "wearer": wearer.athlete_id if wearer else None})
                     x = results[-1]
-                    out(f"{pname:16} {sname:30} {mode:6} median {x['ms_median']:8.1f} ms  p95 {x['ms_p95']:8.1f} ms  scores {x['score_calls_per_poll']:4}  rows {x['rows_read_per_poll']:7}  "
+                    out(f"{pname:16} {sname:30} {mode:6} first {x['ms_first']:8.1f} ms  median {x['ms_median']:8.1f} ms  p95 {x['ms_p95']:8.1f} ms  scores {x['score_calls_per_poll']:4}  rows {x['rows_read_per_poll']:7}  "
                         + " ".join(f"{k} {v}" for k, v in x["stage_ms_median"].items()))
     finally:
         clock.utc_now, clock.receipt_now = saved_clock
