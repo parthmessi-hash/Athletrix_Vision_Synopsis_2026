@@ -2,8 +2,10 @@
 
 USAGE
     python scripts/evaluate.py make-fictional --out DIR          # a FICTIONAL dataset to exercise the workbench (labelled fictional)
-    python scripts/evaluate.py run DATASET.json --out DIR [--split development|held_out|all]
+    python scripts/evaluate.py manifest DATASET.json --out MANIFEST.json [profile options]   # pin what a run will use
+    python scripts/evaluate.py run DATASET.json --out DIR [--split development|held_out|all] [--manifest MANIFEST.json]
                                [--index-profile A.json [--index-profile B.json]] [--substitution-profile S.json] [--rubric R.json]
+                               [--expected EXPECTED.json] [--no-sensitivity]
 
 DATASET (format "athletrix-evaluation-dataset", version 1; paths relative to the dataset file):
     dataset_id, fictional (true for made-up data), provenance, code_revision (as supplied),
@@ -13,7 +15,26 @@ DATASET (format "athletrix-evaluation-dataset", version 1; paths relative to the
                  coach_judgments: [{file, reviewer_id, source}]},            JSON list {case_id, athlete_id, at, judgment}
     tuning_log: [{date, what, split_used}]                                   every choice made while looking at results
 
-QUESTIONS (reported separately; agreement on one says nothing about another)
+QUESTIONS (reported separately; agreement on one says nothing about another). The report is ordered as a pilot rehearsal:
+  Q1 software      did the software record and reproduce the inputs? Imported counts equal the package's, a re-export
+                   carries the same samples, a review saved during the run reproduces, and a deliberately altered and a
+                   deliberately removed sample are both detected by reproduction.
+  Q2 camera        how accurately did the camera measure movement (below) and preserve identity: a matched engine sample
+                   that lies closer to ANOTHER athlete's reference position than to its own (by at least --swap-margin-m)
+                   is reported as a possible identity swap.
+  Q3 reviewers     how much did independent reviewers agree on performance evidence: the label files below and, when
+                   given, blind annotation sheets (references.annotation_sheets, app/core/annotation.py).
+  Q4 recommendation  did the output agree with a reviewer's judgment, under five variants on identical rows:
+                   descriptive (no recommendation, availability only), score_only, context_aware, context_aware with the
+                   athlete's physiology stream removed over the review lookback (stream unavailable), and context_aware with
+                   the athlete's performance evidence marked identity-uncertain.
+SELF-CHECK (--expected): independently written expected outcomes for key rows are compared with context_aware; a deliberately
+wrong expectation and a deliberately broken policy must both be caught, or the run says the check is not sensitive.
+SENSITIVITY (development split only, never held out): each fictional substitution setting moved one step at a time, with
+the number of rows whose output changes. It shows what matters in the made-up settings; it chooses nothing.
+MANIFEST: recording ids, source types, calibration and time-mapping metadata, profile hashes, code revision, splits and
+comparison rules. With --manifest, a run refuses packages or profiles whose hashes differ from the pinned ones.
+
     camera        engine tracking samples vs reference positions: a reference point is matched to the sample of the same
                   athlete nearest in time within --match-window-s (default 0.1 s); unmatched points are coverage gaps,
                   reported next to the position errors. Points of one athlete in one case are repeated observations of the
@@ -240,6 +261,254 @@ def substitution(doc: dict, cases: Cases) -> dict:
     return out
 
 
+
+# ---- Q1 software, Q2 identity, Q3 annotation sheets, Q4 variants, self-check, sensitivity, manifest --------------------------
+
+def software(doc: dict, cases: Cases) -> dict:
+    """Recording and reproduction checks on the isolated evaluation database (run last: it alters and restores samples)."""
+    import sqlite3  # noqa: PLC0415
+
+    from app.core.recording_package import read_package  # noqa: PLC0415
+    rows = []
+    for case, rid in cases.rec.items():
+        pkg = cases.packages[case]["pkg"]
+        detail = cases.get(f"/recordings/{rid}")
+        counts_ok = all(a["physiological"]["sample_count"] == len(pkg.samples.get(a["athlete"]["id"], {}).get("physiological", []))
+                        and a["tracking"]["sample_count"] == len(pkg.samples.get(a["athlete"]["id"], {}).get("tracking", [])) for a in detail["recorded"])
+        r = cases.engine.client.get(f"/api/v1/recordings/{rid}/package.zip")
+        again = read_package(r.content)
+        same = all([s.model_dump_json() for s in again.samples.get(aid, {}).get(st, [])] == [s.model_dump_json() for s in pkg.samples.get(aid, {}).get(st, [])]
+                   for aid in pkg.samples for st in ("physiological", "tracking"))
+        strap = next((aid for aid in pkg.samples if pkg.samples[aid].get("physiological")), None)
+        row = {"case_id": case, "imported_counts_match_package": counts_ok, "re_export_carries_the_same_samples": same, "package_format": pkg.manifest["format_version"]}
+        if strap:
+            at = pkg.recording["stopped_at"]
+            saved = cases.engine.post(f"/recordings/{rid}/athletes/{strap}/reviews", {"kind": "physiological_index", "at": at, "label": "evaluation software check"})
+            rep = lambda: cases.get(f"/recordings/{rid}/reviews/{saved['id']}/reproduce")["status"]  # noqa: E731
+            row["saved_review_reproduces"] = rep() == "reproduced"
+            con = sqlite3.connect(cases.engine.db.path)
+            try:
+                key = con.execute("SELECT ts_utc, payload FROM recording_physiological_samples WHERE recording_id = ? AND athlete_id = ? ORDER BY ts_utc DESC LIMIT 1", (rid, strap)).fetchone()
+                d = json.loads(key[1]); d["heart_rate_bpm"] = (d.get("heart_rate_bpm") or 100) + 1
+                con.execute("UPDATE recording_physiological_samples SET payload = ? WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (json.dumps(d), rid, strap, key[0])); con.commit()
+                row["altered_sample_detected"] = rep() == "evidence_changed"
+                con.execute("UPDATE recording_physiological_samples SET payload = ? WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (key[1], rid, strap, key[0])); con.commit()
+                row["restored_reproduces"] = rep() == "reproduced"
+                full = con.execute("SELECT * FROM recording_physiological_samples WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (rid, strap, key[0])).fetchone()
+                con.execute("DELETE FROM recording_physiological_samples WHERE recording_id = ? AND athlete_id = ? AND ts_utc = ?", (rid, strap, key[0])); con.commit()
+                row["removed_sample_detected"] = rep() == "evidence_changed"
+                cols = [c[1] for c in con.execute("PRAGMA table_info(recording_physiological_samples)")]
+                con.execute(f"INSERT INTO recording_physiological_samples ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", full); con.commit()
+            finally:
+                con.close()
+        rows.append(row)
+    ok = all(v for r in rows for k, v in r.items() if isinstance(v, bool))
+    return {"cases": rows, "passed": ok, "note": "checks on this software and these packages only; they say nothing about whether the inputs were measured correctly"}
+
+
+def identity(doc: dict, cases: Cases, window_s: float, margin_m: float) -> dict:
+    out = []
+    for ref in doc["references"].get("camera_positions", []):
+        if ref["case_id"] not in cases.packages:
+            continue
+        pkg = cases.packages[ref["case_id"]]["pkg"]
+        rows = [json.loads(line) for line in (doc["_base"] / ref["file"]).read_text().splitlines() if line.strip()]
+        by_t: dict[str, dict[str, tuple]] = {}
+        for r in rows:
+            by_t.setdefault(r["timestamp"], {})[r["athlete_id"]] = (r["x"], r["y"])
+        athletes = sorted({r["athlete_id"] for r in rows})
+        checked, swaps, segs = 0, [], {}
+        for aid in athletes:
+            for s in pkg.samples.get(aid, {}).get("tracking", []):
+                segs.setdefault(aid, set()).add(s.segment_id)
+                stamp = min(by_t, key=lambda k: abs((parse_t(k) - s.timestamp).total_seconds()))
+                if abs((parse_t(stamp) - s.timestamp).total_seconds()) > window_s or aid not in by_t[stamp] or len(by_t[stamp]) < 2:
+                    continue
+                checked += 1
+                own = ((s.x_position - by_t[stamp][aid][0]) ** 2 + (s.y_position - by_t[stamp][aid][1]) ** 2) ** 0.5
+                other = min((((s.x_position - x) ** 2 + (s.y_position - y) ** 2) ** 0.5, o) for o, (x, y) in by_t[stamp].items() if o != aid)
+                if other[0] + margin_m < own:
+                    swaps.append({"athlete_id": aid, "timestamp": s.timestamp.isoformat(), "closer_to": other[1], "segment_id": s.segment_id})
+        out.append({"case_id": ref["case_id"], "samples_checked": checked, "possible_swaps": len(swaps), "swap_segments": sorted({(w["athlete_id"], w["segment_id"]) for w in swaps}),
+                    "first_swaps": swaps[:5], "segments_per_athlete": {a: len(v) for a, v in segs.items()},
+                    "rule": f"a sample closer to another athlete's reference than to its own by more than {margin_m} m"})
+    return {"by_reference": out, "note": "possible swaps are flagged for review; identity was confirmed by whoever made the assignments (see their operator_work)"}
+
+
+def annotation_sheets(doc: dict) -> dict | None:
+    from app.core.annotation import SheetError, compare  # noqa: PLC0415
+    refs = doc["references"].get("annotation_sheets") or []
+    if len(refs) < 2:
+        return None
+    sheets = [json.loads((doc["_base"] / r["file"]).read_text()) for r in refs[:2]]
+    try:
+        return compare(*sheets)
+    except SheetError as exc:
+        return {"error": str(exc)}
+
+
+def variant_inputs(inp, variant: str, prof):
+    """A copy of the review inputs for one variant (never the stored data)."""
+    from dataclasses import replace  # noqa: PLC0415
+    v = replace(inp, athletes=dict(inp.athletes))
+    if variant == "score_only":
+        v.rule_variant = "score_only"
+    elif variant == "stream_unavailable":
+        d = v.athletes[inp.athlete_id]
+        cut = inp.at - timedelta(seconds=prof.lookback_seconds + 3600)
+        v.athletes[inp.athlete_id] = replace(d, samples=[(s, r) for s, r in d.samples if s.timestamp <= cut])
+    elif variant == "identity_uncertain":
+        d = v.athletes[inp.athlete_id]
+        v.athletes[inp.athlete_id] = replace(d, observations=[o.model_copy(update={"identity": "uncertain"}) for o in d.observations])
+    return v
+
+
+VARIANTS = ("descriptive", "score_only", "context_aware", "stream_unavailable", "identity_uncertain")
+
+
+def review_rows(doc: dict, cases: Cases, rows: list[dict], profile_override=None) -> list[dict]:
+    from app.api import review as api  # noqa: PLC0415
+    from app.core.substitution import substitution_review  # noqa: PLC0415
+    from app.db import get_database  # noqa: PLC0415
+    from app.store.recordings import recording_store  # noqa: PLC0415
+    parsed = api.parse_docs(api.configured_docs())
+    if profile_override is not None:
+        parsed = {**parsed, "substitution": profile_override}
+    out = []
+    for j in rows:
+        rid = cases.rec[j["case_id"]]
+        with get_database().read():
+            rec = recording_store.get(rid)
+            inp, _ = api.gather(rec, j["athlete_id"], parse_t(j["at"]), parsed, "retrospective")
+        row = {**j}
+        prof = parsed["substitution"][0] if parsed["substitution"] else None
+        for variant in VARIANTS:
+            if variant == "descriptive":
+                r = substitution_review(inp)
+                p = r.get("player") or {}
+                row["descriptive"] = {"physiological_index": (p.get("physiology") or {}).get("available"), "performance_composite": (p.get("performance") or {}).get("available")}
+                continue
+            row[variant] = substitution_review(variant_inputs(inp, variant, prof))["outcome"] if prof else "insufficient_evidence"
+        out.append(row)
+    return out
+
+
+def substitution_variants(doc: dict, cases: Cases) -> dict:
+    res = {"variants": list(VARIANTS), "by_reviewer": [],
+           "note": "agreement with a reviewer's judgment is not physiological or performance accuracy; rows are repeated judgments of the same athletes, not independent participants"}
+    for ref in doc["references"].get("coach_judgments", []):
+        rows = [x for x in json.loads((doc["_base"] / ref["file"]).read_text()) if x["case_id"] in cases.rec]
+        done = review_rows(doc, cases, rows)
+        agree = {v: sum(r[v] == r["judgment"] for r in done) for v in VARIANTS if v != "descriptive"}
+        insufficient = {v: sum(r[v] == "insufficient_evidence" for r in done) for v in VARIANTS if v != "descriptive"}
+        by_split = {}
+        split_of = {c["case_id"]: c["split"] for c in doc["_cases"]}
+        for sp in sorted({split_of[r["case_id"]] for r in done}):
+            sub = [r for r in done if split_of[r["case_id"]] == sp]
+            by_split[sp] = {"rows": len(sub), **{v: sum(r[v] == r["judgment"] for r in sub) for v in VARIANTS if v != "descriptive"}}
+        res["by_reviewer"].append({"reviewer_id": ref["reviewer_id"], "source": ref.get("source"), "judgments": len(done),
+                                   "athletes": len({r["athlete_id"] for r in done}), "cases": len({r["case_id"] for r in done}),
+                                   "agreement": agree, "insufficient_evidence_outputs": insufficient, "by_split": by_split, "rows": done})
+    return res
+
+
+def self_check(doc: dict, cases: Cases, expected_path: Path | None) -> dict | None:
+    """Independently written expectations vs context_aware; then a wrong expectation and a broken policy must be caught."""
+    if expected_path is None:
+        return None
+    exp = json.loads(Path(expected_path).read_text())
+    rows = [{"case_id": e["case_id"], "athlete_id": e["athlete_id"], "at": e["at"], "judgment": e["expected"], "why": e.get("why")} for e in exp["expectations"] if e["case_id"] in cases.rec]
+    got = review_rows(doc, cases, rows)
+    mism = [{"case_id": r["case_id"], "athlete_id": r["athlete_id"], "at": r["at"], "expected": r["judgment"], "got": r["context_aware"]} for r in got if r["context_aware"] != r["judgment"]]
+    other = {"keep": "consider_replacement", "consider_replacement": "keep", "review_later": "keep", "insufficient_evidence": "keep"}
+    wrong = [{**r, "judgment": other[r["judgment"]]} if i == 0 else r for i, r in enumerate(rows)]
+    caught_wrong = any(r["context_aware"] != r["judgment"] for r in review_rows(doc, cases, wrong[:1]))
+    from app.api import review as api  # noqa: PLC0415
+    sub = api.parse_docs(api.configured_docs())["substitution"]
+    caught_policy = None
+    if sub:
+        broken = sub[0].model_copy(update={"performance": sub[0].performance.model_copy(update={"concern_below": 0.0, "clear_at": 0.0}),
+                                           "physiology": sub[0].physiology.model_copy(update={"concern_at": 100.0, "clear_below": 100.0})})
+        bad = review_rows(doc, cases, rows, profile_override=(broken, "deliberately-broken"))
+        caught_policy = any(b["context_aware"] != r["judgment"] for b, r in zip(bad, rows))
+    return {"file": Path(expected_path).name, "source": exp.get("source"), "rows": len(rows), "matches": len(rows) - len(mism), "mismatches": mism,
+            "deliberately_wrong_expectation_caught": caught_wrong, "deliberately_broken_policy_caught": caught_policy,
+            "note": "expectations written by hand from the scenario descriptions, not from this code's output; a check that cannot catch a planted error is reported as not sensitive"}
+
+
+def sensitivity(doc: dict, cases: Cases) -> dict | None:
+    from app.api import review as api  # noqa: PLC0415
+    dev = {c["case_id"] for c in doc["_cases"] if c["split"] == "development"}
+    refs = doc["references"].get("coach_judgments", [])
+    sub = api.parse_docs(api.configured_docs())["substitution"]
+    if not dev or not refs or not sub:
+        return None
+    rows = [x for x in json.loads((doc["_base"] / refs[0]["file"]).read_text()) if x["case_id"] in dev]
+    base = {(r["case_id"], r["athlete_id"], r["at"]): r["context_aware"] for r in review_rows(doc, cases, rows)}
+    p = sub[0]
+    steps = [("physiology.concern_at", -10), ("physiology.concern_at", 10), ("physiology.persistence_points", -1), ("physiology.persistence_points", 1),
+             ("performance.concern_below", -10), ("performance.concern_below", 10), ("performance.persistence_points", -1), ("performance.persistence_points", 1),
+             ("cooldown_seconds", "x0"), ("cooldown_seconds", "x2")]
+    out = []
+    for path, step in steps:
+        part, _, field = path.partition(".")
+        if field:
+            sec = getattr(p, part)
+            v = getattr(sec, field)
+            nv = max(1, v + step) if isinstance(v, int) else min(100.0, max(0.0, v + step))
+            upd = {field: nv}
+            if field == "concern_at":
+                upd["clear_below"] = min(sec.clear_below, nv)
+            if field == "concern_below":
+                upd["clear_at"] = max(sec.clear_at, nv)
+            q = p.model_copy(update={part: sec.model_copy(update=upd)})
+            label = f"{path} {v:g} -> {nv:g}"
+        else:
+            nv = 0.0 if step == "x0" else p.cooldown_seconds * 2
+            q = p.model_copy(update={"cooldown_seconds": nv})
+            label = f"cooldown_seconds {p.cooldown_seconds:g} -> {nv:g}"
+        got = review_rows(doc, cases, rows, profile_override=(q, "sensitivity"))
+        changed = [{"case_id": r["case_id"], "athlete_id": r["athlete_id"], "at": r["at"], "from": base[(r["case_id"], r["athlete_id"], r["at"])], "to": r["context_aware"]}
+                   for r in got if r["context_aware"] != base[(r["case_id"], r["athlete_id"], r["at"])]]
+        out.append({"setting": label, "rows_changed": len(changed), "of": len(rows), "changes": changed})
+    return {"split": "development", "reviewer_rows_from": refs[0]["reviewer_id"], "steps": out,
+            "note": "FICTIONAL settings moved one step at a time on the development split only. Shows which made-up settings change outputs; it selects no threshold and was not run on held-out cases."}
+
+
+def build_manifest(doc: dict, base: dict, args) -> dict:
+    from app.core.recording_package import read_package  # noqa: PLC0415
+    cases = []
+    for c in doc["_cases"]:
+        data = (doc["_base"] / c["package"]).read_bytes()
+        pkg = read_package(data)
+        sources = sorted({str(s.source) for a in pkg.samples.values() for st in a.values() for s in st if getattr(s, "source", None)})
+        op = (pkg.configuration.operator_supplied.metadata if pkg.configuration and pkg.configuration.operator_supplied else {}) or {}
+        cases.append({"case_id": c["case_id"], "split": c["split"], "package": c["package"], "package_sha256": hashlib.sha256(data).hexdigest(),
+                      "recording_id": pkg.recording["id"], "source_types": sources,
+                      "calibration_sha256": op.get("calibration_sha256"), "time_mapping": op.get("time_mapping") or "not recorded in the package (timelines treated as independent)"})
+    try:
+        rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=5).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        rev = None
+    return {"format": "athletrix-evaluation-manifest", "format_version": 1, "dataset_id": doc["dataset_id"], "fictional": bool(doc.get("fictional")), "code_revision": rev,
+            "cases": cases, "profiles": {k: {"file": v.name, "sha256": hashlib.sha256(v.read_bytes()).hexdigest()} for k, v in base.items()},
+            "references": {k: [{**r, "sha256": hashlib.sha256((doc["_base"] / r["file"]).read_bytes()).hexdigest()} for r in v] for k, v in doc["references"].items()},
+            "comparison_rules": {"camera_match_window_s": args.match_window_s, "swap_margin_m": args.swap_margin_m, "performance_match": "same athlete and kind, overlap >= half of the shorter period",
+                                 "recommendation_variants": list(VARIANTS), "knowledge": "retrospective"}}
+
+
+def check_manifest(pinned: dict, now: dict) -> list[str]:
+    problems = []
+    a = {c["case_id"]: c["package_sha256"] for c in pinned["cases"]}
+    for c in now["cases"]:
+        if c["case_id"] in a and a[c["case_id"]] != c["package_sha256"]:
+            problems.append(f"case {c['case_id']}: package differs from the manifest")
+    for k, v in pinned["profiles"].items():
+        if now["profiles"].get(k, {}).get("sha256") != v["sha256"]:
+            problems.append(f"{k}: profile differs from the manifest")
+    return problems
+
+
 # ---- run ----------------------------------------------------------------------------------------------------------------------
 
 def run(args, out) -> int:
@@ -248,6 +517,12 @@ def run(args, out) -> int:
             "SUBSTITUTION_PROFILE_PATH": Path(args.substitution_profile) if args.substitution_profile else demo.PROFILE_FILES["SUBSTITUTION_PROFILE_PATH"],
             "PERFORMANCE_RUBRIC_PATH": Path(args.rubric) if args.rubric else demo.PROFILE_FILES["PERFORMANCE_RUBRIC_PATH"]}
     saved_env = {k: os.environ.get(k) for k in base}
+    manifest = build_manifest(doc, base, args)
+    if args.manifest:
+        problems = check_manifest(json.loads(Path(args.manifest).read_text()), manifest)
+        if problems:
+            out("refused: " + "; ".join(problems))
+            return 1
     cases = Cases(doc, base)
     try:
         held_tuned = [t for t in doc.get("tuning_log", []) if t.get("split_used") in ("held_out", "all")]
@@ -262,8 +537,13 @@ def run(args, out) -> int:
                    "held_out_status": ("COMPROMISED: the tuning log records choices made with the held-out split; collect new examples before calling anything held out"
                                        if held_tuned else "no tuning with the held-out split is recorded"),
                    "tuning_log": doc.get("tuning_log", []),
-                   "camera": camera(doc, cases, args.match_window_s), "performance": performance(doc, cases),
-                   "profiles": profiles(doc, cases, [Path(p) for p in args.index_profile or []], base), "substitution": substitution(doc, cases)}
+                   "manifest": manifest,
+                   "camera": camera(doc, cases, args.match_window_s), "identity": identity(doc, cases, args.match_window_s, args.swap_margin_m),
+                   "performance": performance(doc, cases), "annotation_sheets": annotation_sheets(doc),
+                   "profiles": profiles(doc, cases, [Path(p) for p in args.index_profile or []], base), "substitution": substitution(doc, cases),
+                   "recommendation_variants": substitution_variants(doc, cases), "self_check": self_check(doc, cases, args.expected),
+                   "sensitivity": None if args.no_sensitivity or args.split == "held_out" else sensitivity(doc, cases)}
+        results["software"] = software(doc, cases)   # last: it alters and restores samples in the isolated database
     finally:
         cases.close()
         for k, v in saved_env.items():
@@ -284,19 +564,60 @@ def report(r: dict) -> str:
     L = [f"# Evaluation report: {r['dataset_id']}", "", ("**FICTIONAL dataset: made-up data and made-up reference judgments. This exercises the workbench; it evaluates nothing real.**" if r["fictional"] else ""),
          "", f"Generated {r['generated_at']} by {r['tool']} (engine code {r['engine_code_revision'] or 'unknown'}). Split: {r['split']}. Held-out status: {r['held_out_status']}.", "",
          "| Case | Split | Package SHA-256 |", "|---|---|---|"] + [f"| {c['case_id']} | {c['split']} | `{c['package_sha256'][:16]}…` |" for c in r["cases"]] + ["", "Configuration: " + "; ".join(f"{k} {v['file']} (`{v['sha256'][:12]}…`)" for k, v in r["configuration"].items()), "",
-         "## 1. Camera positions", r["camera"]["rule"], ""]
+         "Questions are kept apart: agreement on one says nothing about another. Rows, frames and repeated windows of the same athletes are not independent participants.", "",
+         "## Q1. Did the software record and reproduce the inputs?"]
+    sw = r.get("software") or {}
+    for c in sw.get("cases", []):
+        L.append(f"- {c['case_id']}: " + ", ".join(f"{k.replace('_', ' ')} {'yes' if v else 'NO'}" for k, v in c.items() if isinstance(v, bool)))
+    L += [f"- overall: {'passed' if sw.get('passed') else 'FAILED'}. {sw.get('note', '')}", "", "## Q2. Camera movement and identity", "### Positions", r["camera"]["rule"], ""]
     for c in r["camera"]["by_reference"]:
         e = c["position_error_m"] or {}
         L.append(f"- {c['case_id']}, reviewer {c['reviewer_id']} ({c['source']}): {c['matched']} of {c['reference_points']} reference points matched (coverage {c['coverage']}), {c['unmatched_coverage_gaps']} coverage gaps; "
                  f"position error median {e.get('median')} m, p95 {e.get('p95')} m, max {e.get('max')} m. {c['note']}.")
-    L += ["", "## 2. Performance evidence vs reference labels", r["performance"]["rule"], ""]
+    L += ["", "### Identity"]
+    for c in (r.get("identity") or {}).get("by_reference", []):
+        L.append(f"- {c['case_id']}: {c['samples_checked']} samples checked against simultaneous references, {c['possible_swaps']} possible swaps in segments {c['swap_segments']} ({c['rule']}); segments per athlete {c['segments_per_athlete']}")
+    L += ["", "## Q3. Reviewer agreement on performance evidence", "### Engine evidence vs reference labels", r["performance"]["rule"], ""]
     for b in r["performance"]["by_reviewer"]:
         L.append(f"- reviewer {b['reviewer_id']} ({b['source']}): {b['compared']} of {b['labels']} labels compared ({b['unmatched']} unmatched), {b['exact_agreement']} exact agreements; rate difference {b['rate_difference']}")
     L.append(f"- {r['performance']['items_with_several_reviewers']} items labelled by several reviewers; {len(r['performance']['disagreements_between_reviewers'])} disagreements kept as they are:")
     for d in r["performance"]["disagreements_between_reviewers"]:
         L.append(f"  - {d['case_id']} {d['item_id']}: " + "; ".join(f"{k}: {json.dumps(v)}" for k, v in d["labels"].items()))
-    L += ["", "## 3. Physiological index profiles compared", json.dumps(r["profiles"], indent=1) if r["profiles"] else "Not run (give --index-profile twice).", "",
-          "## 4. Substitution outputs vs coach judgments", r["substitution"]["note"], ""]
+    a = r.get("annotation_sheets")
+    L += ["", "### Blind annotation sheets"]
+    if not a:
+        L.append("No pair of annotation sheets in the dataset.")
+    elif a.get("error"):
+        L.append(f"Not compared: {a['error']}")
+    else:
+        L.append(f"Reviewers {a['reviewers'][0]} and {a['reviewers'][1]}" + (" (FICTIONAL)" if a["fictional"] else "") + ". " + a["note"])
+        for q, v in a["per_question"].items():
+            L.append(f"- {q}: asked {v['moments_asked']}, both assessed {v['both_assessed']}, same assessability {v['same_assessability']}, agreed {v['agreed_where_both_assessed']}")
+        for d in a["disagreements"]:
+            L.append(f"  - disagree {d['moment']} {d['question']}: A {json.dumps(d['a'])} | B {json.dumps(d['b'])}")
+    L += ["", "## Q4. Recommendation vs reviewer judgment", r["recommendation_variants"]["note"], ""]
+    for b in r["recommendation_variants"]["by_reviewer"]:
+        L.append(f"- {b['reviewer_id']} ({b['source']}): {b['judgments']} rows on {b['athletes']} athletes in {b['cases']} cases. Agreement: " +
+                 ", ".join(f"{k} {v}/{b['judgments']}" for k, v in b["agreement"].items()) + ". Insufficient-evidence outputs: " + ", ".join(f"{k} {v}" for k, v in b["insufficient_evidence_outputs"].items()))
+        for sp, v in b["by_split"].items():
+            L.append(f"  - {sp}: " + ", ".join(f"{k} {n}/{v['rows']}" for k, n in v.items() if k != "rows"))
+    sc = r.get("self_check")
+    L += ["", "## Self-check against independently written expectations"]
+    if sc:
+        L.append(f"- {sc['matches']} of {sc['rows']} rows match ({sc['source']}); mismatches: {json.dumps(sc['mismatches'])}")
+        L.append(f"- a deliberately wrong expectation caught: {sc['deliberately_wrong_expectation_caught']}; a deliberately broken policy caught: {sc['deliberately_broken_policy_caught']}. {sc['note']}")
+    else:
+        L.append("Not run (give --expected).")
+    se = r.get("sensitivity")
+    L += ["", "## Sensitivity of the fictional settings (development split only)"]
+    if se:
+        L.append(se["note"])
+        for st in se["steps"]:
+            L.append(f"- {st['setting']}: {st['rows_changed']} of {st['of']} rows change" + (" · " + "; ".join(f"{c['athlete_id']} {c['from']}->{c['to']}" for c in st["changes"][:6]) if st["changes"] else ""))
+    else:
+        L.append("Not run.")
+    L += ["", "## Physiological index profiles compared", json.dumps(r["profiles"], indent=1) if r["profiles"] else "Not run (give --index-profile twice).", "",
+          "## Earlier comparison (context-aware and score-only only)", r["substitution"]["note"], ""]
     for b in r["substitution"]["by_reviewer"]:
         L.append(f"- reviewer {b['reviewer_id']} ({b['source']}): {b['judgments']} judgments; agreement context-aware {b['agreement']['context_aware']}, score-only {b['agreement']['score_only']}; "
                  f"insufficient-evidence outputs {b['insufficient_evidence_outputs']}")
@@ -327,8 +648,11 @@ def make_fictional(out_dir: Path, out) -> int:
             truth.setdefault(aid, []).append((s, x, y))
             if 300 <= k < 340:   # a fictional assignment loss: no samples
                 continue
+            seg = f"seg-{aid}-{k // 300}"
+            if aid == "p01" and 500 <= k < 520:   # a deliberately planted identity swap: p01's samples follow p02 (Q2 must flag it)
+                x, seg = x + 5, "seg-p01-planted-swap"
             rows.append(TrackingSample(athlete_id=aid, timestamp=demo.at(s), x_position=round(x + rng.gauss(0, 0.3), 3), y_position=round(y + rng.gauss(0, 0.3), 3), speed_mps=1.0,
-                                       acceleration_mps2=0.0, tracking_confidence=0.9, source="camera", device_id="fictional-cam", segment_id=f"seg-{aid}-{k // 300}", value_basis="estimated"))
+                                       acceleration_mps2=0.0, tracking_confidence=0.9, source="camera", device_id="fictional-cam", segment_id=seg, value_basis="estimated"))
         pkg.samples[aid]["tracking"] = rows
     rec = {**pkg.recording}
     pkgs["match-dev"] = build_package(rec, pkg.athletes, pkg.samples, [], {"note": "fictional"}, demo.at(demo.DURATION_S + 600), None, None, pkg.context, pkg.performance, pkg.baselines, pkg.roster, [])
@@ -359,6 +683,10 @@ def make_fictional(out_dir: Path, out) -> int:
         for case in ("match-dev", "match-held"):
             coach_a.append({"case_id": case, "athlete_id": pid, "at": demo.z(t), "judgment": expected})
             coach_b.append({"case_id": case, "athlete_id": pid, "at": demo.z(t), "judgment": {"S1": "keep", "S3": "keep", "S6": "keep"}.get(sid, expected)})
+    import shutil  # noqa: PLC0415
+    for name in ("fictional_reviewer_a.json", "fictional_reviewer_b.json"):
+        shutil.copy(ROOT / "scripts" / "examples" / "annotation" / name, out_dir / name)
+    shutil.copy(ROOT / "scripts" / "examples" / "evaluation" / "fictional_expected_outcomes.json", out_dir / "expected-outcomes.json")
     (out_dir / "coach-a.json").write_text(json.dumps(coach_a, indent=1))
     (out_dir / "coach-b.json").write_text(json.dumps(coach_b, indent=1))
     ds = {"format": FORMAT, "format_version": 1, "dataset_id": "fictional-workbench-check", "fictional": True,
@@ -370,10 +698,12 @@ def make_fictional(out_dir: Path, out) -> int:
                          "performance_labels": [{"file": "performance-reviewer-a.json", "reviewer_id": "fictional-reviewer-a", "source": "FICTIONAL"},
                                                 {"file": "performance-reviewer-b.json", "reviewer_id": "fictional-reviewer-b", "source": "FICTIONAL"}],
                          "coach_judgments": [{"file": "coach-a.json", "reviewer_id": "fictional-coach-a", "source": "FICTIONAL (written to match the demo's expected outputs)"},
-                                             {"file": "coach-b.json", "reviewer_id": "fictional-coach-b", "source": "FICTIONAL (keeps three players coach a would not)"}]},
+                                             {"file": "coach-b.json", "reviewer_id": "fictional-coach-b", "source": "FICTIONAL (keeps three players coach a would not)"}],
+                         "annotation_sheets": [{"file": "fictional_reviewer_a.json", "reviewer_id": "fictional reviewer A", "source": "FICTIONAL"},
+                                               {"file": "fictional_reviewer_b.json", "reviewer_id": "fictional reviewer B", "source": "FICTIONAL"}]},
           "tuning_log": []}
     (out_dir / "dataset.json").write_text(json.dumps(ds, indent=2))
-    out(f"wrote a FICTIONAL evaluation dataset to {out_dir} (dataset.json, two packages, references from fictional reviewers)")
+    out(f"wrote a FICTIONAL evaluation dataset to {out_dir} (dataset.json, two packages, references from fictional reviewers, annotation sheets, expected-outcomes.json)")
     return 0
 
 
@@ -390,6 +720,19 @@ def main(argv=None, out=print) -> int:
     r.add_argument("--substitution-profile")
     r.add_argument("--rubric")
     r.add_argument("--match-window-s", type=float, default=0.1)
+    r.add_argument("--swap-margin-m", type=float, default=1.0)
+    r.add_argument("--expected", type=Path, help="independently written expected outcomes (self-check)")
+    r.add_argument("--manifest", type=Path, help="refuse packages or profiles that differ from this manifest")
+    r.add_argument("--no-sensitivity", action="store_true")
+    mf = sub.add_parser("manifest", help="pin the cases, sources, profile hashes, code revision and comparison rules of a run")
+    mf.add_argument("dataset", type=Path)
+    mf.add_argument("--out", type=Path, required=True)
+    mf.add_argument("--split", choices=["development", "held_out", "all"], default="all")
+    mf.add_argument("--index-profile", action="append")
+    mf.add_argument("--substitution-profile")
+    mf.add_argument("--rubric")
+    mf.add_argument("--match-window-s", type=float, default=0.1)
+    mf.add_argument("--swap-margin-m", type=float, default=1.0)
     try:
         args = ap.parse_args(argv)
     except SystemExit as exc:
@@ -399,6 +742,14 @@ def main(argv=None, out=print) -> int:
         return 2
     if args.command == "make-fictional":
         return make_fictional(args.out, out)
+    if args.command == "manifest":
+        doc = load_dataset(args.dataset, args.split)
+        base = {"PHYSIOLOGICAL_INDEX_PROFILE_PATH": Path(args.index_profile[0]) if args.index_profile else demo.PROFILE_FILES["PHYSIOLOGICAL_INDEX_PROFILE_PATH"],
+                "SUBSTITUTION_PROFILE_PATH": Path(args.substitution_profile) if args.substitution_profile else demo.PROFILE_FILES["SUBSTITUTION_PROFILE_PATH"],
+                "PERFORMANCE_RUBRIC_PATH": Path(args.rubric) if args.rubric else demo.PROFILE_FILES["PERFORMANCE_RUBRIC_PATH"]}
+        args.out.write_text(json.dumps(build_manifest(doc, base, args), indent=2) + "\n")
+        out(f"wrote {args.out}")
+        return 0
     try:
         return run(args, out)
     except (ValueError, OSError, KeyError) as exc:

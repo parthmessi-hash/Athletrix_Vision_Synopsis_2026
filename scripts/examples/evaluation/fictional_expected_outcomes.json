@@ -1,0 +1,78 @@
+{
+  "format": "athletrix-expected-outcomes",
+  "format_version": 1,
+  "fictional": true,
+  "source": "written by hand from the scenario descriptions in scripts/product_demo.py (the rules' intent), not copied from any run's output",
+  "expectations": [
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p01",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "review_later",
+      "why": "elevated index, performance maintained: an elevated index alone never recommends a replacement"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p02",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "consider_replacement",
+      "why": "sustained performance decline, adequate physiology, role-compatible bench option"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p03",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "review_later",
+      "why": "same decline, but coach-recorded leadership and an on-field partnership: the coach weighs it"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p05",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "consider_replacement",
+      "why": "asked to play a role he cannot play, a role-compatible bench option exists"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p06",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "insufficient_evidence",
+      "why": "strap lost after 20 minutes: a required input is missing"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p07",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "review_later",
+      "why": "goalkeeper decline with no goalkeeper on the bench"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p08",
+      "at": "2026-11-01T14:23:00Z",
+      "expected": "review_later",
+      "why": "sustained elevated index before recovery"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p08",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "keep",
+      "why": "after recovery: every input available, no sustained concern"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p09",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "insufficient_evidence",
+      "why": "performance evidence left out for uncertain identity"
+    },
+    {
+      "case_id": "match-dev",
+      "athlete_id": "p04",
+      "at": "2026-11-01T14:40:00Z",
+      "expected": "keep",
+      "why": "one noisy reading earlier does not flip the output"
+    }
+  ]
+}
