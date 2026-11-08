@@ -249,15 +249,109 @@ and a decision; until then, a shorter dashboard trend span reduces the load.
 - **Camera-only run sheet** (section 2b) now has the exact steps: points with check points, course file, clip,
   tracking, assignment, export, the check and how to read it; verified on the synthetic geometry.
 
-## Checkpoint for the next session (2026-11-08, after the resume)
+## Performance batch (2026-11-08 evening): dashboard speed, camera setting, display check
 
-Committed and pushed: backend bb15b72, bac044d, a117f67, 4a5e5de, 827287a and the resume commit after it; frontend
-e2d7cf4, f2faf7f. The 90-minute run is finished (artifacts were in the session scratchpad; results recorded above).
-Do not repeat: the snapshot handoff, the 90-minute run, the video path check, the synthetic field check.
-Next, in order:
-1. Decide and implement the pilot-view scaling fix (see "Most important issue" above; rules version 3, digest coverage
-   stated), then a shorter wall run (about 30 minutes) on mains power with the display kept awake, to measure display
-   delay and to watch the video path live in the browser.
-2. Measure the detector at lower resolution or with `--every-nth 2` (9-11 frames/s at 1280x720 drops about half to two
-   thirds of a 25 fps feed).
-3. On a permitted field: run sheet section 2b, with an independent timing reference.
+### 1. Late-session slowdown: profile and fix (backend 3137f36)
+
+Fixture: the FICTIONAL 90-minute run's export, imported into a temporary database and reopened as live (LONG-HISTORY
+BENCHMARK, `scripts/pilot_view_benchmark.py`; in-process calls; not another live run). Old and new code were run
+alternately on the same fixture and workload (11 or 9 polls per cell, idle and with ingest); round 1 of the alternating
+runs is the clean pair (round 2's old late cell and round 3's new cells were disturbed by background load, recorded).
+
+| Late in the session (P3, 90 min) | before (ea14e8c) | after (3137f36) |
+|---|---|---|
+| Dashboard request (300 s trend, 19 score calculations) | median 3,495 ms, p95 3,664 ms | median 405 ms, p95 445 ms |
+| Rehearsal poller (120 s trend) | about 2,070 ms | about 450 ms |
+| No trend | 380 ms | 172 ms |
+| Rows read per request | 50,473 | 16,841 |
+| Middle of the session, dashboard | 1,272 ms | 179 ms |
+| Early (10 min), dashboard | 128 ms | 76-82 ms |
+
+Profile before: selection 71 % (every sample checked against every sprint exclusion, for every trend point),
+fingerprints 12 % (computed for every trend point although the trend shows values only), database reads 6 % (the same
+history read three times per request), readiness 3 %. Cost grew with the whole session, not the trend window (even with
+no trend: 35 ms early, 144 ms middle, 381 ms late). New data during polls made no material difference.
+Changes (same results): exclusion membership and window slicing by binary search on sorted lists; cached receipt
+parsing; one read per request shared by the current estimate (cut to exactly its own range, the store's bounds),
+the trend and readiness (which reuses the current score); display-only trend points use only the camera reference
+window and the recent lookback, without fingerprints. No cache across polls: trend points move with every poll, so a
+cache would only help if the trend timestamps changed.
+
+**Compatibility.** Old and new code on the same fixture: 336 scores (every participant, as entered AND retrospective,
+with their input fingerprints), 112 pilot views (current estimate with fingerprints, 966 trend points) and 57
+reproductions are identical once the ids generated at import are normalised; all 57 frozen-run predictions reproduce
+with the new code. tests/test_study_pilot.py::test_fast_pilot_view_equals_the_full_calculation checks, through the API,
+that every trend point equals the full score at its time, the estimate equals the full score with fingerprints, and
+readiness equals the readiness endpoint, across sprint exclusions, a late arrival, a corrected result, a camera
+identity gap, a wearer change, a refresh and 20 s with no new data (freshness changes); it fails when the trend's
+lookback is deliberately shortened.
+
+**What is left, and a proposal NOT in the default path.** The current estimate still reads and fingerprints every row
+since the athlete's first round start (late: about 170 ms without a trend; database read 53 ms, selection 67 ms,
+fingerprints 22 ms). Shrinking that changes what a saved prediction's input fingerprint covers. Smallest versioned
+change: rules version 3, where a score's inputs are only the camera reference window and the recent lookback, and
+`wearable_sha256` / `camera_sha256` cover only those rows. Each saved prediction already records its `rules_version`;
+reproduction would compute a v2 prediction with the v2 range (as now) and a v3 one with the v3 range, so every
+existing prediction reproduces unchanged; the report already lists the rules version. Not implemented in this batch.
+
+### 2. Camera setting (backend 185b46e; `scripts/camera_settings_compare.py`)
+
+Same generated clip for every variant (1280x720, 25 fps, 20 s, picture loss 10.0-11.0 s), same calibration, identities
+assigned afresh per variant by the simulated operator. YOLOX-S cannot run below its 640 export size (the tool refuses a
+mismatch), so the lower input resolution is the separate, local, pinned YOLOX-Tiny (416). Two clean repetitions
+(load average 6-9, on battery); a first repetition under heavier load ran about 3x slower and is not used.
+
+| Setting | recorded fps | paced: skipped / dropped of 500, processed fps, lag p95 | red (near, wearer) coverage, error | yellow (far) coverage, error median / p95 |
+|---|---|---|---|---|
+| baseline: YOLOX-S 640, every frame | 9.4-10.5 | 0 / 290-299, 10.0-10.4, 0.18-0.21 s | recorded 0.89, 1.5 cm; paced 0.78-0.85 | 0.74 recorded, 13.5 / 18 cm |
+| YOLOX-S, every other frame | — | 250 / 51-52, 9.8, 0.28 s | 0.78-0.85, 1.5 cm | 0.66-0.68, 13.5 / 16-24 cm |
+| YOLOX-Tiny 416, every frame | 33-35 | 0 / 0-1, 25.0, 0.06-0.07 s (just above the frame period) | 0.84-0.85, 7 cm | 0.73-0.74, 4 / 37-47 cm |
+| **YOLOX-Tiny 416, every other frame** | — | 250 / **0**, 12.5, **0.03-0.04 s (kept up)** | 0.78-0.84, 7 cm | 0.72, 4 / 37-42 cm |
+
+All variants: 0 identity errors, 0 samples inside the picture loss. Under heavy load (the discarded repetition) the
+Tiny every-frame variant dropped 430 frames and the tracker confirmed no track at all: nothing was invented.
+On the chosen setting: picture loss 0 samples; identity marked uncertain after red's first assignment, 0 samples;
+no re-confirmation after an encounter, 0 samples (22 with it); red's first encounter gap is 4.48-6.48 s (5.44-6.48 s
+with YOLOX-S). Recommendation: `field-rehearsal` for live-style use; `baseline` for recorded review.
+
+### 3. Integrated paced check in the browser (19:01-19:04 UTC)
+
+`video_pilot_check.py --setting field-rehearsal --reconfirm-delay-s 6 --wearable-dropout 13:17`, isolated engine,
+dashboard copy f2faf7f, display kept awake with `caffeinate -d -w PID`. Paced path: 250 skipped by design, 0 dropped,
+12.5 fps, lag p95 0.04 s; samples on the intended athletes (vx1 48, vx2 72). Early round start refused (409); the
+round start opened the camera reference. Pilot-view timeline (0.5 s polls): camera fresh, vest-only available ->
+camera stale 8.3-11.4 s (identity re-confirmed 6 s late, plus the picture loss) -> fresh again -> vest stale
+15.6-17.2 s (dropout) -> vest-only back at 20.3 s. A combined score was never available while either stream was stale
+(0 polls); with these forced gaps the 20 s clip was too short for the combined score to rebuild, so its recovery was not
+shown. Late answers never replacing newer status is covered by the dashboard harness tests "fatigue pilot: a failure
+clears the view; an older success after a newer failure is ignored" and "... an older answer for the previous wearer
+never replaces the new wearer" (94/94 at f2faf7f). The browser stopped drawing frames during the 56 s of playback (its window was
+covered; the display was awake), so this run does not count as a visual check.
+
+### 4. Display delay, foreground browser (30-minute run, 19:07:31-19:38:42 UTC)
+
+Frozen snapshot backend 185b46e (no uncommitted changes, rules version 2, profile fictional-rehearsal-short-windows-1),
+dashboard copy of frontend f2faf7f through the timing proxy, a paint heartbeat in the page, display kept awake with
+`caffeinate -d -w RUN_PID` (it ended with the run; no setting changed). Command:
+`pilot_rehearsal.py --mode wall --duration-min 30 --out OUT --port 3930 --hold --cors-origin http://127.0.0.1:3918`.
+
+| | Result |
+|---|---|
+| Ingest (synthetic tracking, not video) | 31.2 min, 24 rounds, 1,660 heart-rate and 51,361 tracking samples, 0 failed requests; sender lateness p50 0.005 s, p95 0.005 s, max 0.44 s |
+| Pilot view API (script poller, 120 s trend, 1,685 polls) | p50 99 ms, p95 188 ms, max 731 ms |
+| Export / reproduction / report | 24 saved predictions; 24/24 reproduced in a fresh database; report written |
+| Display: visible observation time | **61 s of 1,872 s** (4 drawn spans): the display was awake, but the Chrome window was covered by other windows most of the time and Chrome then draws nothing |
+| Display: measurable updates | 54 samples received and displayed while the page was drawing: median 0.63 s, p95 1.00 s, max 1.05 s, 100 % within 2 s |
+| Not observable | 1,599 samples (received while the window was not drawn); counted apart, never as a delay; 0 missing updates |
+
+**This is NOT a completed display test** (one minute of visible time). It needs the laptop with nobody else's windows
+in front of Chrome for the whole run; the exact steps are in run sheet section 5d.
+
+## Checkpoint for the next session (2026-11-08, after the performance batch)
+
+Committed: backend 3137f36 (speedup), 185b46e (camera and display tooling) and the docs commit after them; frontend
+unchanged at f2faf7f. Do not repeat: the long-history benchmark, the camera comparison, the integrated check. Next:
+1. At the laptop, with Chrome in front and uncovered for 30 minutes: the display run of section 4 (run sheet 5d); on
+   mains power with nothing else open, rerun the camera comparison once to confirm `field-rehearsal` keeps up.
+2. Decide on the rules-version-3 proposal above (only if the current estimate's remaining growth matters).
+3. On a permitted field: run sheet sections 2b and 5d with a real camera and an independent timing reference.

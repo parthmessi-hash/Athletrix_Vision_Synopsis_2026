@@ -148,9 +148,45 @@ a start without usable data unless the operator gives a reason (see section 2).
 | | What ran | Conditions | Not shown |
 |---|---|---|---|
 | **Runs today with fictional inputs** | dashboard and fictional demo (`demo_launcher.py --session pilot`), round readiness and refused/partial starts, save-then-start, blind timing sheet, export, reproduction in a fresh database, report; run from clean snapshots with the scripts' outbound requests sent to a dead proxy (nothing failed) and no detector model on disk | fictional heart rate, synthetic tracking, isolated engine; the browser itself was online and its only remote request was the Google Fonts stylesheet (without it, system fonts) | anything about real people; a laptop with networking switched off |
-| **Passed through the actual video software path** | decoding, YOLOX-S person detection, ByteTrack, calibration, samples, paced playback into an isolated pilot session (`scripts/video_pilot_check.py`): attached to the intended wearer, early round start refused, camera reference opened at the recorded start, a deliberate 1 s picture loss left a gap (no invented samples), an identity lapse or an "uncertain" identity removed that player's samples; camera-only field check (`scripts/camera_field_check.py synthetic`) | a GENERATED 20 s clip of drawn figures, 1280x720 at 25 fps; identities from a simulated operator; this laptop ran the detector at 9-11 frames/s, so paced playback dropped 54-63 % of frames | real footage, real kits, lighting, crowds; live camera capture; camera-to-engine latency; physical position accuracy |
+| **Passed through the actual video software path** | decoding, YOLOX-S person detection, ByteTrack, calibration, samples, paced playback into an isolated pilot session (`scripts/video_pilot_check.py`): attached to the intended wearer, early round start refused, camera reference opened at the recorded start, a deliberate 1 s picture loss left a gap (no invented samples), an identity lapse or an "uncertain" identity removed that player's samples; camera-only field check (`scripts/camera_field_check.py synthetic`) | a GENERATED 20 s clip of drawn figures, 1280x720 at 25 fps; identities from a simulated operator; with the baseline YOLOX-S setting this laptop ran at 9-11 frames/s and paced playback dropped 54-63 % of frames; the `field-rehearsal` setting (YOLOX-Tiny, every other frame) dropped none (section 5d) | real footage, real kits, lighting, crowds; live camera capture; camera-to-engine latency; physical position accuracy |
 | **Needs an approved field setup and an independent timing reference** | positional accuracy on the field (measured check points), interval timing against gates or measured video timing, peak speed accuracy, coverage with real players | permission, a fixed camera position, tape measurements | — |
 | **Waits on Zephyr** | the vest stream from real hardware; until then the source label says "simulated", and nothing on screen claims a connected device | see the list below | — |
+
+## 5d. Laptop performance checks (2026-11-08; generated data only)
+
+Run these on the sideline laptop itself, on mains power, with other apps closed (background load changed results by
+up to 3x in our measurements).
+
+1. **Dashboard speed late in a session** (LONG-HISTORY BENCHMARK: an exported package imported into a temporary
+   database and reopened as live; not a live run):
+   `.venv/bin/python scripts/pilot_view_benchmark.py --package EXPORT.zip --out bench/ [--point late --setting dashboard]`
+   Reads: response median and p95, score calculations per poll, rows read, and time in database reads, selection,
+   fingerprints and readiness, early / middle / late in the session.
+2. **Camera setting**:
+   `.venv/bin/python scripts/camera_settings_compare.py --out camera-work/settings --best tiny-every2`
+   Compares YOLOX-S (640) and YOLOX-Tiny (416), every frame or every other frame, recorded and paced, on the generated
+   clip. Then the integrated check with the chosen setting:
+   `.venv/bin/python scripts/video_pilot_check.py --out camera-work/check --setting field-rehearsal`
+   (`--setting baseline` keeps the current YOLOX-S, every-frame setting.)
+3. **Display delay** (foreground browser): start the timing proxy
+   `python scripts/pilot_display_delay.py proxy --engine http://127.0.0.1:PORT --port 3919 --sink display.json`,
+   serve a dashboard copy whose `ATHLETRIX_CONFIG.apiBase` is `http://127.0.0.1:3919`, keep the display awake for this
+   run only with `caffeinate -d -w RUN_PID`, keep the Chrome window in front and uncovered, and add a paint heartbeat in
+   the page console before the run:
+   `window.__beats=[];let l=0;(function f(){const n=Date.now();if(n-l>=250){__beats.push(n);l=n}requestAnimationFrame(f)})()`
+   At the end, post `{"display": window.__athletrixPilotDisplay, "painted": window.__beats}` to
+   `http://127.0.0.1:3919/__display_log`, then
+   `python scripts/pilot_display_delay.py analyze --display display.json --package EXPORT.zip`.
+   Only samples received and displayed while the page was drawing frames count; the rest are "not observable". A
+   covered Chrome window draws nothing even with the display awake: on 2026-11-08 only 61 s of a 31-minute run were
+   visible, so that run is not a display measurement. Someone must keep Chrome in front for the whole run.
+
+**Camera setting for a permitted field rehearsal: `field-rehearsal` (YOLOX-Tiny 416, every other frame).** On this
+laptop it was the only setting that kept up with a 25 fps feed with headroom (0 frames dropped, lag p95 0.04 s); the
+cost is coarser positions on the generated clip (median about 7 cm instead of 1.5 cm for the near figure, and a
+heavier tail for the far figure) and a slightly longer identity gap at one encounter. For recorded review afterwards,
+keep `baseline` (YOLOX-S, every frame), which is the most precise but runs at about 10 frames/s. Neither figure says
+anything about accuracy on a real field: that needs the permitted setup of section 2b and an independent reference.
 
 ## 6. Still needed before the real pilot
 
