@@ -175,8 +175,9 @@ def readiness(rec: Recording, entries: list[StudyEntry], athlete_id: str, t: dat
             devs = sorted({s.device_id or "none" for s in raw if s.device_id != w.device_id})
             if devs:
                 why.append(f"from another device ({', '.join(devs)}; the assigned vest is {w.device_id})")
-            if sel["excluded"]["outside_own_wearer_assignment"]:
-                why.append("readings outside this wearer's assignment")
+            before = sum(1 for s in raw if s.timestamp < live[0]["start"])
+            if before:
+                why.append(f"{before} recent readings from before this wearer's assignment started")
         else:
             low = sum(1 for s in raw if s.tracking_confidence < p["streams"].get("min_tracking_confidence", 0.5) or (s.value_basis or "") == "predicted")
             if low:

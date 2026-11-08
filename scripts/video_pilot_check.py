@@ -129,6 +129,31 @@ def operator(obs, sp, camera, reconfirm: bool):
     return out
 
 
+GAP_FRAMES = (250, 275)   # a deliberate 1 s loss of picture (10.0-11.0 s): plain field colour, no figures
+
+
+def blank_picture(clip: Path, frames: tuple[int, int]) -> None:
+    """Rewrite the clip with frames [a, b) replaced by a plain field-coloured picture (the camera sees nobody). The frame
+    count and rate stay the same, so capture times are unchanged; nothing may be detected or invented in the gap."""
+    import cv2  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+    cap = cv2.VideoCapture(str(clip))
+    fps, w, h = cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    tmp = clip.with_name("tmp-" + clip.name)
+    wr = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"MJPG"), fps, (w, h))
+    i = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if frames[0] <= i < frames[1]:
+            frame = np.full_like(frame, (55, 115, 55))
+        wr.write(frame)
+        i += 1
+    cap.release(); wr.release()
+    tmp.replace(clip)
+
+
 def write_assignments(path: Path, assignments) -> None:
     from dataclasses import asdict  # noqa: PLC0415
     path.write_text(json.dumps({"format": "athletrix-track-assignments", "format_version": 2,
@@ -177,6 +202,9 @@ def main(argv=None, out=print) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", type=Path, default=ROOT / "models" / "yolox_s.onnx")
     ap.add_argument("--queue-size", type=int, default=2)
+    ap.add_argument("--engine-port", type=int, help="fixed port for the isolated engine (for a dashboard copy watching path B)")
+    ap.add_argument("--cors-origin", action="append", default=[], help="dashboard origin allowed to read the isolated engine (repeatable)")
+    ap.add_argument("--hold-s", type=float, default=0.0, help="keep the engine up this long after the score is saved, for a browser look")
     args = ap.parse_args(argv)
     if args.out.exists() and any(args.out.iterdir()):
         out(f"REFUSED: {args.out} is not empty")
@@ -200,6 +228,7 @@ def main(argv=None, out=print) -> int:
     camera = sp.Camera3()
     clip = d / "synthetic-people.avi"
     sp.render(clip, camera)
+    blank_picture(clip, GAP_FRAMES)
     report["clip"] = {"file": clip.name, "sha256": hashlib.sha256(clip.read_bytes()).hexdigest(), "fps": sp.FPS, "size": [sp.WIDTH, sp.HEIGHT], "duration_s": sp.DURATION_S,
                       "figures": list(sp.FIGURES), "assigned": ATHLETES}
     mark = lambda x, y: {"label": f"mark ({x}, {y})", "image": [round(c) for c in camera.project(x, y)], "field": [x, y]}  # noqa: E731
@@ -222,7 +251,16 @@ def main(argv=None, out=print) -> int:
     tl_a = json.loads((d / "track-recorded.json").read_text())
     write_assignments(d / "assign-recorded.json", operator(obs_a, sp, camera, reconfirm=True))
     write_assignments(d / "assign-no-reconfirm.json", operator(obs_a, sp, camera, reconfirm=False))
-    for tag, af in (("recorded", "assign-recorded.json"), ("no-reconfirm", "assign-no-reconfirm.json")):
+    # identity UNCERTAIN after red's first close encounter: the re-confirmations are recorded as uncertain, not confirmed
+    import dataclasses as _dc  # noqa: PLC0415
+    rec_assign = operator(obs_a, sp, camera, reconfirm=True)
+    red_first = {}
+    for a in rec_assign:
+        if a.athlete_id == ATHLETES["red"]:
+            red_first.setdefault(a.track_id, a.from_frame)
+    first_red = min(red_first.values()) if red_first else 0
+    write_assignments(d / "assign-uncertain.json", [_dc.replace(a, identity="uncertain") if a.athlete_id == ATHLETES["red"] and a.from_frame > first_red else a for a in rec_assign])
+    for tag, af in (("recorded", "assign-recorded.json"), ("no-reconfirm", "assign-no-reconfirm.json"), ("uncertain", "assign-uncertain.json")):
         if sh([PY, "scripts/camera_to_samples.py", "export", str(d / "obs-recorded.jsonl"), *common, "--assignments", str(d / af), "--anchor-utc", FIXED_ANCHOR,
                "--out", str(d / f"samples-{tag}.jsonl"), "--log", str(d / f"adapter-{tag}.json")], steps):
             out("export failed: " + "; ".join(steps[-1]["output_tail"])); return 1
@@ -241,6 +279,30 @@ def main(argv=None, out=print) -> int:
                                                                                       for s in sn if s["athlete_id"] == aid] or [None], key=lambda v: v or -1)}
                                                   for aid in ATHLETES.values()},
     }
+    su = load_samples(d / "samples-uncertain.jsonl")
+    vt = lambda s: (datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00")) - anchor).total_seconds()  # noqa: E731
+    g0, g1 = GAP_FRAMES[0] / sp.FPS, GAP_FRAMES[1] / sp.FPS
+    for aid, v in report["A_recorded"]["vs_truth"].items():   # the window from the first encounter gap to the picture loss
+        first_gap = next((g for g in v["gaps_over_0_35_s"] if g[1] <= g0), None)
+        if first_gap:
+            lo = first_gap[1] - 0.05
+            report["A_recorded"]["identity_lapse_without_reconfirmation"][aid].update(
+                window_s=[round(lo, 2), g0], samples_in_window_with_reconfirmation=sum(1 for s in sa if s["athlete_id"] == aid and lo < vt(s) < g0),
+                samples_in_window_without=sum(1 for s in sn if s["athlete_id"] == aid and lo < vt(s) < g0),
+                note="after the picture loss the tracker starts new tracks, which a first-observation assignment covers again")
+    lapse = (report["A_recorded"]["vs_truth"][ATHLETES["red"]]["gaps_over_0_35_s"] or [[None]])[0][0]
+    report["A_recorded"]["uncertain_identity"] = {
+        "rule": "every red assignment after red's first one (re-confirmations after encounters, new tracks after the picture loss) recorded with identity 'uncertain'",
+        "red_samples_confirmed_everywhere": sum(1 for s in sa if s["athlete_id"] == ATHLETES["red"]),
+        "red_samples_with_uncertain_later": sum(1 for s in su if s["athlete_id"] == ATHLETES["red"]),
+        "red_samples_after_the_encounter_with_uncertain": sum(1 for s in su if s["athlete_id"] == ATHLETES["red"] and lapse is not None and vt(s) > lapse + 0.05),
+        "note": "an uncertain identity produces no samples for the athlete, so no camera or combined score can use it"}
+    report["A_recorded"]["deliberate_picture_loss"] = {
+        "frames": list(GAP_FRAMES), "video_s": [g0, g1],
+        "observations_inside": sum(1 for o in obs_a.observations if GAP_FRAMES[0] <= o.frame < GAP_FRAMES[1]),
+        "samples_inside_by_athlete": {aid: sum(1 for s in sa if s["athlete_id"] == aid and g0 <= vt(s) < g1) for aid in ATHLETES.values()},
+        "first_sample_after_by_athlete": {aid: round(min([vt(s) for s in sa if s["athlete_id"] == aid and vt(s) >= g1] or [float("nan")]), 3) for aid in ATHLETES.values()},
+        "note": "no detection is possible in the blank frames: any sample there would be invented"}
     ts_ok = all(abs(((datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00")) - anchor).total_seconds() * sp.FPS) - round((datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00")) - anchor).total_seconds() * sp.FPS)) < 1e-3
                 for s in sa)
     report["A_recorded"]["sample_times_on_frame_times"] = ts_ok
@@ -255,7 +317,8 @@ def main(argv=None, out=print) -> int:
     write_assignments(d / "assign-paced.json", operator(obs_b, sp, camera, reconfirm=True))
     import live_session  # noqa: PLC0415
     from validate_team_scale import IsolatedBackend  # noqa: PLC0415
-    eng = IsolatedBackend(extra_env={"FATIGUE_PROFILE_PATH": str(d / "profile.json")})
+    eng = IsolatedBackend(port=args.engine_port, extra_env={"FATIGUE_PROFILE_PATH": str(d / "profile.json")},
+                          cors_origins=args.cors_origin or None)
     players = [("vx1", "Fictional video participant 1", 71, False, None, [], True)]
     rest_id, bases = live_session.prepare_database(eng.db_path, datetime.now(UTC), players=players)
     eng.start()
@@ -323,9 +386,22 @@ def main(argv=None, out=print) -> int:
             time.sleep(0.2)
         th.join()
         alog = json.loads((d / "adapter-paced.json").read_text())
+        def view():   # what the dashboard's pilot card renders (GET .../study/pilot)
+            v = c.get(f"/recordings/{rid}/study/pilot", params={"trend_span_s": 0}).json()
+            e = v.get("estimate") or {}
+            return {"wearer": (v.get("wearer") or {}).get("athlete_id"), "camera_stream": (e.get("streams") or {}).get("camera"),
+                    "camera_only": {k: (e.get("candidates") or {}).get("camera_only", {}).get(k) for k in ("available", "value", "reasons")},
+                    "combined": {k: (e.get("candidates") or {}).get("combined", {}).get(k) for k in ("available", "value", "reasons")},
+                    "readiness": (v.get("readiness") or {}).get("state")}
+        view_live = view()
         save = entry(kind="score_save", athlete_id="vx1", round=1).json()
+        if args.hold_s:
+            out(f"holding {args.hold_s:g} s for a browser look: engine {eng.base_url}, recording {rid}")
         time.sleep(4.0)   # the camera has stopped; the vest continues
         after = c.get(f"/recordings/{rid}/study/readiness", params={"athlete_id": "vx1"}).json()
+        view_after = view()
+        if args.hold_s > 4:
+            time.sleep(args.hold_s - 4)
         stop.set()
         time.sleep(0.6)
         c.post(f"/recordings/{rid}/stop")
@@ -356,6 +432,7 @@ def main(argv=None, out=print) -> int:
                                       "processing happened before sending, so this is not camera-to-engine latency",
             "early_round_start": report_b_early, "round_start": started.json() if started is not None else None,
             "readiness_transitions": states, "readiness_after_camera_stopped": {"state": after["state"], "next": after["next"]},
+            "pilot_view_at_end_of_clip": view_live, "pilot_view_4s_after_camera_stopped": view_after,
             "saved_score": {"id": save.get("id"), "all_three_available": pred.get("all_three_available"),
                             "candidates": {k: (v["value"] if v["available"] else "not available: " + (v["reasons"] or ["?"])[0]) for k, v in cands.items()},
                             "hr_per_speed": ((pred.get("result") or {}).get("features") or {}).get("hr_per_speed", {}).get("reason") or "available",

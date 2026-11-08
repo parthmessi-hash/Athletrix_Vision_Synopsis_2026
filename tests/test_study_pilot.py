@@ -499,3 +499,45 @@ def test_round_readiness_early_start_dropout_identity_loss_and_recovery(pilot):
     rows = {(r["participant"], r["round"]): r for r in rows_from_package(read_package(c.get(f"{API}/recordings/{rid}/package.zip").content))}
     assert rows[("P2", 1)]["started_without_usable_data"] == "FICTIONAL: strap being refitted, recording anyway" and rows[("P2", 1)]["opens_camera_reference"] is False
     assert rows[("P2", 2)]["started_without_usable_data"] is None and rows[("P2", 2)]["opens_camera_reference"] is True
+
+
+def test_sprint_exclusion_keeps_streams_usable_but_out_of_the_score_and_a_lost_stream_can_be_saved_or_invalidated(pilot):
+    """Regression (found in the accelerated rehearsal 2026-11-08): readings that arrive normally during a timed sprint and
+    its exclusion window must not make readiness say the device stopped sending, and they must still be left out of the
+    score. Then a stream lost mid-round: the operator can save the incomplete result (reasons kept) or end the round as
+    invalid, and the reason reaches the report."""
+    from app.core.pilot_analysis import rows_from_package  # noqa: PLC0415
+    c, sim, rid, m0, st = pilot["c"], pilot["sim"], pilot["rid"], pilot["m0"], pilot["st"]
+    rd = lambda: c.get(f"{API}/recordings/{rid}/study/readiness", params={"athlete_id": "x1"}).json()  # noqa: E731
+    sim.run(m0 + timedelta(seconds=300), "x1", "strap-A", t0=m0)
+    entry(c, rid, kind="sprint_start", client_token="r1-excl-sprint", athlete_id="x1", round=1)
+    sim.run(st["now"] + timedelta(seconds=6), "x1", "strap-A", hr=lambda s: 190, v=lambda s: 7.5, t0=m0)
+    entry(c, rid, kind="sprint_end", client_token="r1-excl-sprint-end", athlete_id="x1", round=1)
+    entry(c, rid, kind="round_end", client_token="r1-excl-end", athlete_id="x1", round=1)
+    sim.run(st["now"] + timedelta(seconds=30), "x1", "strap-A", t0=m0)   # inside the 90 s post-sprint exclusion
+    r = rd()
+    assert r["streams"]["wearable"]["usable"] and r["streams"]["camera"]["usable"], r["streams"]
+    assert r["streams"]["wearable"]["detail"].startswith("fresh") and "stale" not in str(r["streams"])
+    assert r["state"] == "ready_to_start" and r["next_round"] == 2
+    sc = c.get(f"{API}/recordings/{rid}/study/score", params={"athlete_id": "x1"}).json()
+    assert sc["inputs"]["excluded"]["test_effort"] >= 30 * 6, "the same fresh readings are still left out of the score"
+    assert not sc["streams"]["wearable"]["fresh"], "for the score, the newest usable reading is before the exclusion"
+    # round 2, then the strap stops mid-round
+    entry(c, rid, kind="round_start", client_token="r2-excl-start", athlete_id="x1", round=2)
+    t_loss = st["now"]
+    while st["now"] < t_loss + timedelta(seconds=20):
+        st["now"] += timedelta(seconds=0.2)
+        c.post(f"{API}/samples/tracking", json=tr_body("x1", st["now"], 3.0))
+    r = rd()
+    assert r["state"] == "stale_or_unassigned" and r["open_round"] == 2 and not r["streams"]["wearable"]["usable"]
+    assert "save anyway" in r["next"] and "end the round as invalid with a reason" in r["next"]
+    saved = entry(c, rid, kind="score_save", client_token="r2-excl-save", athlete_id="x1", round=2)   # the incomplete result is kept
+    cands = saved["prediction"]["result"]["candidates"]
+    assert not cands["vest_only"]["available"] and "wearable" in cands["vest_only"]["reasons"][0] and not saved["prediction"]["all_three_available"]
+    entry(c, rid, kind="sprint_start", client_token="r2-excl-sprint", athlete_id="x1", round=2, confirms_prediction_id=saved["id"])
+    entry(c, rid, kind="round_end", client_token="r2-excl-end", athlete_id="x1", round=2, invalid=True, notes="FICTIONAL: strap lost mid-round")
+    st["now"] += timedelta(seconds=5)
+    c.post(f"{API}/recordings/{rid}/stop")
+    rows = {r["round"]: r for r in rows_from_package(read_package(c.get(f"{API}/recordings/{rid}/package.zip").content)) if r["participant"] == "P1"}
+    assert rows[2]["invalid"] and rows[2]["invalid_reason"] == "FICTIONAL: strap lost mid-round" and rows[2]["prediction_id"] == saved["id"]
+    assert rows[2]["scores"]["vest_only"] is None and "wearable" in rows[2]["reasons"]["vest_only"][0]

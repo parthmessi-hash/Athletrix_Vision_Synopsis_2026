@@ -217,15 +217,47 @@ readiness block added this batch is about 5 % of it. A fix (load only the camera
 or cache past trend points) changes what a saved prediction's input digest covers, so it needs a rules-version change
 and a decision; until then, a shorter dashboard trend span reduces the load.
 
-## Checkpoint for the next session (2026-11-08 07:30 UTC)
+## Resume of the batch (2026-11-08, afternoon): what was added
 
-Done and committed this batch: backend bb15b72, bac044d, a117f67, 4a5e5de and the docs commit after it; frontend e2d7cf4,
-f2faf7f. Backend tests 880 passed at a117f67 (and the focused files after 4a5e5de); dashboard harness 94/94, video review
-6/6. Do not repeat: the video path check, the synthetic field check, the snapshot handoff, the 90-minute run.
+- **Readiness regression and mid-round loss** (tests/test_study_pilot.py,
+  `test_sprint_exclusion_keeps_streams_usable_but_out_of_the_score_and_a_lost_stream_can_be_saved_or_invalidated`):
+  readings arriving during a timed sprint's exclusion window keep both streams "fresh" and the state ready_to_start, while
+  the same readings stay excluded from the score (test_effort exclusions counted; the score's own freshness stale).
+  Verified to fail without the fix (it then reported the camera "stale" while it was sending). A strap lost mid-round:
+  readiness says round 2 is open and offers "save anyway" or "end the round as invalid with a reason"; the incomplete
+  save keeps its reasons; the invalid reason reaches the report row with the saved prediction id. One reason was also
+  tightened: "readings from before this wearer's assignment" now counts only the last 30 s, not the whole session.
+- **Video path, extended** (`scripts/video_pilot_check.py`, outputs in camera-work/, ignored by git): a deliberate 1 s
+  picture loss (frames 250-274 replaced by plain field colour, frame count and times unchanged); an "uncertain" identity
+  variant; snapshots of the pilot view (what the dashboard card renders) at the end of the clip and 4 s after.
+
+| | Run 1 (09:08 UTC, dashboard watching) | Run 2 (09:13 UTC) |
+|---|---|---|
+| A. recorded, every frame | 500 frames, 11.3 frames/s, 0 decoder time mismatches, sample times on frame times | 11.6 frames/s, same results |
+| Against the truth | red (vx1) 145 samples, 89 % of the clip, position error median 0.016 m, 0 identity errors; blue (vx2) 128, 80 %, 0 identity errors | same |
+| Picture loss 10.0-11.0 s | 0 observations, 0 samples inside; next samples at 11.4 s (new tracks + estimator warm-up) | same |
+| Identity lapse (no re-confirmation after an encounter) | — | red 0 samples in 6.43-10.0 s (30 with re-confirmation); blue 0 in 4.47-10.0 s (30) |
+| Identity "uncertain" after red's first assignment | red 43 samples, 0 after the first encounter: nothing for a camera or combined score | same |
+| B. paced playback | 270 of 500 frames dropped, 230 processed, 11.4 frames/s; engine got vx1 112, vx2 99 samples, all on the intended athlete ids | 274 dropped, 11.2 frames/s; vx1 105, vx2 93 |
+| Pilot session | early start refused (409); round start opened the camera reference at its recorded start; pilot view at the end of the clip: wearer vx1, camera fresh (0.03 s), camera only 100, combined not available ("too few heart-rate / speed pairs": red rests below 0.5 m/s); 4 s later: camera stale with the reason, camera only not available | same states |
+
+  The real browser (dashboard f2faf7f pointed at the check's engine) updated only about once a minute because Chrome
+  throttles a window that is not being painted (display asleep), so it never showed the fresh 20 s; it did show the end
+  state correctly (wearer, camera STALE with its age, camera and combined not available with reasons, the saved
+  prediction). The pilot-view snapshots above are the evidence for the live part. Processing was faster than in the first
+  run (9 frames/s) because the laptop was on mains power with Low Power Mode off.
+- **Camera-only run sheet** (section 2b) now has the exact steps: points with check points, course file, clip,
+  tracking, assignment, export, the check and how to read it; verified on the synthetic geometry.
+
+## Checkpoint for the next session (2026-11-08, after the resume)
+
+Committed and pushed: backend bb15b72, bac044d, a117f67, 4a5e5de, 827287a and the resume commit after it; frontend
+e2d7cf4, f2faf7f. The 90-minute run is finished (artifacts were in the session scratchpad; results recorded above).
+Do not repeat: the snapshot handoff, the 90-minute run, the video path check, the synthetic field check.
 Next, in order:
-1. Decide and implement the pilot-view scaling fix above (rules version 3, digest coverage stated), then repeat a shorter
-   wall run (for example 30 minutes) on mains power with the display kept awake, to measure display delay.
-2. Measure the detector on this laptop at lower resolution or with `--every-nth 2` before any live camera use (9 frames/s
-   at 1280x720 drops about two thirds of a 25 fps feed).
-3. On a permitted field: `camera_field_check.py template`, tape measurements with at least 2 check points, and a timing
-   reference (run sheet section 2b).
+1. Decide and implement the pilot-view scaling fix (see "Most important issue" above; rules version 3, digest coverage
+   stated), then a shorter wall run (about 30 minutes) on mains power with the display kept awake, to measure display
+   delay and to watch the video path live in the browser.
+2. Measure the detector at lower resolution or with `--every-nth 2` (9-11 frames/s at 1280x720 drops about half to two
+   thirds of a 25 fps feed).
+3. On a permitted field: run sheet section 2b, with an independent timing reference.

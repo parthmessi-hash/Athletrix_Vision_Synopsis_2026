@@ -67,18 +67,33 @@ Ctrl-C stops only what it started.
 
 ## 2b. Camera-only field check (before the first camera session; camera only, no participant)
 
-1. `python scripts/camera_field_check.py template --out FIELD/`, then fill in `FIELD/points.json` from the tape: each
-   mark's pixel position and field position in metres, at least 4 fit points and **at least 2 check points** that are
-   not used in the fit, and the camera settings (zoom, focus, mount). Fill in `FIELD/course.json`: the course axis, the
-   lane, and the timing marks in metres.
-2. Track a short permitted clip (`scripts/camera_track_video.py CLIP --model models/yolox_s.onnx --out OBS --log LOG`),
-   assign the tracks after review, export samples (`scripts/camera_to_samples.py export ...`).
-3. `python scripts/camera_field_check.py run --points FIELD/points.json --course FIELD/course.json --samples samples.jsonl --athlete ID --out FIELD/report --now-settings NOW.json`
-   Read: each check point's error in metres; the usable field region; the share of the course tracked; each interval's
-   average speed or why it was excluded; whether the calibration is still compatible with the camera now. Exit 1 means
-   the camera changed (zoom, resolution, camera id, mount): recalibrate, nothing is timed.
-4. Average interval speed and peak speed are separate. Peak-speed accuracy is **not established** without an
-   independent reference (gates or measured video timing).
+Only with a permitted camera position and a permitted clip. Every step below was run on the SYNTHETIC geometry
+(`python scripts/camera_field_check.py synthetic --samples SAMPLES --anchor-utc 2026-11-08T10:00:00Z --out DIR`).
+
+1. **Points.** `python scripts/camera_field_check.py template --out FIELD/`. On the field, with a tape: mark at least 4
+   fit points spread over the area you will use (no 3 of any 4 in a line) and **at least 2 more check points** inside
+   it. In one frame of the fixed camera, read each mark's pixel position. Enter both in `FIELD/points.json`, with the
+   camera settings (camera id, zoom, focus, mount). Do not move or zoom the camera after this.
+2. **Course.** In `FIELD/course.json`: the axis the course runs along, the lane (the other coordinate's range), and the
+   timing marks in metres, measured from the same origin.
+3. **Clip.** Record a short permitted clip of the course being run. Then:
+   `python scripts/camera_track_video.py CLIP --model models/yolox_s.onnx --out OBS.jsonl --log TRACK.json --gallery TRACKS.png --assignments-template ASSIGN.json`.
+   Look at the gallery, fill in ASSIGN.json for the runner (identity "confirmed" only when you are sure; "uncertain" is
+   kept for audit and never produces samples), then
+   `python scripts/camera_to_samples.py export OBS.jsonl --calibration FIELD/report/calibration.json --config ADAPTER.json --assignments ASSIGN.json --anchor-utc ISO --out samples.jsonl --log adapter.json`
+   (ADAPTER.json: start from `scripts/examples/camera/adapter_config_example.json` and set `"source": "camera"`; the
+   calibration file comes from running step 4 once, or from `scripts/camera_calibrate.py fit FIELD/points.json --out CAL.json`).
+4. **Check.** `python scripts/camera_field_check.py run --points FIELD/points.json --course FIELD/course.json --samples samples.jsonl --athlete ID --out FIELD/report --now-settings NOW.json`
+   (NOW.json: the camera settings as they are at that moment). Read, in this order:
+   - each **check point's error in metres** (the only independent accuracy figure, and only at those points);
+   - the **usable field region** (outside the measured marks, positions are extrapolated and left out);
+   - **compatibility now**: exit 1 means the camera changed (zoom, resolution, camera id, mount); recalibrate, nothing
+     is timed;
+   - the **share of the course tracked**, and each interval's **average speed** with its time uncertainty, or the reason
+     it was excluded (a tracking gap inside it, samples too far apart at a mark, no crossing).
+5. Average interval speed and peak speed are separate. **Peak-speed accuracy is not measured** without an independent
+   peak reference: on the synthetic course the camera's peak read 4.19 m/s against a true 4.00 m/s while the interval
+   average was within 0.6 %.
 
 ## 3. Timing (independent timer, who never sees the scores)
 
@@ -133,7 +148,7 @@ a start without usable data unless the operator gives a reason (see section 2).
 | | What ran | Conditions | Not shown |
 |---|---|---|---|
 | **Runs today with fictional inputs** | dashboard and fictional demo (`demo_launcher.py --session pilot`), round readiness and refused/partial starts, save-then-start, blind timing sheet, export, reproduction in a fresh database, report; run from clean snapshots with the scripts' outbound requests sent to a dead proxy (nothing failed) and no detector model on disk | fictional heart rate, synthetic tracking, isolated engine; the browser itself was online and its only remote request was the Google Fonts stylesheet (without it, system fonts) | anything about real people; a laptop with networking switched off |
-| **Passed through the actual video software path** | decoding, YOLOX-S person detection, ByteTrack, calibration, samples, paced playback into an isolated pilot session (`scripts/video_pilot_check.py`); camera-only field check (`scripts/camera_field_check.py synthetic`) | a GENERATED 20 s clip of drawn figures, 1280x720 at 25 fps; identities from a simulated operator; this laptop ran the detector at about 9 frames/s, so paced playback dropped about 63 % of frames | real footage, real kits, lighting, crowds; live camera capture; camera-to-engine latency |
+| **Passed through the actual video software path** | decoding, YOLOX-S person detection, ByteTrack, calibration, samples, paced playback into an isolated pilot session (`scripts/video_pilot_check.py`): attached to the intended wearer, early round start refused, camera reference opened at the recorded start, a deliberate 1 s picture loss left a gap (no invented samples), an identity lapse or an "uncertain" identity removed that player's samples; camera-only field check (`scripts/camera_field_check.py synthetic`) | a GENERATED 20 s clip of drawn figures, 1280x720 at 25 fps; identities from a simulated operator; this laptop ran the detector at 9-11 frames/s, so paced playback dropped 54-63 % of frames | real footage, real kits, lighting, crowds; live camera capture; camera-to-engine latency; physical position accuracy |
 | **Needs an approved field setup and an independent timing reference** | positional accuracy on the field (measured check points), interval timing against gates or measured video timing, peak speed accuracy, coverage with real players | permission, a fixed camera position, tape measurements | — |
 | **Waits on Zephyr** | the vest stream from real hardware; until then the source label says "simulated", and nothing on screen claims a connected device | see the list below | — |
 
