@@ -186,6 +186,15 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
     period = 1.0 / config.output_max_rate_hz
     broken: dict[str, str] = {}        # athlete_id -> why the next sample starts a new segment
     open_segment: dict[str, dict] = {}
+    intervals = (obs.assignment_report or {}).get("usable_intervals") or {}
+    last_interval: dict[str, tuple] = {}
+    pending_reconfirm: set[str] = set()
+
+    def interval_of(track: str, frame: int):
+        for i, (a, b) in enumerate(intervals.get(track, [])):
+            if a <= frame <= b:
+                return (track, i)
+        return (track, None)
     for frame in sorted(by_frame):
         group = sorted(by_frame[frame], key=lambda o: o.track_id)
         counts: dict[str, int] = {}
@@ -198,6 +207,11 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
                 u[1] = o.frame; u[2] += 1
                 res.skip("unassigned")
                 continue
+            iv = interval_of(o.track_id, o.frame)
+            # a separately confirmed interval: unconfirmed data lay between, so continuity is never carried across it
+            if bool(intervals) and o.athlete_id in last_interval and last_interval[o.athlete_id] != iv:
+                pending_reconfirm.add(o.athlete_id)      # kept until the next point reaches the estimator
+            last_interval[o.athlete_id] = iv
             stats = res.per_athlete.setdefault(o.athlete_id, {"observations": 0, "outputs": 0, "warm_up": 0, "fit_residual": 0})
             stats["observations"] += 1
             est = estimators.setdefault(o.athlete_id, AthleteEstimator(config.estimator))
@@ -221,6 +235,13 @@ def process(obs: ObservationFile, calibration: Calibration, config: AdapterConfi
                 res.skip("outside_calibration")
                 continue
             reason = est.add(Point(o.video_time_s, pos[0], pos[1], o.confidence, o.track_id))
+            reconfirmed = o.athlete_id in pending_reconfirm
+            pending_reconfirm.discard(o.athlete_id)
+            if reason is None and reconfirmed and len(est.history) > 1:
+                newest = est.history[-1]
+                est.history.clear()
+                est.history.append(newest)
+                reason = "identity_reconfirmed"
             if reason:
                 broken.setdefault(o.athlete_id, reason)
                 res.resets.append({"athlete_id": o.athlete_id, "video_time_s": o.video_time_s, "reason": reason})

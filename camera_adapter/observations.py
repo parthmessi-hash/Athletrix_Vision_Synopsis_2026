@@ -210,7 +210,7 @@ def load_assignments(path: Path) -> list[Assignment]:
 
 
 ASSIGN_KEYS = {"track_id", "athlete_id", "from_frame", "to_frame", "assigned_by"}
-WORK_KEYS = {"seconds_spent", "confirmations", "corrections", "uncertain_marks", "unassigned_seconds", "tool"}
+WORK_KEYS = {"seconds_spent", "confirmations", "corrections", "uncertain_marks", "unassigned_seconds", "tool", "confirmation_tasks"}
 
 
 def load_assignment_file(path: Path) -> AssignmentFile:
@@ -264,22 +264,38 @@ def dump_assignments(path: Path, f: AssignmentFile) -> None:
     Path(path).write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
 
-def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trust_tracker_through_encounters: bool = False) -> ObservationFile:
+LAPSE_AFTER_GAP_S = 1.0   # adjustable engineering default: a track unseen for longer than this needs re-confirmation
+
+
+def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trust_tracker_through_encounters: bool = False,
+                      lapse_after_gap_s: float | None = LAPSE_AFTER_GAP_S) -> ObservationFile:
     """Set athlete_id from explicit assignments. An observation already assigned differently is an error, never overwritten.
 
     Conservative identity rule (default): an assignment covers its track only up to the track's first close encounter
-    with another tracked person after the assignment starts (an observation with near_other_track). From that frame on
-    the observations stay unassigned, because the tracker may have swapped or merged the two people, until a new
-    assignment for the track starts after the encounter (the operator confirmed who it is). `trust_tracker_through_encounters`
-    keeps the earlier behaviour (assignments run through encounters). The report counts what lapsed."""
+    with another tracked person after the assignment starts (an observation with near_other_track), and only up to the
+    first observation after a gap longer than `lapse_after_gap_s` in the track (a prolonged occlusion or a lost and
+    resumed track). From there the observations stay unassigned, because the tracker may have swapped, merged or
+    re-acquired the wrong person, until a new assignment for the track starts after it (the operator confirmed who it is).
+    `trust_tracker_through_encounters` keeps the earlier behaviour (assignments run through encounters and gaps). The
+    report counts what lapsed and lists each track's usable (confirmed) intervals, so that downstream continuity never
+    joins two intervals separated by unconfirmed data."""
     errors = []
     result = []
     lapsed: dict[str, int] = {}
+    lapsed_gap: dict[str, int] = {}
     uncertain: dict[str, int] = {}
     encounters: dict[str, list[int]] = {}
-    for o in f.observations:
+    gaps: dict[str, list[int]] = {}          # frames that follow a gap longer than lapse_after_gap_s, per track
+    prev: dict[str, Observation] = {}
+    for o in sorted(f.observations, key=lambda o: (o.track_id, o.frame)):
         if o.near_other_track:
             encounters.setdefault(o.track_id, []).append(o.frame)
+        p = prev.get(o.track_id)
+        if p is not None and lapse_after_gap_s is not None and o.video_time_s - p.video_time_s > lapse_after_gap_s + 1e-9:
+            gaps.setdefault(o.track_id, []).append(o.frame)
+        prev[o.track_id] = o
+    usable: dict[str, list[list[int]]] = {}
+    last_key: dict[str, tuple] = {}
     for o in f.observations:
         hit = [a for a in assignments if a.track_id == o.track_id and a.from_frame <= o.frame and (a.to_frame is None or o.frame <= a.to_frame)]
         athlete = hit[0].athlete_id if hit else None
@@ -289,18 +305,35 @@ def apply_assignments(f: ObservationFile, assignments: list[Assignment], *, trus
         if athlete is not None and not trust_tracker_through_encounters and any(hit[0].from_frame < e <= o.frame for e in encounters.get(o.track_id, ())):
             lapsed[o.track_id] = lapsed.get(o.track_id, 0) + 1
             athlete = None
+        if athlete is not None and not trust_tracker_through_encounters and any(hit[0].from_frame < g <= o.frame for g in gaps.get(o.track_id, ())):
+            lapsed_gap[o.track_id] = lapsed_gap.get(o.track_id, 0) + 1
+            athlete = None
         if o.athlete_id is not None and athlete is not None and o.athlete_id != athlete:
             errors.append(f"frame {o.frame} track {o.track_id}: already assigned to {o.athlete_id}, assignment file says {athlete}")
             continue
+        effective = o.athlete_id or athlete
+        if effective is not None:
+            key = (hit[0].from_frame if hit and athlete is not None else "file", effective)
+            iv = usable.setdefault(o.track_id, [])
+            if last_key.get(o.track_id) == key and iv:
+                iv[-1][1] = o.frame
+            else:
+                iv.append([o.frame, o.frame])
+            last_key[o.track_id] = key
+        else:
+            last_key[o.track_id] = None
         result.append(Observation(o.frame, o.video_time_s, o.track_id, o.u_px, o.v_px, o.confidence, o.athlete_id or athlete, o.ground_contact, o.near_other_track))
     clash = sorted({o.track_id for o in result} & {o.athlete_id for o in result if o.athlete_id})
     if clash:
         errors.append(f"track ids must differ from athlete ids: {', '.join(clash)}")
     if errors:
         raise ObservationError(errors)
-    report = {"rule": "trust_tracker_through_encounters" if trust_tracker_through_encounters else "lapse_at_encounter",
+    report = {"rule": "trust_tracker_through_encounters" if trust_tracker_through_encounters else "lapse_at_encounter_or_gap",
+              "lapse_after_gap_s": None if trust_tracker_through_encounters else lapse_after_gap_s,
               "observations_unassigned_after_encounter": sum(lapsed.values()), "per_track": lapsed,
+              "observations_unassigned_after_gap": sum(lapsed_gap.values()), "gap_per_track": lapsed_gap,
               "observations_with_uncertain_identity": sum(uncertain.values()), "uncertain_per_track": uncertain,
               "confirmed_by": sorted({a.confirmed_by for a in assignments}),
-              "encounter_observations": {k: len(v) for k, v in encounters.items()}}
+              "encounter_observations": {k: len(v) for k, v in encounters.items()},
+              "usable_intervals": usable}
     return ObservationFile(video=f.video, extractor=f.extractor, observations=result, assignment_report=report)

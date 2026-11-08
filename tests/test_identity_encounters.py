@@ -99,3 +99,18 @@ def test_assignment_files_version_2_keep_identity_status_operator_work_and_the_v
     (tmp_path / "d.json").write_text(json.dumps(doc))
     with pytest.raises(ObservationError, match="confirmed_by person or simulated_oracle"):
         load_assignment_file(tmp_path / "d.json")
+
+
+def test_a_prolonged_gap_lapses_an_assignment_and_confirmed_intervals_stay_apart():
+    """Same rule as the browser tool (tools/video-review.js): unseen for more than 1 s -> re-confirmation needed."""
+    from camera_adapter.observations import Assignment, Observation, ObservationFile, Video, apply_assignments
+    fps = 10
+    obs = [Observation(f, f / fps, "trk-C", 10.0, 10.0, 0.9) for f in range(80) if f < 30 or f >= 50]
+    f = ObservationFile(Video(100, 100, fps, "synthetic"), "test", obs)
+    out = apply_assignments(f, [Assignment("trk-C", "ath-C")])
+    assigned = [o.frame for o in out.observations if o.athlete_id]
+    assert assigned == list(range(30)) and out.assignment_report["observations_unassigned_after_gap"] == 30
+    again = apply_assignments(f, [Assignment("trk-C", "ath-C", 0, 49), Assignment("trk-C", "ath-C", 55)])
+    assert again.assignment_report["usable_intervals"] == {"trk-C": [[0, 29], [55, 79]]}, "two confirmations stay two intervals; frames 50-54 are unconfirmed"
+    trust = apply_assignments(f, [Assignment("trk-C", "ath-C")], trust_tracker_through_encounters=True)
+    assert all(o.athlete_id == "ath-C" for o in trust.observations) and trust.assignment_report["lapse_after_gap_s"] is None
