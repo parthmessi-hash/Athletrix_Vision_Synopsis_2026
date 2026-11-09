@@ -75,25 +75,102 @@ mean HR (bpm). The feature is the pair-weighted mean excess as a fraction of hea
 event counts.
 
 **Fictional comparison** (`scripts/fatigue_method_compare.py`; heart rate follows movement with a 25 s lag; fictional
-player 60/200 bpm):
+player 60/200 bpm). "Usable" is the coverage each method actually had: heart-rate/speed pairs for the current feature,
+the share of recent pairs in speed bands the reference also has for the experimental one.
 
-| Case | Should | Current feature / combined | Experimental feature / combined |
+| Case | Should | Current feature / usable / combined | Experimental feature / usable / combined |
 |---|---|---|---|
-| harder work (recent 4.0 m/s, reference up to 3.4) | low, or not enough data | 0 / 12.7 | not available (reference never reached that speed) / not available |
-| same movement, +12 bpm drift | clearly raised | 41 / 22 | **91** (excess 12.8 bpm) / 39 |
-| slower drill, no slow movement in the reference | not enough data | **100** / 56 | not available / not available |
-| slower drill, reference includes slow movement | low | **100** / 56 | **0** / 22 (see tradeoffs) |
-| stop-start drill, same average movement | low | 12 / 4 | 20 / 7 |
+| harder work (recent 4.0 m/s, reference up to 3.4) | low, or not enough data | 0 / 120 pairs / 12.7 | not available / 16 % comparable / not available |
+| same movement, +12 bpm drift | clearly raised | 41 / 120 / 22 | **91** / 100 % / 39 |
+| slower drill, no slow movement in the reference | not enough data | **100** / 120 / 56 | not available / 0 % / not available |
+| slower drill, reference includes slow movement | low | **100** / 120 / 56 | **0** / 100 % / 22 |
+| stop-start drill (5 s fast, 10 s slow), same average | low | 12 / 120 / 4 | 20 / 100 % / 7 |
 | camera clock uncertainty 2 s | not enough data | not available | not available |
-| camera clock secretly 20 s off, +12 bpm drift | close to the no-offset value | 20 (halved) / 15 | 89 / 38 |
-| camera missing | not enough data | not available | not available |
+| camera clock secretly 20 s off, +12 bpm drift | close to the no-offset value | 20 / 120 / 15 | 89 / 83 % / 38 |
+| camera missing | not enough data | not available | not available (now explained as a camera gap) |
+| **challenge:** stop-start every 6 s (2 s fast, 4 s slow), same average | low | 9 / 120 / 3 | 12 / 100 % / 4 |
+| **challenge:** heart rate still high after an abrupt slowdown | low | 12 / 120 / 4 | **64** / 100 % / **21** |
+| **challenge:** step from slow to hard running (control) | low | 9 / 120 / 5 | 3 / 100 % / 3 |
+| **challenge:** the same step, camera clock secretly 5 s off | close to the control | 8 / 116 / 4 | 0 / 100 % / 1 |
+| **challenge:** the same step, stated clock uncertainty 2 s | not enough data | not available | not available |
 
 What improved: a slower drill is no longer read as maximal fatigue; a genuine same-movement rise is clearer; a hidden
-clock offset matters much less. Tradeoffs that remain: more "not enough data" when recent movement goes beyond the
-reference (harder work); a stop-start drill reads slightly higher because averaged movement crosses band edges;
-**output_change still reads a deliberately slower drill as lower output** (the 22 above comes from it), which is the next
-candidate weakness. The candidate is experimental: fictional cases expose bad behaviour, they cannot show accuracy.
-Existing frozen profiles do not use it, so every saved prediction reproduces exactly as before.
+clock offset mattered less in these cases.
+
+**Where the experimental method still misleads (challenge cases, 2026-11-09):**
+- **Lingering heart rate after an abrupt slowdown reads as fatigue-like (64, combined 21, with no drift).** Each heart-rate
+  sample is matched on the mean speed of the preceding 30 s, but heart rate takes longer than that to come down, so the
+  first slow minute after hard running carries heart rate the reference's slow band does not have. This is a limitation of
+  the method (context length vs heart-rate recovery), not a code defect; it is pinned by a test. A testable next step for
+  the team, not done here: leave out heart-rate samples whose movement changed band within the last N seconds (steady-state
+  pairs only), and check it on this case and the stop-start cases before adopting it. Do not tune context_s to make this
+  one case pass.
+- **A hidden clock offset is not detectable from the two signals.** With 5 s it changed little here (3 -> 0); with 20 s it
+  changed little in the drift case. These are fictional shapes; on other shapes an offset could matter more. Only the
+  stated alignment and its uncertainty protect against it.
+- **Band edges are hard.** A steady 2.5 m/s sits on the edge between two bands and splits between them by rounding (seen in
+  the camera-missing case). Movement near an edge can move pairs between bands.
+- **Stop-start reads slightly higher** (12-20) because averaged movement crosses band edges; this simulator's heart rate has
+  no extra cost for accelerations, so real stop-start work is not represented.
+- More "not enough data" when recent movement goes beyond the reference (harder work): by design.
+- **output_change still reads a deliberately slower drill as lower output** (the 22 above comes from it).
+
+**Defects found and fixed (2026-11-09):**
+- With the camera gone for most of the recent window, the experimental feature's reason said "the reference does not cover
+  this kind of movement". It now names the camera gap (or missing heart rate, uncertain identity, or test-sprint exclusion)
+  when lost data removed more samples than were paired. Availability and values are unchanged.
+- An accepted baseline with too few heart-rate values (no resting heart rate) made hr_strain and hr_speed_matched raise a
+  TypeError (HTTP 500 on the score and pilot view). They now return "not available" with the reason. Any score that did not
+  raise before is computed exactly as before.
+
+The candidate is experimental: fictional cases expose bad behaviour, they cannot show accuracy. Existing frozen profiles do
+not use it, so every saved prediction reproduces exactly as before.
+
+### 4b. Reference coverage: checking the player's reference (EXPERIMENTAL feature only)
+
+When the session's frozen profile uses hr_speed_matched, the pilot view (`GET .../study/pilot`, field
+`reference_coverage`), the Fatigue estimate card (a dashed "Reference coverage" box) and `pilot_session.py coverage` show,
+for the active wearer:
+- each speed band: **comparable** (both windows have at least min_pairs_per_band pairs: exactly the score's rule), **reference
+  lacks this range**, **reference has only N pairs here**, **too few recent pairs**, or **no recent movement here**;
+- the share of recent samples in comparable bands against the profile's min_matched_share;
+- per window, heart-rate samples, seconds covered, pairs made, and what was left out and why: next to a timed test sprint (by
+  design), low-confidence or predicted camera tracking (identity uncertain), no camera tracking (gap), or movement outside
+  every band;
+- a status that keeps apart a reference that lacks the speed range, missing heart rate, uncertain camera identity, a camera
+  gap, clock alignment, an incomplete reference window, and a wearer/baseline problem; a caution when the estimate stands on
+  fewer samples than the windows held; and a plain "check next" line.
+
+It is built only from the score's own counts and thresholds and decides nothing. Heart rate counts as missing when it
+covers less than context_min_coverage of a window (the feature's own threshold); a camera or test-sprint loss is named when
+it removed more samples than were paired. It does not prescribe an exercise protocol: whether the reference period should
+include a given movement is the team's baseline-procedure decision. With the current (default) profile it is absent.
+
+Fictional example, **matched estimate available** (same movement, +12 bpm drift):
+
+```
+COVERED · recent samples in comparable bands: 100 % (the score needs 60 %)
+  1.5-2.5 m/s: no recent movement here (reference 4 pairs)
+  2.5-3.5 m/s: comparable (98 reference, 120 recent pairs)
+  reference: 120 heart-rate samples, 102 paired; lost: 18 no camera tracking (the reference's first seconds have no 30 s context)
+  -> feature 91 (+12.8 bpm at similar movement), combined 39
+```
+
+Fictional example, **withheld because the reference does not cover the movement** (slower drill, no slow movement in
+the reference):
+
+```
+NOT_COMPARABLE · recent samples in comparable bands: 0 % (the score needs 60 %)
+  0.5-1.5 m/s: reference lacks this range (0 reference pairs, 101 recent)
+  1.5-2.5 m/s: reference has only 4 pairs here (needs 5); 19 recent
+  2.5-3.5 m/s: no recent movement here (reference 98 pairs)
+  -> combined estimate not available; next: the reference period did not include that speed; whether it should is a
+     baseline-procedure decision for the team.
+```
+
+Tests: `tests/test_reference_coverage.py` (good coverage, recent effort outside the range, uneven and sparse heart rate, short
+and longer tracking gaps, uncertain identity vs gap, clock alignment, incomplete reference, a wearer change through the engine
+where P2 never gets P1's reference, the CLI).
 
 ## 5. The accuracy question and how it is tested
 
@@ -108,17 +185,29 @@ practical comparison, not a measurement of fatigue.
 - The report opens with a plain result: INCONCLUSIVE with fewer than 5 rounds, NEGATIVE when the combined estimate does
   not beat both single-source estimates, and a caution when it follows round order at least as strongly as the outcome.
   The correlation target (combined r >= 0.5) is a study target, not a promise.
-- For real data, `scripts/evaluate.py pilot --manifest` refuses a study manifest declared after the first sprint result
-  was entered: features, weights, baseline rules and analysis choices must be frozen before outcomes are seen, and
-  never tuned on them.
+- **Freeze evidence (2026-11-09).** A date typed in the manifest does not show the rules were frozen. The session entry can
+  now record the study manifest's SHA-256 and the profile it names (`pilot_session.py session ... --study-manifest
+  FILE`); the engine refuses the session if the manifest names a different profile from the one it freezes, and stores
+  the fingerprint with its own receipt time. The report then states one of:
+  **RECORDED** (every session recorded this exact manifest at setup, before the first outcome),
+  **PARTLY RECORDED**, **SELF-DECLARED, NOT VERIFIED** (older exports or row files: only the typed declared_at), or
+  **NONE** (no manifest). It refuses a manifest different from the one recorded, and (real data) one recorded only by a
+  correction after the first outcome; for self-declared real data the old rule still applies (declared_at must precede
+  the first outcome). Limits: this shows the manifest existed and was fixed when the session started on this engine; it
+  cannot show nobody saw outcomes from an earlier session.
+- The report's first lines also show coverage (usable rounds per method and the shared rounds compared) and the frozen
+  profile and rules version; mixed rules versions are refused, so earlier results stay tied to the version they were saved
+  with and are never rescored.
 
 ## 6. Decisions to freeze before an approved pilot
 
 1. Heart-rate basis: reserve or percent of HRmax, everywhere; and how HRmax is obtained per player.
 2. The features and weights of the combined estimate, including whether hr_speed_matched replaces hr_per_speed.
-3. Baseline rules: the seated-rest procedure and the camera reference (length, which round opens it).
+3. Baseline rules: the seated-rest procedure and the camera reference (length, which round opens it, and which kinds of
+   movement it should contain, now visible in the reference coverage summary).
 4. Freshness, coverage and minimum-data rules (when to say "not enough data").
-5. The analysis: timing policy, reference methods, valid-round rule, the outcome and statistic, held-out split.
+5. The analysis: timing policy, reference methods, valid-round rule, the outcome and statistic, held-out split; and record
+   the manifest at session setup (`--study-manifest`) so the freeze is RECORDED, not self-declared.
 
 ## 7. Wording in the science-fair application to check (the document is not in this repository; not edited)
 

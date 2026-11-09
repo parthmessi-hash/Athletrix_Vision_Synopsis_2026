@@ -68,7 +68,7 @@ def test_report_and_held_out_guard(tmp_path):
     md = (tmp_path / "r" / "report.md").read_text()
     assert "FICTIONAL data" in md and "not proof of effectiveness" in md and "repeated observations" in md
     assert "timing evidence retrospective" in md and "round marked invalid" in md and res["analysis_choices"]["tuned_on_outcomes"] is False
-    assert "| P1/day1 | 1 | 3.0 | timing_gates | fx-res-P1-1 | - |" in md and "| fx-pred-P1-1 | fx-res-P1-1 |" in md, "rows trace to the prediction and result"
+    assert "| P1/day1 | 1 | 3.0 | timing_gates | fx-res-P1-1 | - |" in md and "| fx-pred-P1-1 | - | fx-res-P1-1 |" in md, "rows trace to the prediction and result"
     assert "percent increase in sprint time" in md and "percent loss of speed" not in md.replace("not percent loss of speed", "")
     assert ev.main(["pilot", "--rows", str(ROOT / "scripts" / "examples" / "pilot" / "fictional_analysis_rows.json"), "--out", str(tmp_path / "all")], out=lines.append) == 0
     md2 = (tmp_path / "all" / "report.md").read_text()

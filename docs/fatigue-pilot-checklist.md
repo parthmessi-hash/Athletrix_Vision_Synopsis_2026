@@ -468,3 +468,36 @@ was INCOMPLETE). Needs the team: the decisions in docs/fatigue-method.md section
 weights including whether hr_speed_matched replaces hr_per_speed, baseline rules, data rules, analysis) frozen in a
 study manifest before any real outcome; the science-fair application wording in section 7. Next candidate weakness:
 output_change reads a deliberately slower drill as reduced output.
+
+## Reference coverage, challenge cases and recorded freeze (2026-11-09, second batch)
+
+- Started from both repos clean and pushed (backend 6df5120, frontend 6a2b73e); nothing was missing from the previous batch.
+- Reference coverage for the EXPERIMENTAL movement-matched feature: `app/core/reference_coverage.py`, `reference_coverage`
+  in the pilot view, `pilot_session.py coverage`, a box in the Fatigue estimate card. Built from the score's own counts and
+  thresholds (no second decision); keeps apart a reference that lacks the speed range, missing heart rate, uncertain camera
+  identity, camera gap, clock alignment, incomplete reference and wearer/baseline. Tests: tests/test_reference_coverage.py
+  (9, including a wearer change through the engine and the CLI). Absent with the default profile.
+- Challenge cases added to `scripts/fatigue_method_compare.py` with a coverage column: short stop-start (low in both),
+  lingering heart rate after an abrupt slowdown (**experimental 64, combined 21, no drift: a method limitation, documented
+  and pinned, not tuned**), a step change with a hidden 5 s offset (little effect; not detectable), and stated clock
+  uncertainty (not available in both).
+- Defects fixed: the experimental feature blamed the reference when the camera was lost (reason text only); an accepted
+  baseline without resting heart rate crashed hr_strain / hr_speed_matched (HTTP 500), now "not available". Values of every
+  score that did not crash are unchanged.
+- Freeze: the session can record the study manifest's SHA-256 and named profile (`--study-manifest`); the report says
+  RECORDED / PARTLY RECORDED / SELF-DECLARED, NOT VERIFIED / NONE, refuses a different manifest or one recorded only after
+  the first outcome (real data), shows coverage and the rules version on its first lines, and refuses mixed rules
+  versions. The fictional rehearsal and the launcher demo record the fictional manifest, so their report says RECORDED.
+- Verified: backend tests all passed; browser pages 96/96 and 6/6; accelerated rehearsal + session_verify COMPLETE (9/9
+  reproduced, report INCONCLUSIVE with 4 shared rounds, Freeze RECORDED, P2 strap dropout and P3 camera gap shown as
+  not available with reasons).
+- Not done: the browser demo's example teams stay basketball and American football (the demo has a separate engine per
+  sport; soccer would need a third one, not a small change). Display test still INCOMPLETE (needs you at the laptop).
+
+## Checkpoint for the next session (2026-11-09, after the reference-coverage batch)
+
+Done (do not repeat): everything above. Needs you: the display check (run sheet 5d). Needs the team: the decisions in
+docs/fatigue-method.md section 6, including which movement the reference period should contain (see the coverage summary)
+and recording the manifest at session setup. Next method step, if the team wants one: a steady-state-pairs variant of
+hr_speed_matched tested on hr_lingers and the stop-start cases (do not tune context_s to one case); output_change still
+reads a deliberately slower drill as lower output.

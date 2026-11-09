@@ -752,6 +752,7 @@ def pilot(args, out) -> int:
     from app.core.pilot_analysis import compare, rows_from_package  # noqa: PLC0415
     from app.core.recording_package import read_package  # noqa: PLC0415
     source, rows, starts, frozen = [], [], {}, {}
+    sessions = []          # the freeze evidence of each package's study session (engine-recorded manifest fingerprint)
     first_outcome = None   # the earliest independent result entered (engine receipt time), across the inputs
     if args.rows:
         doc = json.loads(Path(args.rows).read_text())
@@ -767,9 +768,21 @@ def pilot(args, out) -> int:
         rows += rr
         for r in rr:
             starts[(r["participant"], r["session"])] = pkg.recording["started_at"]
+        pkg_first = None
         for e in pkg.study:
-            if e.kind == "sprint_result" and e.created_at is not None and (first_outcome is None or e.created_at < first_outcome):
-                first_outcome = e.created_at
+            if e.kind == "sprint_result" and e.created_at is not None and (pkg_first is None or e.created_at < pkg_first):
+                pkg_first = e.created_at
+        if pkg_first is not None and (first_outcome is None or pkg_first < first_outcome):
+            first_outcome = pkg_first
+        sess_entries = sorted((e for e in pkg.study if e.kind == "session"), key=lambda e: e.created_at)
+        before = [e for e in sess_entries if pkg_first is None or e.created_at <= pkg_first]
+        in_force = before[-1] if before else None
+        sessions.append({"package": Path(pth).name, "recording_id": pkg.recording["id"], "session": in_force.session_label if in_force else None,
+                         "recorded_manifest_sha256": getattr(in_force, "study_manifest_sha256", None) if in_force else None,
+                         "recorded_at": in_force.created_at.isoformat() if in_force else None,
+                         "later_manifest_sha256": [e.study_manifest_sha256 for e in sess_entries if e not in before and getattr(e, "study_manifest_sha256", None)],
+                         "frozen_profile_sha256": (in_force.profile or {}).get("sha256") if in_force else None,
+                         "first_outcome_entered_at": pkg_first.isoformat() if pkg_first else None})
         sess = next((e for e in pkg.study if e.kind == "session" and e.profile), None)
         if sess:
             frozen[sess.profile["sha256"]] = {"version": sess.profile["version"], "fictional": sess.profile["fictional"], "text": sess.profile["text"]}
@@ -781,6 +794,11 @@ def pilot(args, out) -> int:
     shas = {r.get("profile_sha256") for r in rows if r.get("profile_sha256")}
     if len(shas) > 1:
         out(f"refused: the inputs were scored with different frozen profiles ({', '.join(sorted(x[:12] for x in shas))}); one report per protocol")
+        return 1
+    rules = {r.get("rules_version") for r in rows if r.get("rules_version") is not None}
+    if len(rules) > 1:
+        out(f"refused: the saved predictions were scored under different rules versions ({', '.join(map(str, sorted(rules)))}); each result stays tied to "
+            "the version it was saved with, so report them separately")
         return 1
     manifest, manifest_sha, policy, methods = None, None, "confirmed_sequence", None
     if args.manifest:
@@ -797,7 +815,17 @@ def pilot(args, out) -> int:
             return 1
         policy = manifest["timing"]["policy"]
         methods = manifest["timing"].get("reference_methods") or None
-        if first_outcome is not None:
+        for x in sessions:
+            rec_sha = x["recorded_manifest_sha256"]
+            if rec_sha and rec_sha != manifest_sha:
+                out(f"refused: {x['package']}: the study manifest given ({manifest_sha[:12]}) is not the one recorded at session setup ({rec_sha[:12]}); "
+                    "report with the manifest that was frozen")
+                return 1
+            if not rec_sha and manifest_sha in x["later_manifest_sha256"] and not manifest["fictional"]:
+                out(f"refused: {x['package']}: this study manifest was recorded only after the first outcome was entered: the choices were not frozen before outcomes")
+                return 1
+        recorded_all = bool(sessions) and all(x["recorded_manifest_sha256"] == manifest_sha for x in sessions)
+        if first_outcome is not None and not recorded_all:   # only the typed date to go by: it must at least precede the outcomes
             try:
                 declared = datetime.fromisoformat(str(manifest.get("declared_at")).replace("Z", "+00:00"))
                 if declared.tzinfo is None:
@@ -831,9 +859,32 @@ def pilot(args, out) -> int:
                           "few rounds only and is not evidence for other players.")
         rows = [r for r in rows if r[key] not in held_list] if test else rows
     res = compare(rows, policy, methods)
-    res.update(source=source, fictional=bool(fict and next(iter(fict))), pin=pin, study_manifest=manifest, study_manifest_sha256=manifest_sha, held_out=held,
+    for x in sessions:
+        x["status"] = ("recorded" if manifest_sha and x["recorded_manifest_sha256"] == manifest_sha else
+                       "recorded_after_first_outcome" if manifest_sha and manifest_sha in x["later_manifest_sha256"] else
+                       "recorded_not_supplied" if x["recorded_manifest_sha256"] and not manifest_sha else "not_recorded")
+    st = {x["status"] for x in sessions}
+    if not manifest:
+        basis = "no_manifest"
+    elif not sessions:
+        basis = "self_declared"            # --rows input: no study log to verify against
+    elif st == {"recorded"}:
+        basis = "recorded"
+    elif "recorded" in st:
+        basis = "mixed"
+    else:
+        basis = "self_declared"
+    freeze = {"basis": basis, "sessions": sessions, "declared_at": (manifest or {}).get("declared_at"),
+              "explanation": {"recorded": "the engine recorded this manifest's SHA-256 (and the profile it names) in every session at setup, with its own time, "
+                                          "before the first outcome was entered",
+                              "mixed": "some sessions recorded this manifest at setup; the others carry only the self-declared date",
+                              "self_declared": "no fingerprint was recorded at session setup (older exports, or rows without a study log): the freeze time is only "
+                                               "the declared_at date typed in the manifest, which is not verified",
+                              "no_manifest": "no study manifest given: nothing shows the choices were frozen"}[basis]}
+    res.update(source=source, fictional=bool(fict and next(iter(fict))), pin=pin, study_manifest=manifest, study_manifest_sha256=manifest_sha, held_out=held, freeze=freeze,
+               rules_versions=sorted(rules), profile_sha256=next(iter(shas)) if shas else None,
                generated_at=datetime.now().astimezone().isoformat(timespec="seconds"), frozen_profiles=frozen,
-               frozen_before_first_outcome=None if not (manifest and first_outcome) else
+               frozen_before_first_outcome=None if not (manifest and first_outcome) else True if basis == "recorded" else
                (datetime.fromisoformat(str(manifest.get("declared_at")).replace("Z", "+00:00")) <= first_outcome if manifest.get("declared_at") else False),
                first_outcome_entered_at=first_outcome.isoformat() if first_outcome else None,
                analysis_choices={"outcome": res["outcome"], "policy": policy, "reference_methods": methods or "all timed methods",
@@ -875,6 +926,22 @@ def pilot_report(r: dict) -> str:
             L.append(f"Caution: the combined estimate follows round order (r = {rcr:+.3f}) at least as strongly as it follows the outcome; it may mostly track time passing.")
     if r.get("frozen_before_first_outcome") is False:
         L.append("**The study manifest was NOT declared before the first outcome was entered: these figures cannot test frozen choices.**")
+    cv = r["coverage"]
+    L.append(f"Coverage: of {cv['combined']['rows']} rounds, usable with an outcome: combined {cv['combined']['usable']}, wearable-only {cv['vest_only']['usable']}, "
+             f"camera-only {cv['camera_only']['usable']}; all three are compared only on the same {n} rounds.")
+    fz = r.get("freeze") or {}
+    fb = fz.get("basis")
+    if fb == "recorded":
+        L.append(f"Freeze: **RECORDED**. The engine recorded study manifest {r['study_manifest_sha256'][:12]} at session setup, before the first outcome was entered.")
+    elif fb == "mixed":
+        L.append("Freeze: **PARTLY RECORDED**. Some sessions recorded the manifest at setup; the rest rely on the self-declared date (see Freeze evidence).")
+    elif fb == "self_declared":
+        L.append(f"Freeze timing: **SELF-DECLARED, NOT VERIFIED**. Only the date typed in the manifest ({fz.get('declared_at')}); no fingerprint was recorded at session setup.")
+    elif fb == "no_manifest":
+        L.append("Freeze: **NONE**. No study manifest given, so nothing shows the choices were fixed before outcomes.")
+    if r.get("profile_sha256") or r.get("rules_versions"):
+        L.append(f"Scored with frozen profile {(r.get('profile_sha256') or 'unknown')[:12]} under rules version {', '.join(map(str, r.get('rules_versions') or [])) or 'unknown'}; "
+                 "saved results keep the versions they were saved with and are never rescored.")
     L += ["", "Sprint slowdown is the practical outcome compared against; it is not a direct measurement of fatigue.", ""]
     L += [f"Outcome: {r['outcome']}.", "",
           f"Timing policy: **{r['policy']}** ({'declared in study manifest ' + r['study_manifest_sha256'][:12] if r.get('study_manifest_sha256') else 'default: no study manifest given'}). "
@@ -922,14 +989,19 @@ def pilot_report(r: dict) -> str:
         key = (x["participant"], x["session"], x["round"])
         L.append(f"| {x['participant']} | {x['session']} | {x['round']} | {'yes' if key not in inel else 'no: ' + inel[key][:60]} | {cell('combined')} | {cell('vest_only')} | "
                  f"{cell('camera_only')} | {x['time_increase_pct'] if x['time_increase_pct'] is not None else 'missing: ' + str(x.get('outcome_missing'))} |")
+    fz = r.get("freeze") or {}
+    L += ["", "## Freeze evidence", "", f"Basis: **{fz.get('basis', 'unknown')}**: {fz.get('explanation', '')}.", "",
+          "| Package | Session | Manifest recorded at setup | Recorded at (engine) | First outcome entered | Status |", "|---|---|---|---|---|---|"]
+    L += [f"| {x['package']} | {x['session']} | {(x['recorded_manifest_sha256'] or 'none')[:12]} | {x['recorded_at']} | {x['first_outcome_entered_at'] or '-'} | {x['status']} |"
+          for x in fz.get("sessions") or []] or ["| rows input | - | - | - | - | no study log |"]
     L += ["", "## Held out", r["held_out"]["status"], r["held_out"].get("limits", ""), "",
           "## Self-rating (exploratory, never a score input)", f"r(self-rating, time increase) = {rr(r['self_rating_exploratory']['self_rating_vs_time_increase'])} on {r['self_rating_exploratory']['rows']} rows.", "",
-          "## Rows (trace)", "", "| Participant | Session | Round | vest | camera | combined | time (s) | increase % | timing | prediction | result (history) |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+          "## Rows (trace)", "", "| Participant | Session | Round | vest | camera | combined | time (s) | increase % | timing | prediction | rules | result (history) |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for x in r["rows"]:
         s = x["scores"]
         hist = f"{x.get('result_id') or '-'}" + (f" (was {', '.join(str(h.get('time_s') or h.get('missing_reason')) for h in x.get('result_history', []))})" if x.get("result_history") else "")
         L.append(f"| {x['participant']} | {x['session']} | {x['round']} | {s['vest_only']} | {s['camera_only']} | {s['combined']} | {x.get('time_s') or x.get('outcome_missing')} | "
-                 f"{x['time_increase_pct']} | {x['timing']['category']} / {x['timing']['basis']}{' (INVALID round)' if x.get('invalid') else ''} | {x.get('prediction_id') or '-'} | {hist} |")
+                 f"{x['time_increase_pct']} | {x['timing']['category']} / {x['timing']['basis']}{' (INVALID round)' if x.get('invalid') else ''} | {x.get('prediction_id') or '-'} | {x.get('rules_version') or '-'} | {hist} |")
     L += ["", "Inputs: " + "; ".join(json.dumps(s) for s in r["source"]), f"Frozen profiles: {', '.join(k[:12] + ' ' + v['version'] for k, v in r['frozen_profiles'].items()) or 'from the rows'}"]
     return "\n".join(L) + "\n"
 

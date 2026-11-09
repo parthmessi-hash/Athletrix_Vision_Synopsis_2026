@@ -250,6 +250,8 @@ def test_operator_cli_main_path(pilot):
     assert code == 0 and "x1 round 1" in lines[1] and "time 3.31" in lines[1], lines
     pv = c.get(f"{API}/recordings/{rid}/study/pilot").json()
     assert pv["last_saved_prediction"]["round"] == 1 and pv["last_saved_prediction"]["prospective"] is True
+    code, lines = run("coverage")
+    assert code == 0 and "does not use the movement-matched heart-rate feature" in lines[0], "the default profile: no coverage summary, said plainly"
 
 
 def _rows(c, rid):
@@ -787,3 +789,78 @@ def test_analysis_refuses_choices_declared_after_the_first_outcome_and_states_an
     md = (tmp_path / "rep-0" / "report.md").read_text()
     assert "## Result at a glance" in md and "**INCONCLUSIVE**" in md and "## Which methods could score each round" in md
     assert "| P1 | freeze | 1 | no: timing evidence" in md, "the round is listed with the reason it is not eligible (no independent start reference)"
+
+
+def test_a_freeze_recorded_at_session_setup_is_verified_and_kept_apart_from_a_self_declared_date(pilot, tmp_path):
+    """The study manifest's SHA-256 recorded in the session with the engine's own time is what the report verifies. A
+    different manifest is refused; a manifest naming another profile is refused at setup; an export without a recorded
+    fingerprint is labelled SELF-DECLARED; a manifest recorded only by a correction after the first outcome is refused."""
+    import hashlib as _h  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+    if str(ROOT / "scripts") not in _sys.path:
+        _sys.path.insert(0, str(ROOT / "scripts"))
+    import evaluate  # noqa: PLC0415
+    c, sim, base, st = pilot["c"], pilot["sim"], pilot["base"], pilot["st"]
+    sha = _h.sha256(Path(PROFILE).read_bytes()).hexdigest()
+    man = json.loads((ROOT / "scripts/examples/pilot/study_manifest_template.json").read_text())
+    man.update(study_id="freeze-recorded", fictional=False, profile_sha256=sha, declared_by="test", declared_at=z(st["now"]).replace("Z", "+00:00"))
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(man))
+    msha = _h.sha256(mpath.read_bytes()).hexdigest()
+
+    c.post(f"{API}/recordings/{pilot['rid']}/stop")
+
+    def session(tag, record, late_record=False):
+        st["now"] += timedelta(seconds=1)
+        rid = c.post(f"{API}/recordings", json={"name": f"freeze {tag}", "athlete_ids": ["x1", "x2"]}).json()["id"]
+        extra = {"study_manifest_sha256": msha, "study_manifest_profile_sha256": sha} if record else {}
+        if tag == "a":
+            bad = c.post(f"{API}/recordings/{rid}/study", json={"kind": "session", "client_token": "frz-bad-prof", "session_label": "x", "protocol": "controlled_study",
+                                                               "fictional": False, "study_manifest_sha256": msha, "study_manifest_profile_sha256": "0" * 64})
+            assert bad.status_code == 422 and "configure the declared profile" in bad.json()["detail"]
+        s0 = entry(c, rid, kind="session", client_token=f"frz-sess-{tag}", session_label=f"frz{tag}", protocol="controlled_study", fictional=False,
+                   clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.05}], **extra)
+        entry(c, rid, kind="wearer", client_token=f"frz-wear-{tag}", athlete_id="x1", participant_code="P1", device_id="strap-A", baseline_id=base["x1"], hr_max_bpm=200, hr_max_origin="test")
+        m0 = st["now"]
+        sim.run(m0 + timedelta(seconds=3), "x1", "strap-A", t0=m0)
+        entry(c, rid, kind="round_start", client_token=f"frz-r1-{tag}", athlete_id="x1", round=1)
+        sim.run(m0 + timedelta(seconds=200), "x1", "strap-A", t0=m0)
+        sv = entry(c, rid, kind="score_save", client_token=f"frz-save-{tag}", athlete_id="x1", round=1)
+        st["now"] += timedelta(seconds=1)
+        entry(c, rid, kind="sprint_start", client_token=f"frz-spr-{tag}", athlete_id="x1", round=1, confirms_prediction_id=sv["id"])
+        sim.run(st["now"] + timedelta(seconds=5), "x1", "strap-A", v=lambda s: 7.5, t0=m0)
+        entry(c, rid, kind="sprint_end", client_token=f"frz-end-{tag}", athlete_id="x1", round=1)
+        entry(c, rid, kind="sprint_result", client_token=f"frz-res-{tag}", athlete_id="x1", round=1, time_s=3.3, method="timing_gates")
+        if late_record:
+            st["now"] += timedelta(seconds=2)
+            entry(c, rid, kind="session", client_token=f"frz-sess-{tag}-late", session_label=f"frz{tag}", protocol="controlled_study", fictional=False,
+                  clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.05}], supersedes=s0["id"],
+                  correction_reason="add the manifest", study_manifest_sha256=msha, study_manifest_profile_sha256=sha)
+        st["now"] += timedelta(seconds=5)
+        c.post(f"{API}/recordings/{rid}/stop")
+        pth = tmp_path / f"{tag}.zip"
+        pth.write_bytes(c.get(f"{API}/recordings/{rid}/package.zip").content)
+        return pth
+
+    rec, old, late = session("a", True), session("b", False), session("c", False, late_record=True)
+
+    def report(pkg, mp, name):
+        said = []
+        code = evaluate.main(["pilot", "--packages", str(pkg), "--manifest", str(mp), "--out", str(tmp_path / name)], out=said.append)
+        return code, said, (tmp_path / name / "report.md").read_text() if code == 0 else None
+
+    code, _, md = report(rec, mpath, "rep-recorded")
+    assert code == 0 and "Freeze: **RECORDED**" in md and "| recorded |" in md
+    assert json.loads((tmp_path / "rep-recorded" / "results.json").read_text())["freeze"]["basis"] == "recorded"
+    assert "Coverage: of 1 rounds" in md and "under rules version 2" in md
+    code, _, md = report(old, mpath, "rep-old")
+    assert code == 0 and "**SELF-DECLARED, NOT VERIFIED**" in md and "| not_recorded |" in md, "an export without a recorded fingerprint stays distinguishable"
+    other = dict(man, study_id="changed-after-setup")
+    (tmp_path / "other.json").write_text(json.dumps(other))
+    code, said, _ = report(rec, tmp_path / "other.json", "rep-other")
+    assert code == 1 and any("is not the one recorded at session setup" in x for x in said)
+    code, said, _ = report(late, mpath, "rep-late")
+    assert code == 1 and any("recorded only after the first outcome" in x for x in said)
+    r = c.post(f"{API}/recordings/none/study", json={"kind": "wearer", "client_token": "frz-wrong-kind", "athlete_id": "x1", "end": True, "study_manifest_sha256": msha,
+                                                    "study_manifest_profile_sha256": sha})
+    assert r.status_code in (404, 422)

@@ -6,6 +6,10 @@ retry is stored once). Start the recording first (scripts/sideline_session.py st
 USAGE (default engine http://127.0.0.1:8000, default recording: the active one; --engine / --recording to change)
     pilot_session.py session --label day1 --protocol controlled_study|club_demo|rehearsal [--fictional]
                      [--camera-alignment operator_estimate:0.04] [--calibration-sha256 HEX] [--planned-rounds N]
+                     [--study-manifest STUDY_MANIFEST.json]
+                     # --study-manifest records the manifest's SHA-256 (and the profile it names) in the session with the
+                     # engine's own time: the report can then verify the choices were fixed before any outcome. The engine
+                     # refuses the session if the manifest names a different profile from the one it would freeze.
     pilot_session.py wearer ATHLETE --code P1 --device VEST_ID --baseline BASELINE_ID --hr-max 200 --hr-max-origin "measured test 2026-11-01"
     pilot_session.py wearer ATHLETE --end
     pilot_session.py ready ATHLETE                       # what the streams allow now, and the next action
@@ -22,6 +26,8 @@ USAGE (default engine http://127.0.0.1:8000, default recording: the active one; 
     pilot_session.py result ATHLETE --round N (--time 3.21 --method timing_gates | --missing equipment_failure) [--correct ENTRY_ID --why "reason"]
     pilot_session.py rating ATHLETE --round N (--value 6 | --missing not_collected) [--notes "..."]
     pilot_session.py rounds                              # the saved rounds: prediction, timing label, result
+    pilot_session.py coverage [--at ISO]                 # the active wearer's reference coverage for the EXPERIMENTAL
+                                                         # movement-matched feature: comparable speed bands, lost data, next check
 Exit codes: 0 stored (or already stored; for ready: ready to start or save), 1 ready: not ready yet, 2 refused (the
 reason is printed), 3 engine unreachable.
 """
@@ -32,8 +38,13 @@ import argparse
 import hashlib
 import json
 import sys
+from pathlib import Path
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def token(args, kind: str) -> str:
@@ -58,6 +69,7 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("session"); p.add_argument("--label", required=True); p.add_argument("--protocol", required=True, choices=["controlled_study", "club_demo", "rehearsal"])
     p.add_argument("--fictional", action="store_true"); p.add_argument("--camera-alignment"); p.add_argument("--calibration-sha256"); p.add_argument("--planned-rounds", type=int)
+    p.add_argument("--study-manifest", type=Path)
     p = sub.add_parser("wearer"); p.add_argument("athlete"); p.add_argument("--code"); p.add_argument("--device"); p.add_argument("--baseline")
     p.add_argument("--hr-max", type=float); p.add_argument("--hr-max-origin"); p.add_argument("--end", action="store_true")
     for name in ("round-start", "save-score", "sprint-start", "sprint-end", "round-end"):
@@ -74,6 +86,7 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
     p = sub.add_parser("rating"); p.add_argument("athlete"); p.add_argument("--round", type=int, required=True); p.add_argument("--value", type=float)
     p.add_argument("--missing"); p.add_argument("--notes")
     sub.add_parser("rounds")
+    p = sub.add_parser("coverage"); p.add_argument("--at")
     p = sub.add_parser("ready"); p.add_argument("athlete")
     args = ap.parse_args(argv)
     e = args.engine.rstrip("/") + "/api/v1"
@@ -92,6 +105,19 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
             for line in readiness_lines(r.json()):
                 out(line)
             return 0 if r.json()["state"] in ("ready_to_start", "ready_to_save") else 1
+        if args.cmd == "coverage":
+            from app.core.reference_coverage import coverage_lines  # noqa: PLC0415
+            r = c.get(f"{e}/recordings/{rid}/study/pilot", params={"trend_span_s": 0, **({"at": args.at} if args.at else {})})
+            if r.status_code != 200:
+                out(f"Refused (HTTP {r.status_code}): {r.text[:200]}")
+                return 2
+            d = r.json()
+            if not d.get("wearer"):
+                out(f"No active wearer at {d.get('at')}: {d.get('reason')}")
+                return 1
+            for line in coverage_lines(d.get("reference_coverage")):
+                out(line)
+            return 0
         if args.cmd == "rounds":
             d = c.get(f"{e}/recordings/{rid}/study").json()
             out(f"Recording {rid} · session {(d['session'] or {}).get('session_label', 'none')} · wearers: " +
@@ -115,6 +141,9 @@ def main(argv=None, out=print, client: httpx.Client | None = None) -> int:
                 refs.append({"stream": "camera", "basis": basis, "uncertainty_s": float(unc) if unc else None})
             body.update(session_label=args.label, protocol=args.protocol, fictional=args.fictional, clock_references=refs, calibration_sha256=args.calibration_sha256,
                         planned_rounds=args.planned_rounds)
+            if args.study_manifest:
+                raw = args.study_manifest.read_bytes()
+                body.update(study_manifest_sha256=hashlib.sha256(raw).hexdigest(), study_manifest_profile_sha256=json.loads(raw)["profile_sha256"])
         elif args.cmd == "wearer":
             body.update(athlete_id=args.athlete, end=args.end) if args.end else body.update(athlete_id=args.athlete, participant_code=args.code, device_id=args.device,
                                                                                           baseline_id=args.baseline, hr_max_bpm=args.hr_max, hr_max_origin=args.hr_max_origin)

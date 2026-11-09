@@ -28,6 +28,7 @@ Exit 0 when the workflow completed with no failed request and every prediction r
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -50,6 +51,7 @@ for p in (str(ROOT), str(ROOT / "scripts")):
 import live_session  # noqa: E402
 
 PROFILE = ROOT / "scripts" / "examples" / "pilot" / "fictional_rehearsal_profile.json"
+STUDY_MANIFEST = ROOT / "scripts" / "examples" / "pilot" / "fictional_study_manifest.json"
 VEST = "fictional-vest-1"
 # FICTIONAL participants: pseudonymous codes only, made-up ages for an estimated HR max (with its origin stated)
 PARTICIPANTS = [("P1", "px1", 16, 3.05), ("P2", "px2", 17, 3.20), ("P3", "px3", 16, 3.12)]
@@ -114,6 +116,18 @@ class Scenario:
         return round(base * (1 + 0.06 * f + self.outcome.gauss(0, 0.008)), 3)
 
 
+def study_manifest_for(args) -> tuple[str, str] | None:
+    """(manifest sha256, the profile it names) when the study manifest names the profile this run freezes; otherwise
+    None (e.g. --profile experimental): the session then records no manifest and the report labels the freeze timing
+    self-declared."""
+    if not getattr(args, "study_manifest", None):
+        return None
+    raw = Path(args.study_manifest).read_bytes()
+    named = json.loads(raw)["profile_sha256"]
+    from app.core.fatigue import parse_profile  # noqa: PLC0415
+    return (hashlib.sha256(raw).hexdigest(), named) if named == parse_profile(Path(args.profile).read_text())[1] else None
+
+
 def run(args, api: Api, now, sleep, out, restart=None) -> dict:
     sc = Scenario()
     prof_text = Path(args.profile).read_text()
@@ -137,8 +151,11 @@ def run(args, api: Api, now, sleep, out, restart=None) -> dict:
 
     def entry(**kw):
         return api.call("study", "POST", f"/recordings/{rid}/study", json={"client_token": f"reh-{next(tok):05d}-{kw['kind'][:6]}", **kw})
+    freeze = study_manifest_for(args)
+    log["study_manifest"] = None if freeze is None else {"file": args.study_manifest.name, "sha256": freeze[0]}
     entry(kind="session", session_label="rehearsal-day1", protocol="rehearsal", fictional=True, planned_rounds=args.rounds,
-          clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.04, "note": "FICTIONAL: no camera; stated for the rehearsal"}])
+          clock_references=[{"stream": "camera", "basis": "operator_estimate", "uncertainty_s": 0.04, "note": "FICTIONAL: no camera; stated for the rehearsal"}],
+          **({} if freeze is None else {"study_manifest_sha256": freeze[0], "study_manifest_profile_sha256": freeze[1]}))
     dropout = ("P2", 2)
     poll_stop = threading.Event()
     polls = []
@@ -407,13 +424,15 @@ def analysis_step(args) -> dict:
     if target.exists():
         target = args.out / f"report-rerun-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     lines = []
-    code = ev.main(["pilot", "--packages", str(args.out / "pilot-package.zip"), "--out", str(target)], out=lines.append)
+    man = study_manifest_for(args)
+    code = ev.main(["pilot", "--packages", str(args.out / "pilot-package.zip"), "--out", str(target)] +
+                   (["--manifest", str(args.study_manifest)] if man else []), out=lines.append)
     if code != 0:
         raise RuntimeError("evaluate.py pilot exited " + str(code) + ": " + " | ".join(lines[-3:]))
     res = json.loads((target / "results.json").read_text())
     return {"report_dir": target.name, "matched_rows": res.get("matched_rows"), "coverage": {c: v["usable"] for c, v in res.get("coverage", {}).items()},
             "pooled_r": {c: res["pooled"][c]["r"] for c in ("vest_only", "camera_only", "combined")}, "targets": res.get("targets"),
-            "timing_evidence_counts": res.get("timing_evidence_counts")}
+            "timing_evidence_counts": res.get("timing_evidence_counts"), "freeze": (res.get("freeze") or {}).get("basis")}
 
 
 def finish(args, api: Api | None, log: dict | None, out, steps=STEPS) -> dict:
@@ -443,6 +462,8 @@ def main(argv=None, out=print) -> int:
     ap.add_argument("--mode", choices=["accelerated", "wall"], required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--profile", type=Path, default=PROFILE)
+    ap.add_argument("--study-manifest", type=Path, default=STUDY_MANIFEST,
+                    help="recorded in the session (SHA-256) and used by the report when it names --profile (default: the FICTIONAL rehearsal manifest)")
     ap.add_argument("--rounds", type=int, default=3, help="rounds per participant per turn")
     ap.add_argument("--round-s", type=float, default=70.0)
     ap.add_argument("--sprint-s", type=float, default=4.0)

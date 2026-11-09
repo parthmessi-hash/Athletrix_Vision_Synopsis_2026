@@ -86,8 +86,10 @@ Ctrl-C stops only what it started.
    Read the three answers separately: **fictional rehearsal / record inputs / controlled pilot**. "Record inputs" needs a
    real (non-simulated) stream. "Controlled pilot" needs a non-fictional, approved manifest, a usable calibration, a
    stated clock alignment, an active wearer, and both streams arriving fresh from real sources.
-7. Open the study session (this freezes the profile):
-   `python scripts/pilot_session.py session --label day1 --protocol controlled_study --camera-alignment operator_estimate:0.04`.
+7. Open the study session (this freezes the profile **and records the study manifest's fingerprint**):
+   `python scripts/pilot_session.py session --label day1 --protocol controlled_study --camera-alignment operator_estimate:0.04 --study-manifest MANIFEST.json`.
+   The engine refuses it if the manifest names a different profile from the one it would freeze. Without
+   `--study-manifest` the report can only say the freeze timing is SELF-DECLARED.
 
 ## 2. Each round (operator), one vest at a time
 
@@ -192,6 +194,8 @@ Order:
    reason; reproduction of every saved prediction on a fresh copy; and the report (day1-verify/report/report.md).
    VERDICT: COMPLETE, INCOMPLETE (each reason listed) or STEP FAILED (earlier files kept; rerun with
    `session_verify.py --resume day1-verify`).
+   Read the report's first lines: the result (INCOMPLETE / NEGATIVE / ...), coverage per method on the same rounds, and
+   **Freeze: RECORDED** (manifest recorded at session setup before the first outcome) or **SELF-DECLARED, NOT VERIFIED**.
 3. Removal (`scripts/local_data.py remove-athlete ID --execute --confirm ID`) deletes this laptop's copy only. Packages
    already exported are not touched.
 
@@ -295,6 +299,13 @@ session, interval times against an independent reference, and frames dropped on 
   `.venv/bin/python scripts/pilot_rehearsal.py --mode accelerated --profile scripts/examples/pilot/experimental_matched_profile.json --out demo-experimental`
   It runs and every saved estimate reproduces, but with the rehearsal's short rounds its 120 s windows never fill:
   the combined estimate was "not available" in all 9 rounds (checked 2026-11-09). That is the honest answer, not a bug.
+
+- Reference coverage (experimental profile only): `python scripts/pilot_session.py coverage` prints, for the active
+  wearer, which speed bands are comparable with their own reference, the share of recent movement in those bands, what
+  data was lost and why (missing heart rate, uncertain camera identity, camera gap, test sprint), and what to check next.
+  The same box appears in the Fatigue estimate card. It decides nothing; with the default profile it says so.
+- Challenge cases (2026-11-09) are in the same comparison; the main limitation found is lingering heart rate after an
+  abrupt slowdown (docs/fatigue-method.md section 4).
 
 ## 6. Still needed before the real pilot
 

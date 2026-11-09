@@ -286,6 +286,8 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
             out["hr_strain"] = {**base, **_unavailable("no maximum heart rate (with its origin) in the wearer assignment")}
         elif len(w) < f["min_samples"]:
             out["hr_strain"] = {**base, **_unavailable(f"{len(w)} heart-rate values in the window, fewer than {f['min_samples']}")}
+        elif rest is None:   # an accepted baseline without enough heart-rate values (before 2026-11-09 this raised)
+            out["hr_strain"] = {**base, **_unavailable("the assigned baseline has too few heart-rate values: no resting heart rate")}
         elif hrmax <= rest:
             out["hr_strain"] = {**base, **_unavailable("the maximum heart rate is not above the resting baseline")}
         else:
@@ -451,24 +453,34 @@ def features(inp: ScoreInputs, prof: dict, sel: dict) -> dict:
 
 
 def _hr_speed_matched(inp, f, phys, track, cam_breaks, gap, vest_ok, ref_ok, r0, r1, rest, hrmax, recent_after_ref) -> dict:
-    """EXPERIMENTAL: see the module docstring. Returns the feature dict (available with value, or unavailable with why)."""
+    """EXPERIMENTAL: see the module docstring. Returns the feature dict (available with value, or unavailable with why).
+    Every unavailable result carries a `cause` code, and once pairing ran, `accounting` counts what each window lost and
+    why (diagnostics only: app/core/reference_coverage.py reads them; the value and the decision do not depend on them)."""
     T = inp.cutoff
     base = {"inputs": ["wearable", "camera"], "reference_window": {"start": iso(r0), "end": iso(r1)}, "experimental": True}
     al = inp.camera_alignment
+    cause = "wearer_or_baseline" if vest_ok else ("reference_incomplete" if ref_ok else None)
     t0, why = (None, vest_ok or ref_ok) if (vest_ok or ref_ok) else recent_after_ref(f["window_s"])
+    if why and cause is None:
+        cause = "reference_incomplete"
     if not why and hrmax is None:
-        why = "no maximum heart rate (with its origin) in the wearer assignment"
+        why, cause = "no maximum heart rate (with its origin) in the wearer assignment", "wearer_or_baseline"
+    if not why and rest is None:
+        why, cause = "the assigned baseline has too few heart-rate values: no resting heart rate", "wearer_or_baseline"
     if not why and hrmax <= rest:
-        why = "the maximum heart rate is not above the resting baseline"
+        why, cause = "the maximum heart rate is not above the resting baseline", "wearer_or_baseline"
     if not why and (al is None or al.get("basis") not in ("capture_time_mapping", "operator_estimate")):
         why = ("no stated camera clock alignment: heart rate and camera speed cannot be paired" if al is None else
                f"the camera clock reference is {al.get('basis')}: not capture time, so heart rate and camera speed cannot be paired")
+        cause = "clock_alignment"
     if not why and al.get("uncertainty_s") is not None and al["uncertainty_s"] > f["alignment_tolerance_s"]:
-        why = f"camera clock uncertainty {al['uncertainty_s']} s exceeds the tolerance {f['alignment_tolerance_s']} s"
+        why, cause = f"camera clock uncertainty {al['uncertainty_s']} s exceeds the tolerance {f['alignment_tolerance_s']} s", "clock_alignment"
     if why:
-        return {**base, **_unavailable(why)}
+        return {**base, **_unavailable(why, cause=cause)}
     edges = list(f["band_edges_mps"])
     ctx = timedelta(seconds=f["context_s"])
+    excl_iv = [b for b in cam_breaks if isinstance(b, tuple)]
+    invalid = sorted(b for b in cam_breaks if not isinstance(b, tuple))
 
     def band(v):
         i = bisect.bisect_right(edges, v) - 1
@@ -476,17 +488,31 @@ def _hr_speed_matched(inp, f, phys, track, cam_breaks, gap, vest_ok, ref_ok, r0,
 
     def pairs(a, b):
         res, no_ctx = {}, 0
-        for h in _window(phys, a, b):
-            cov, dist = _covered(_window(track, h.timestamp - ctx, h.timestamp), gap, lambda s: s.speed_mps, cam_breaks)
+        lost = {"near_test_sprint": 0, "camera_identity_uncertain": 0, "camera_gap": 0, "outside_speed_bands": 0}
+        hs = _window(phys, a, b)
+        for h in hs:
+            c0 = h.timestamp - ctx
+            cov, dist = _covered(_window(track, c0, h.timestamp), gap, lambda s: s.speed_mps, cam_breaks)
             if cov < f["context_min_coverage"] * f["context_s"]:
                 no_ctx += 1
+                if any(x0 < h.timestamp and x1 > c0 for x0, x1 in excl_iv):
+                    lost["near_test_sprint"] += 1
+                elif bisect.bisect_right(invalid, h.timestamp) > bisect.bisect_right(invalid, c0):
+                    lost["camera_identity_uncertain"] += 1
+                else:
+                    lost["camera_gap"] += 1
                 continue
             k = band(dist / cov)
             if k is not None:
                 res.setdefault(k, []).append(h.heart_rate_bpm)
-        return res, no_ctx
-    ref, ref_skip = pairs(r0, r1)
-    rec, rec_skip = pairs(t0, T)
+            else:
+                lost["outside_speed_bands"] += 1
+        hr_cov, _ = _covered(hs, gap)
+        acc = {"window_s": round((b - a).total_seconds(), 3), "heart_rate_samples": len(hs), "heart_rate_covered_s": round(hr_cov, 1),
+               "paired": sum(len(v) for v in res.values()), "lost": lost}
+        return res, no_ctx, acc
+    ref, ref_skip, ref_acc = pairs(r0, r1)
+    rec, rec_skip, rec_acc = pairs(t0, T)
     n_rec = sum(len(v) for v in rec.values())
     bands = []
     for k in sorted(set(ref) | set(rec)):
@@ -500,19 +526,44 @@ def _hr_speed_matched(inp, f, phys, track, cam_breaks, gap, vest_ok, ref_ok, r0,
     share = sum(x["recent_pairs"] for x in matched) / n_rec if n_rec else 0.0
     base.update(window={"start": iso(t0), "end": iso(T)}, bands=bands,
                 pairs={"recent": n_rec, "reference": sum(len(v) for v in ref.values()), "without_movement_context": ref_skip + rec_skip},
-                matched_share_of_recent=round(share, 3))
-    if n_rec < f["min_pairs_per_band"]:
-        return {**base, **_unavailable(f"too few recent heart-rate samples with a movement context ({n_rec}; needs {f['min_pairs_per_band']})")}
-    if share < f["min_matched_share"]:
-        uncovered = [x for x in bands if "excess_bpm" not in x and x["recent_pairs"]]
-        desc = ", ".join(f"{x['band_mps'][0]:g}-{x['band_mps'][1]:g} m/s ({x['recent_pairs']} recent, {x['reference_pairs']} reference)" for x in uncovered)
-        return {**base, **_unavailable(f"the reference does not cover this kind of movement: only {share:.0%} of recent samples fall in speed bands "
-                                       f"the reference also has (needs {f['min_matched_share']:.0%}); not matched: {desc}")}
+                matched_share_of_recent=round(share, 3), accounting={"reference": ref_acc, "recent": rec_acc})
+    if n_rec < f["min_pairs_per_band"] or share < f["min_matched_share"]:
+        if n_rec < f["min_pairs_per_band"]:
+            why, default = f"too few recent heart-rate samples with a movement context ({n_rec}; needs {f['min_pairs_per_band']})", "too_few_recent"
+        else:
+            uncovered = [x for x in bands if "excess_bpm" not in x and x["recent_pairs"]]
+            desc = ", ".join(f"{x['band_mps'][0]:g}-{x['band_mps'][1]:g} m/s ({x['recent_pairs']} recent, {x['reference_pairs']} reference)" for x in uncovered)
+            why, default = (f"the reference does not cover this kind of movement: only {share:.0%} of recent samples fall in speed bands "
+                            f"the reference also has (needs {f['min_matched_share']:.0%}); not matched: {desc}"), "not_comparable"
+        cause, lead = matched_data_loss(f, ref_acc, rec_acc)
+        return {**base, **_unavailable(why if lead is None else f"{lead}; {why}", cause=cause or default)}
     excess = sum(x["excess_bpm"] * x["recent_pairs"] for x in matched) / sum(x["recent_pairs"] for x in matched)
     frac = excess / (hrmax - rest)
     return {**base, "available": True, "measure": {"excess_bpm": round(excess, 2), "excess_fraction_of_reserve": round(frac, 4)},
             "reference": {"rest_hr_bpm": rest, "hr_max_bpm": hrmax},
             "value": round(_clip(100 * frac / f["hundred_at_reserve_fraction"]), 2)}
+
+
+LOSS_LABELS = {"near_test_sprint": "inside or next to a timed test sprint (left out by design)",
+               "camera_identity_uncertain": "low-confidence or predicted camera tracking (identity uncertain)",
+               "camera_gap": "no camera tracking (gap)", "outside_speed_bands": "movement outside every speed band"}
+
+
+def matched_data_loss(f: dict, ref_acc: dict, rec_acc: dict) -> tuple[str | None, str | None]:
+    """Why hr_speed_matched lacks comparable pairs, when the cause is lost data rather than a reference that never
+    covered the movement: (cause, sentence) or (None, None). Explanation only; it never changes whether the feature is
+    available. Heart rate counts as missing when it covers less than context_min_coverage of a window (the feature's own
+    coverage threshold); camera or test-sprint losses count when they removed more heart-rate samples than were paired."""
+    for name, a in (("reference", ref_acc), ("recent", rec_acc)):
+        if a["heart_rate_covered_s"] < f["context_min_coverage"] * a["window_s"]:
+            return "missing_heart_rate", (f"heart rate is missing in the {name} window (covered {a['heart_rate_covered_s']:g} of {a['window_s']:g} s, "
+                                          f"{a['heart_rate_samples']} samples)")
+    for name, a in (("reference", ref_acc), ("recent", rec_acc)):
+        lost = {k: v for k, v in a["lost"].items() if k != "outside_speed_bands"}
+        k = max(lost, key=lambda x: lost[x])
+        if lost[k] > a["paired"]:
+            return k, f"most {name} heart-rate samples have no usable movement context: {lost[k]} of {a['heart_rate_samples']} {LOSS_LABELS[k]}"
+    return None, None
 
 
 def freshness(sel: dict, T: datetime, prof: dict) -> dict:

@@ -81,6 +81,10 @@ class StudyEntryCreate(AthletrixModel):
     calibration_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     clock_references: list[ClockReference] = Field(default_factory=list, max_length=4)
     planned_rounds: int | None = Field(None, ge=1, le=100)
+    study_manifest_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$", description="session: SHA-256 of the study manifest file frozen for this session. "
+                                              "The engine records it with its own receipt time, so the report can verify that the same manifest was fixed before any outcome.")
+    study_manifest_profile_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$", description="session: the profile_sha256 the manifest names; the engine refuses the "
+                                                      "session when it differs from the profile it freezes.")
     # wearer
     participant_code: str | None = Field(None, pattern=r"^[A-Z]{1,3}[0-9]{1,3}$", description="Pseudonymous code such as P1; never a name.")
     device_id: str | None = Field(None, min_length=1, max_length=128)
@@ -133,6 +137,10 @@ class StudyEntryCreate(AthletrixModel):
         if k == "sprint_result" and self.start_pts_s is not None and self.finish_pts_s is not None and self.time_s is not None \
                 and abs((self.finish_pts_s - self.start_pts_s) - self.time_s) > 0.002:
             raise ValueError("time_s must equal finish_pts_s - start_pts_s")
+        if (self.study_manifest_sha256 or self.study_manifest_profile_sha256) and k != "session":
+            raise ValueError("study_manifest_sha256 belongs to the session entry")
+        if (self.study_manifest_sha256 is None) != (self.study_manifest_profile_sha256 is None):
+            raise ValueError("a recorded study manifest needs both study_manifest_sha256 and the profile it names (study_manifest_profile_sha256)")
         if self.partial_reason and k != "round_start":
             raise ValueError("partial_reason belongs to a round_start")
         if self.confirms_prediction_id and k != "sprint_start":

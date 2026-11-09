@@ -18,6 +18,12 @@ CASES
   clock_uncertain      same_work_drift, but the stated camera clock uncertainty is 2 s
   clock_offset_hidden  same_work_drift, but the camera clock is really 20 s off while 0.04 s is stated
   camera_missing       same_work_drift, no camera samples in the recent window
+CHALLENGE CASES (no drift: anything raised is the method misleading, not fatigue)
+  stop_start_short     2 s at 5.0 m/s, 4 s at 1.5 m/s (same 2.67 m/s average as the steady reference)
+  hr_lingers           running at 3.4 m/s, then an abrupt slowdown to 1.0 m/s for the last 45 s of the recent window
+  sharp_change         slow 1.0 m/s, then a step to 3.4 m/s for the last 60 s (the control)
+  sharp_change_offset_5s  the same with the camera clock really 5 s off while 0.04 s is stated (hidden)
+  sharp_change_uncertain  the same with a stated clock uncertainty of 2 s
 Each is scored with the FICTIONAL development profile (combined uses hr_per_speed) and the EXPERIMENTAL profile
 (combined uses hr_speed_matched); everything else is identical.
 """
@@ -50,6 +56,14 @@ def steady(v):
 
 def stop_start(t):
     return 6.0 if (t % 15) < 5 else 1.0
+
+
+def stop_start_short(t):   # 2 s at 5.0 m/s, 4 s at 1.5 m/s: the same 2.67 m/s average, starting and stopping every 6 s
+    return 5.0 if (t % 6) < 2 else 1.5
+
+
+def slows_at(t_slow, fast, slow):   # hard running, then an abrupt slowdown near the end of the recent window
+    return lambda t: fast if t < t_slow else slow
 
 
 def mixed_ref(t):          # the reference period: jogging and running, optionally with slow stretches
@@ -97,6 +111,12 @@ CASES = {
     "clock_uncertain": dict(speed_ref=mixed_ref, speed_recent=mixed_ref, drift_bpm=12.0, alignment_unc=2.0),
     "clock_offset_hidden": dict(speed_ref=mixed_ref, speed_recent=mixed_ref, drift_bpm=12.0, cam_offset_s=20.0),
     "camera_missing": dict(speed_ref=mixed_ref, speed_recent=mixed_ref, drift_bpm=12.0, camera_recent=False),
+    # challenge cases (added 2026-11-09 to look for where the experimental method misleads; no drift in any of them)
+    "stop_start_short": dict(speed_ref=steady(2.67), speed_recent=stop_start_short),
+    "hr_lingers": dict(speed_ref=mixed_ref_with_slow, speed_recent=slows_at(375, 3.4, 1.0)),
+    "sharp_change": dict(speed_ref=mixed_ref_with_slow, speed_recent=slows_at(360, 1.0, 3.4)),
+    "sharp_change_offset_5s": dict(speed_ref=mixed_ref_with_slow, speed_recent=slows_at(360, 1.0, 3.4), cam_offset_s=5.0),
+    "sharp_change_uncertain": dict(speed_ref=mixed_ref_with_slow, speed_recent=slows_at(360, 1.0, 3.4), alignment_unc=2.0),
 }
 EXPECTED = {   # what a sensible heart-rate-vs-movement feature should do (written before running the comparison)
     "harder_work": "low, or not enough data if the reference never reached that speed",
@@ -107,6 +127,11 @@ EXPECTED = {   # what a sensible heart-rate-vs-movement feature should do (writt
     "clock_uncertain": "not enough data: the clocks cannot be paired",
     "clock_offset_hidden": "close to same_work_drift (the drift is real); the offset itself cannot be detected from the data",
     "camera_missing": "not enough data (and the combined estimate unavailable, never vest-only under the combined label)",
+    "stop_start_short": "low: same average speed as the steady reference, no drift (this simulator's heart rate has no extra cost for accelerations)",
+    "hr_lingers": "low: heart rate is still high from the running just before the slowdown, which is lag, not fatigue",
+    "sharp_change": "low: a step from slow to hard running, no drift (the control for the next two cases)",
+    "sharp_change_offset_5s": "close to sharp_change; the hidden 5 s offset cannot be detected from the two signals",
+    "sharp_change_uncertain": "not enough data: the stated clock uncertainty (2 s) is above the tolerance",
 }
 
 
@@ -121,7 +146,12 @@ def run_case(name, spec, prof_path):
     feat = "hr_speed_matched" if "hr_speed_matched" in p["candidates"]["combined"]["weights"] else "hr_per_speed"
     f = r["features"][feat]
     c = r["candidates"]["combined"]
-    return {"feature": feat, "feature_value": f.get("value"), "feature_reason": None if f.get("available") else f.get("reason"),
+    pr = f.get("pairs") or {}
+    if feat == "hr_speed_matched":
+        cov = (f"{f['matched_share_of_recent']:.0%} of {pr.get('recent', 0)} recent pairs in comparable bands" if "matched_share_of_recent" in f else "not paired")
+    else:
+        cov = f"{pr.get('recent', 0)} recent / {pr.get('reference', 0)} reference pairs" if pr else "not paired"
+    return {"feature": feat, "feature_value": f.get("value"), "feature_reason": None if f.get("available") else f.get("reason"), "coverage": cov,
             "measure": f.get("measure"), "combined": c["value"], "combined_reason": None if c["available"] else c["reasons"][0],
             "vest_only": r["candidates"]["vest_only"]["value"], "camera_only": r["candidates"]["camera_only"]["value"]}
 
@@ -134,12 +164,13 @@ def main(argv=None, out=print) -> int:
     for name, spec in CASES.items():
         rows.append({"case": name, "expected": EXPECTED[name], "current": run_case(name, spec, OLD), "experimental": run_case(name, spec, NEW)})
     L = ["# Heart rate against movement: current vs EXPERIMENTAL (FICTIONAL cases)", "",
-         "| case | what should happen | current hr_per_speed | current combined | experimental hr_speed_matched | experimental combined |", "|---|---|---|---|---|---|"]
+         "| case | what should happen | current hr_per_speed | usable (current) | current combined | experimental hr_speed_matched | usable (experimental) | experimental combined |",
+         "|---|---|---|---|---|---|---|---|"]
     fmt = lambda x, why: (f"{x:g}" if x is not None else "not available") + (f" ({why[:90]})" if why else "")  # noqa: E731
     for r in rows:
         o, n = r["current"], r["experimental"]
-        L.append(f"| {r['case']} | {r['expected']} | {fmt(o['feature_value'], o['feature_reason'])} | {fmt(o['combined'], o['combined_reason'])} | "
-                 f"{fmt(n['feature_value'], n['feature_reason'])} | {fmt(n['combined'], n['combined_reason'])} |")
+        L.append(f"| {r['case']} | {r['expected']} | {fmt(o['feature_value'], o['feature_reason'])} | {o['coverage']} | {fmt(o['combined'], o['combined_reason'])} | "
+                 f"{fmt(n['feature_value'], n['feature_reason'])} | {n['coverage']} | {fmt(n['combined'], n['combined_reason'])} |")
     L += ["", "Fictional cases only: they show behaviour, not accuracy on athletes."]
     for line in L:
         out(line)

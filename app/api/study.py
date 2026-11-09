@@ -21,6 +21,7 @@ from app.core.clock import MAX_FUTURE_TIMESTAMP_SKEW
 from app.core.config import get_settings
 from app.core.fatigue import RULES_VERSION, FatigueProfileError, ScoreInputs, Wearer, iso, parse_profile, score
 from app.core.knowledge import baselines_as_of
+from app.core.reference_coverage import reference_coverage
 from app.db import get_database
 from app.models.recording import Recording
 from app.models.study import CONFIRM_MAX_AGE_S, PROSPECTIVE_TOLERANCE_S, StudyEntry, StudyEntryCreate
@@ -306,6 +307,9 @@ def add_study_entry(recording_id: str, body: StudyEntryCreate, response: Respons
             except FatigueProfileError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             profile = {"text": text, "sha256": sha, "version": p["version"], "fictional": p["fictional"]}
+        if body.study_manifest_profile_sha256 and body.study_manifest_profile_sha256 != (profile or {}).get("sha256"):
+            raise HTTPException(status_code=422, detail=f"the study manifest names profile {body.study_manifest_profile_sha256[:12]}, but this engine would freeze "
+                                                        f"{((profile or {}).get('sha256') or 'no profile')[:12]}: configure the declared profile before starting the session")
     if body.kind == "wearer" and not body.end:
         b = [x for x in baseline_store.list(body.athlete_id) if x.id == body.baseline_id]
         if not b:
@@ -504,6 +508,7 @@ def pilot_view(recording_id: str, at: str | None = None, trend_step_s: int = Que
         return {**base, "wearer": {"athlete_id": w.athlete_id, "participant_code": w.participant_code, "device_id": w.device_id, "since": iso(live[0]["start"])},
                 "last_saved_prediction": last, "readiness": readiness(rec, entries, w.athlete_id, t, cur_inp, now if cur_inp is not None else None) if at is None and rec.stopped_at is None else None,
                 "estimate": now, "trend": trend, "newest_sample": newest,
+                "reference_coverage": reference_coverage(now, p) if fz is not None else None,
                 "newest_receipt": max((r["received_at"] for r in recs), default=None)}
 
 

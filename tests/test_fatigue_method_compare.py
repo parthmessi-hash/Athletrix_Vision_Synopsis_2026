@@ -69,3 +69,28 @@ def test_test_sprint_readings_never_feed_the_experimental_feature():
     clean = run(keep(phys), keep(track))
     hot = run(keep(phys) + hot_p, keep(track) + hot_t)
     assert clean["available"] and hot["value"] == clean["value"] and hot["measure"] == clean["measure"]
+
+
+def test_challenge_cases_are_reported_as_they_are_including_the_lingering_heart_rate_limitation():
+    """No drift in any challenge case. These pin the behaviour found on 2026-11-09, including where the experimental
+    method misleads; they are not targets to tune towards."""
+    old, new = run("stop_start_short")
+    assert old["feature_value"] < 25 and new["feature_value"] < 25, "same average speed, starts and stops every 6 s: low in both"
+    old, new = run("hr_lingers")
+    assert new["feature_value"] > 50 and old["feature_value"] < 25, (
+        "KNOWN LIMITATION: heart rate still high after an abrupt slowdown reads as raised in the experimental feature "
+        "(the 30 s movement context is shorter than heart-rate recovery)")
+    _, ctl = run("sharp_change")
+    _, off = run("sharp_change_offset_5s")
+    assert ctl["feature_value"] < 10 and abs(off["feature_value"] - ctl["feature_value"]) < 10, "a hidden 5 s offset changes little here, and nothing detects it"
+    old, new = run("sharp_change_uncertain")
+    assert old["combined"] is None and new["combined"] is None and "uncertainty" in new["feature_reason"]
+    for case in fmc.CASES:
+        assert "coverage" in fmc.run_case(case, fmc.CASES[case], fmc.NEW)
+
+
+def test_a_camera_loss_is_not_explained_as_a_reference_that_lacks_the_movement():
+    """Defect fixed 2026-11-09: with the camera gone for most of the recent window, the reason used to say the reference
+    did not cover the movement. The value and availability are unchanged; only the explanation is."""
+    _, new = run("camera_missing")
+    assert new["feature_value"] is None and new["feature_reason"].startswith("most recent heart-rate samples have no usable movement context")

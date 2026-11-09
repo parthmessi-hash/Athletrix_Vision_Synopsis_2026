@@ -444,7 +444,7 @@ def run_pilot(args, out, wait_for_interrupt, demo_factory) -> int:
         out("  blind timing sheet, misses one save (P2 round 1), marks one round invalid (P1 round 3), drops the strap (P2 round 2),")
         out("  loses the camera before a save (P3 round 2) and restarts the engine after P1. You can press Save score yourself between rounds.")
         api = pr.Api(demo.backend_url, httpx.Client(timeout=15.0))
-        ns = types.SimpleNamespace(mode="wall", rounds=args.rounds, round_s=70.0, sprint_s=4.0, rest_s=5.0, dropout_s=20.0, duration_min=0.0, profile=pr.PROFILE,
+        ns = types.SimpleNamespace(mode="wall", rounds=args.rounds, round_s=70.0, sprint_s=4.0, rest_s=5.0, dropout_s=20.0, duration_min=0.0, profile=pr.PROFILE, study_manifest=pr.STUDY_MANIFEST,
                                    rest_id=prepared["rest"], out=out_dir)
 
         def restart():
